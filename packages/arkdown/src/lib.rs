@@ -2202,7 +2202,8 @@ pub struct BuildConfig {
   /// active only for verbose and trace.
   #[napi(ts_type = "'normal' | 'default' | 'verbose' | 'false' | 'trace'")]
   pub analyze: Option<String>,
-  /// Explicit ArkTS compiler language. Omitted means ArkTS 1.1.
+  /// Explicit ArkTS compiler language override. Omitted uses the selected
+  /// product's `arkTSVersion`, defaulting to ArkTS 1.1.
   #[napi(ts_type = "'1.1' | '1.2'")]
   pub arkts_version: Option<String>,
   pub module: Option<String>,
@@ -2233,6 +2234,10 @@ pub struct BuildConfig {
   /// Match `ignoreCrossplatformCheck`: emit 11706007 as a warning instead of an error.
   pub ignore_crossplatform_check: Option<bool>,
   pub cache: Option<bool>,
+  /// Node executable of the JavaScript process that owns this build. The JS
+  /// service wrapper injects `process.execPath`; SDK subprocesses must not
+  /// silently select a different Node version from PATH.
+  pub node_executable: Option<String>,
   #[napi(ts_type = "string | string[]")]
   pub compile_plugin_path: Option<String>,
   #[napi(ts_type = "string | string[]")]
@@ -2346,6 +2351,7 @@ pub fn build<'a>(
     is_crossplatform,
     ignore_crossplatform_check,
     cache,
+    node_executable,
     compile_plugin_path: _,
     hvigor_plugin_file: _,
   } = config;
@@ -2362,11 +2368,13 @@ pub fn build<'a>(
         action.as_deref().unwrap_or("assemble")
       ))
     })?,
-    arkts_language_version: arkts_version.as_deref().unwrap_or("1.1").parse().map_err(
-      |error: arkdown_core::ParseArktsLanguageVersionError| {
+    arkts_language_version: arkts_version
+      .as_deref()
+      .map(str::parse)
+      .transpose()
+      .map_err(|error: arkdown_core::ParseArktsLanguageVersionError| {
         napi::Error::from_reason(error.to_string())
-      },
-    )?,
+      })?,
     analyze: arkdown_build::request::AnalyzeModeChoice::from_name(
       analyze.as_deref().unwrap_or("normal"),
     )
@@ -2398,6 +2406,7 @@ pub fn build<'a>(
     is_crossplatform: is_crossplatform.unwrap_or(false),
     ignore_crossplatform_check: ignore_crossplatform_check.unwrap_or(false),
     cache: cache.unwrap_or(true),
+    node_executable: node_executable.map(std::path::PathBuf::from),
   };
 
   // 2. Spawn the async build and return a JS Promise.
@@ -2441,7 +2450,7 @@ pub fn parse_plugin_ast(
 #[derive(Debug, Clone, Default)]
 struct PackageBuildArgs {
   action: arkdown_build::request::BuildAction,
-  arkts_language_version: arkdown_core::ArktsLanguageVersion,
+  arkts_language_version: Option<arkdown_core::ArktsLanguageVersion>,
   analyze: arkdown_build::request::AnalyzeModeChoice,
   build_target_name: Option<String>,
   build_version: Option<String>,
@@ -2465,6 +2474,7 @@ struct PackageBuildArgs {
   is_crossplatform: bool,
   ignore_crossplatform_check: bool,
   cache: bool,
+  node_executable: Option<std::path::PathBuf>,
 }
 
 async fn run_build(
@@ -2529,7 +2539,7 @@ async fn run_build(
     keep_dependency: true,
     hvigor_properties: Default::default(),
     parameter_file_override: None,
-    node_executable: None,
+    node_executable: package_args.node_executable,
     hvigor_cache_dir: Some(project_path.join(".hvigor")),
   };
 

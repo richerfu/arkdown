@@ -524,7 +524,10 @@ impl<'a> StartupConfigInput<'a> {
 
     fn is_bytecode_har_package(pkg_dir: &Path) -> bool {
         let layout = ProfileModuleLayout::new(pkg_dir);
-        if layout.ets_modules_abc().is_file() || layout.index_abc().is_file() {
+        if layout.ets_modules_abc().is_file()
+            || layout.ets_modules_static_abc().is_file()
+            || layout.index_abc().is_file()
+        {
             return true;
         }
         let package_json = layout.oh_package_json5();

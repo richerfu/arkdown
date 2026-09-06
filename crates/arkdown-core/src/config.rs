@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::arkts::ArktsLanguageVersion;
+
 /// Whether `runtime_os` selects the HarmonyOS (HMS) toolchain variant.
 ///
 /// Canonical predicate for every runtime-OS branch in the workspace. Anything
@@ -159,6 +161,10 @@ pub struct ProductConfig {
     /// missing value preserves the project/module-derived default names.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_name: Option<String>,
+    /// Product-level `arkTSVersion`; hvigor passes this value to the compiler
+    /// configuration for the selected target.
+    #[serde(default)]
+    pub arkts_version: ArktsLanguageVersion,
     pub bundle_name: String,
     pub compatible_sdk_version: String,
     pub compatible_sdk_version_stage: Option<String>,
@@ -824,14 +830,26 @@ pub struct SdkConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StaticArktsSdkLayout {
     pub root: PathBuf,
+    /// ArkTS 1.1 declarations converted for static/dynamic interop.
+    ///
+    /// `driver/build_system/src/init/process_build_config.ts::initInteropSDKInfo`
+    /// derives this sibling from `buildSdkPath` when `interopApiPaths` is
+    /// empty. Keeping the source-defined path in the SDK layout lets callers
+    /// pass it explicitly when the component is installed.
+    pub dynamic_interop: PathBuf,
     pub driver_entry: PathBuf,
     pub panda_sdk: PathBuf,
-    pub es2panda: PathBuf,
+    pub libarkts_entry: PathBuf,
+    pub es2panda_addon_candidates: [PathBuf; 3],
     pub abc_linker: PathBuf,
     pub dependency_analyzer: PathBuf,
+    pub ark_guard: PathBuf,
+    pub etsstdlib_abc: PathBuf,
+    pub stdlib: PathBuf,
     pub ui_syntax_plugin: PathBuf,
     pub ui_plugin: PathBuf,
     pub memo_plugin: PathBuf,
+    pub interop_plugin: PathBuf,
     pub api: PathBuf,
     pub kits: PathBuf,
     pub arkts: PathBuf,
@@ -856,45 +874,78 @@ fn default_sdk_component_api_version() -> u32 {
 }
 
 impl SdkConfig {
-    /// Derive the `ets/` root directory from `ets_loader_path`.
+    /// Derive the dynamic ETS component directory from `ets_loader_path`.
     ///
-    /// `ets_loader_path` is e.g. `<sdk>/ets/build-tools/ets-loader`, so the
-    /// ETS root is two levels up: `<sdk>/ets`.
-    fn ets_root(&self) -> Option<&std::path::Path> {
+    /// Legacy SDKs use `<sdk>/ets/build-tools/ets-loader`; SDKs generated with
+    /// `sdk_build_arkts=true` use
+    /// `<sdk>/ets/dynamic/build-tools/ets-loader`.
+    fn dynamic_ets_root(&self) -> Option<&std::path::Path> {
         self.ets_loader_path.parent()?.parent()
+    }
+
+    /// Return the directory containing the dynamic and static ETS components.
+    fn ets_container_root(&self) -> Option<&std::path::Path> {
+        let dynamic_root = self.dynamic_ets_root()?;
+        if dynamic_root.file_name() == Some(std::ffi::OsStr::new("dynamic")) {
+            dynamic_root.parent()
+        } else {
+            Some(dynamic_root)
+        }
     }
 
     /// Derive the SDK component root from `ets_loader_path`.
     ///
-    /// `ets_loader_path` is e.g. `<sdk>/ets/build-tools/ets-loader`, so the
-    /// component root is three levels up: `<sdk>`.
-    fn component_root(&self) -> Option<&std::path::Path> {
-        self.ets_root()?.parent()
+    /// The component root is `<sdk>` for both flattened and split ETS layouts.
+    pub fn component_root(&self) -> Option<&std::path::Path> {
+        self.ets_container_root()?.parent()
     }
 
-    /// Derive the ArkTS 1.2 static SDK layout selected by the explicit
-    /// `--arkts-version 1.2` build mode.
+    /// Derive the ArkTS 1.2 static SDK layout selected by the effective product
+    /// language version or an explicit build-request override.
     pub fn static_arkts_layout(&self) -> Option<StaticArktsSdkLayout> {
-        let root = self.ets_root()?.join("static");
+        let root = self.ets_container_root()?.join("static");
         let build_tools = root.join("build-tools");
         let panda_sdk = build_tools.join("ets2panda");
         let panda_bin = panda_sdk.join("bin");
+        let panda_lib = panda_sdk.join("lib");
+        let libarkts = build_tools.join("libarkts");
+        let libarkts_lib = libarkts.join("lib");
         let ui_plugins = build_tools.join("ui-plugins").join("lib");
         Some(StaticArktsSdkLayout {
             root: root.clone(),
+            dynamic_interop: self
+                .ets_container_root()?
+                .join("dynamic")
+                .join("build-tools")
+                .join("interop"),
             driver_entry: build_tools
                 .join("driver")
                 .join("build-system")
                 .join("dist")
                 .join("entry.js"),
             panda_sdk,
-            es2panda: panda_bin.join(StaticArktsSdkLayout::executable_name("es2panda")),
+            libarkts_entry: libarkts_lib.join("libarkts.js"),
+            // `libarkts/src/Es2pandaNativeModule.ts::findNativeModule`
+            // probes these directories, in this order, relative to `lib/`.
+            es2panda_addon_candidates: [
+                libarkts.join("native").join("build").join("es2panda.node"),
+                libarkts.join("build").join("native").join("es2panda.node"),
+                libarkts
+                    .join("build")
+                    .join("native")
+                    .join("build")
+                    .join("es2panda.node"),
+            ],
             abc_linker: panda_bin.join(StaticArktsSdkLayout::executable_name("ark_link")),
             dependency_analyzer: panda_bin
                 .join(StaticArktsSdkLayout::executable_name("dependency_analyzer")),
+            ark_guard: panda_bin.join(StaticArktsSdkLayout::executable_name("ark_guard")),
+            etsstdlib_abc: panda_lib.join("etsstdlib.abc"),
+            stdlib: panda_lib.join("stdlib"),
             ui_syntax_plugin: ui_plugins.join("ui-syntax-plugins").join("index"),
             ui_plugin: ui_plugins.join("ui-plugins").join("index"),
             memo_plugin: ui_plugins.join("memo-plugins").join("index"),
+            interop_plugin: ui_plugins.join("interop-plugins").join("index"),
             api: root.join("api"),
             kits: root.join("kits"),
             arkts: root.join("arkts"),
@@ -1040,34 +1091,67 @@ impl SdkConfig {
 
     /// Candidate directories containing `@ohos/*` API declaration files.
     ///
-    /// Returns `["<sdk>/ets/api", "<sdk>/js/api"]` in priority order.
+    /// Returns the dynamic ETS API directory followed by `<sdk>/js/api`.
     pub fn ets_api_dirs(&self) -> Vec<std::path::PathBuf> {
-        let Some(ets_root) = self.ets_root() else {
+        let Some(dynamic_ets_root) = self.dynamic_ets_root() else {
             return vec![];
         };
-        let mut dirs = vec![ets_root.join("api")];
-        if let Some(sdk_root) = ets_root.parent() {
+        let mut dirs = vec![dynamic_ets_root.join("api")];
+        if let Some(sdk_root) = self.component_root() {
             dirs.push(sdk_root.join("js").join("api"));
         }
         dirs
+    }
+
+    /// Candidate API declaration roots for the selected ArkTS frontend.
+    pub fn ets_api_dirs_for(&self, version: ArktsLanguageVersion) -> Vec<std::path::PathBuf> {
+        if version.is_static() {
+            return self
+                .static_arkts_layout()
+                .map(|layout| vec![layout.api])
+                .unwrap_or_default();
+        }
+        self.ets_api_dirs()
     }
 
     /// Candidate directories containing `@kit.*` declaration files.
     ///
     /// Returns `["<sdk>/ets/kits"]`.
     pub fn ets_kits_dirs(&self) -> Vec<std::path::PathBuf> {
-        self.ets_root()
-            .map(|ets_root| vec![ets_root.join("kits")])
+        self.dynamic_ets_root()
+            .map(|dynamic_ets_root| vec![dynamic_ets_root.join("kits")])
             .unwrap_or_default()
+    }
+
+    /// Candidate kit declaration roots for the selected ArkTS frontend.
+    pub fn ets_kits_dirs_for(&self, version: ArktsLanguageVersion) -> Vec<std::path::PathBuf> {
+        if version.is_static() {
+            return self
+                .static_arkts_layout()
+                .map(|layout| vec![layout.kits])
+                .unwrap_or_default();
+        }
+        self.ets_kits_dirs()
     }
 
     /// Candidate directories containing `@arkts.*` declaration files.
     ///
     /// Returns `["<sdk>/ets/arkts"]`.
     pub fn ets_arkts_dirs(&self) -> Vec<std::path::PathBuf> {
-        self.ets_root()
-            .map(|ets_root| vec![ets_root.join("arkts")])
+        self.dynamic_ets_root()
+            .map(|dynamic_ets_root| vec![dynamic_ets_root.join("arkts")])
             .unwrap_or_default()
+    }
+
+    /// Candidate `@arkts.*` declaration roots for the selected frontend.
+    pub fn ets_arkts_dirs_for(&self, version: ArktsLanguageVersion) -> Vec<std::path::PathBuf> {
+        if version.is_static() {
+            return self
+                .static_arkts_layout()
+                .map(|layout| vec![layout.arkts])
+                .unwrap_or_default();
+        }
+        self.ets_arkts_dirs()
     }
 }
 

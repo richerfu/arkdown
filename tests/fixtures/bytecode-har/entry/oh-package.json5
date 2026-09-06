@@ -3,7 +3,7 @@
   name: "bytecode-har",
   version: "1.0.0",
   description: "ByteCode HAR producer",
-  main: "src/main/ets/Index.ets",
+  main: "Index.ets",
   author: "",
   license: "",
   dependencies: {}

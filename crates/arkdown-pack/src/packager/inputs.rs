@@ -62,6 +62,10 @@ pub struct PackInput {
     /// Path to the SDK frontend's merged ABC. Dynamic ArkTS produces
     /// `modules.abc`; static ArkTS produces `modules_static.abc`.
     pub abc_path: PathBuf,
+    /// Other merged ABCs produced for the same module. ArkTS 1.2 hybrid
+    /// modules package dynamic `modules.abc` and static
+    /// `modules_static.abc` together, matching Hvigor's `--ets-path` input.
+    pub additional_abc_paths: Vec<PathBuf>,
     /// Path to `resources.index` produced by arkdown-resource.
     pub resources_index: PathBuf,
     /// Path to the processed `module.json` produced by arkdown-profile.

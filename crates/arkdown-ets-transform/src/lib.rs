@@ -53,8 +53,8 @@ pub use rolldown_plan::{
     TransformEntrySourceId,
 };
 pub use source::{
-    CompileArktsSourceType, SourceClassifier, TransformResolvedStaticModule,
-    TransformSourceSnapshot,
+    ArktsSourceLanguageDetector, CompileArktsSourceType, SourceClassifier,
+    TransformResolvedStaticModule, TransformSourceSnapshot,
 };
 pub use sys_resource::SystemResourceReferenceLoader;
 pub use transform::source_emit::{HvigorTypescriptPrintOutput, HvigorTypescriptPrinter};

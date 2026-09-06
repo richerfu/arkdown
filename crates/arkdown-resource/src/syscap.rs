@@ -55,13 +55,11 @@ impl<'a> SyscapTransform<'a> {
         })?;
         let rpcid_json = self.input.output_dir.join("rpcid.json");
         let rpcid_sc = self.input.output_dir.join("rpcid.sc");
-        let rpcid = serde_json::to_vec(&serde_json::json!({
-          "apiVersion": self.input.compile_api_version,
-          "syscap": capabilities,
-        }))
-        .map_err(|source| SyscapTransformError::Json {
-            module_name: self.input.module_name.to_string(),
-            source,
+        let rpcid = serde_json::to_vec(&self.rpcid_value(&capabilities)).map_err(|source| {
+            SyscapTransformError::Json {
+                module_name: self.input.module_name.to_string(),
+                source,
+            }
         })?;
         fs_err::write(&rpcid_json, rpcid).map_err(|source| SyscapTransformError::Io {
             operation: "write rpcid input",
@@ -89,6 +87,15 @@ impl<'a> SyscapTransform<'a> {
             return Err(SyscapTransformError::MissingOutput { path: rpcid_sc });
         }
         Ok(Some(rpcid_sc))
+    }
+
+    fn rpcid_value(&self, capabilities: &BTreeSet<String>) -> Value {
+        serde_json::json!({
+          // `developtools/syscap_codec/src/syscap_tool.c::FillOsCapLength`
+          // reads this exact snake-case field from the RPCID input.
+          "api_version": self.input.compile_api_version,
+          "syscap": capabilities,
+        })
     }
 
     fn resolve_capabilities(&self) -> Result<BTreeSet<String>, SyscapTransformError> {
@@ -252,6 +259,28 @@ mod tests {
         assert_eq!(
             transform.resolve_capabilities().unwrap(),
             BTreeSet::from(["ProductionOnly".to_string()])
+        );
+    }
+
+    #[test]
+    fn rpcid_input_matches_current_syscap_tool_schema() {
+        let transform = SyscapTransform::new(SyscapTransformInput {
+            runtime_os: "OpenHarmony",
+            module_name: "entry",
+            compile_api_version: 26,
+            tool_path: Path::new("syscap_tool"),
+            output_dir: PathBuf::from("syscap"),
+            is_har: false,
+            device_capabilities: None,
+            custom_syscap: None,
+        });
+        let rpcid = transform.rpcid_value(&BTreeSet::from(["SystemCapability.Base".to_string()]));
+
+        assert_eq!(rpcid.get("api_version"), Some(&Value::from(26)));
+        assert!(rpcid.get("apiVersion").is_none());
+        assert_eq!(
+            rpcid.get("syscap"),
+            Some(&serde_json::json!(["SystemCapability.Base"]))
         );
     }
 }

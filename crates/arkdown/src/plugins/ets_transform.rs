@@ -159,7 +159,12 @@ impl EtsTransformPlugin {
             .as_deref()
             .map(rolldown_sourcemap::OwnedSourceMap::from_json_string)
             .transpose()
-            .map_err(|error| anyhow::anyhow!("ets-transform: invalid source map: {error}"))?
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "ets-transform: invalid source map for '{}': {error}",
+                    args.id
+                )
+            })?
             .map_or(HookTransformOutputMap::Null, |map| {
                 HookTransformOutputMap::Sourcemap(Box::new(map.into_inner()))
             });

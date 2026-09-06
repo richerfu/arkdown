@@ -149,6 +149,8 @@ export interface BuildConfig {
   /** Match `ignoreCrossplatformCheck`: emit 11706007 as a warning instead of an error. */
   ignoreCrossplatformCheck?: boolean
   cache?: boolean
+  /** Node executable injected by the JavaScript service wrapper for SDK subprocesses. */
+  nodeExecutable?: string
   compilePluginPath?: string | string[]
   hvigorPluginFile?: string | string[]
 }

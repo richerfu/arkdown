@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arkdown_core::{is_harmony_os, SdkConfig};
+use arkdown_core::{is_harmony_os, ArktsLanguageVersion, SdkConfig};
 use arkdown_path::lexical_normalize;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -127,11 +127,26 @@ impl SdkSnapshot {
         config: &SdkConfig,
         runtime_os: &str,
     ) -> Result<Self, SdkSnapshotError> {
+        Self::from_config_for_runtime_with_arkts(
+            config,
+            runtime_os,
+            ArktsLanguageVersion::default(),
+        )
+    }
+
+    /// Build from normalized SDK config for one ArkTS language generation.
+    ///
+    /// The split SDK keeps ArkTS 1.1 declarations under `ets/dynamic` and
+    /// ArkTS 1.2 declarations under `ets/static`. Selecting these roots while
+    /// the immutable session snapshot is built prevents later checking and
+    /// transform stages from observing declarations for the wrong language.
+    pub fn from_config_for_runtime_with_arkts(
+        config: &SdkConfig,
+        runtime_os: &str,
+        arkts_language_version: ArktsLanguageVersion,
+    ) -> Result<Self, SdkSnapshotError> {
         let sdk_root = config
-            .ets_loader_path
-            .parent()
-            .and_then(|path| path.parent())
-            .and_then(|path| path.parent())
+            .component_root()
             .map(lexical_normalize)
             .ok_or_else(|| {
                 SdkSnapshotError::InvalidEtsLoaderPath(config.ets_loader_path.clone())
@@ -147,14 +162,18 @@ impl SdkSnapshot {
             config.sdk_component_api_version,
             config.compile_sdk_version.clone(),
         );
-        let component_inventory =
-            SdkComponentInventory::load(config, runtime_os, &snapshot.sdk_root)?;
+        let component_inventory = SdkComponentInventory::load(
+            config,
+            runtime_os,
+            &snapshot.sdk_root,
+            arkts_language_version,
+        )?;
         snapshot.external_api_paths = component_inventory.external_api_paths.into();
         snapshot.global_module_paths = component_inventory.global_module_paths.clone().into();
         snapshot.module_prefixes = component_inventory.module_prefixes.into();
         snapshot.crossplatform_dependencies = component_inventory.crossplatform_dependencies.into();
         snapshot.es2abc_options = Arc::new(SdkEs2abcOptionSnapshot::inspect(&config.es2abc_path));
-        let mut system_capability_roots = config.ets_api_dirs();
+        let mut system_capability_roots = config.ets_api_dirs_for(arkts_language_version);
         system_capability_roots.extend(component_inventory.global_module_paths);
         system_capability_roots.sort();
         system_capability_roots.dedup();
@@ -240,14 +259,21 @@ impl SdkComponentInventory {
         config: &SdkConfig,
         runtime_os: &str,
         primary_component_root: &Path,
+        arkts_language_version: ArktsLanguageVersion,
     ) -> Result<Self, SdkSnapshotError> {
-        let primary_ets_root = primary_component_root.join("ets");
+        let primary_ets_root = config
+            .ets_loader_path
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| {
+                SdkSnapshotError::InvalidEtsLoaderPath(config.ets_loader_path.clone())
+            })?;
+        let mut global_module_paths = config.ets_api_dirs_for(arkts_language_version);
+        global_module_paths.extend(config.ets_arkts_dirs_for(arkts_language_version));
+        global_module_paths.extend(config.ets_kits_dirs_for(arkts_language_version));
+        global_module_paths.retain(|path| path.is_dir());
         let mut inventory = Self {
-            global_module_paths: ["api", "arkts", "kits"]
-                .into_iter()
-                .map(|directory| primary_ets_root.join(directory))
-                .filter(|path| path.is_dir())
-                .collect(),
+            global_module_paths,
             external_api_paths: Vec::new(),
             module_prefixes: ["ohos", "system", "kit", "arkts"]
                 .into_iter()
@@ -270,7 +296,7 @@ impl SdkComponentInventory {
         let mut external_roots = entries
             .filter_map(Result::ok)
             .map(|entry| entry.path().join("ets"))
-            .filter(|root| root != &primary_ets_root && root.join("sdkConfig.json").is_file())
+            .filter(|root| root != primary_ets_root && root.join("sdkConfig.json").is_file())
             .collect::<Vec<_>>();
         external_roots.sort();
 
@@ -411,9 +437,65 @@ struct SdkCrossplatformDependencyConfig {
 mod tests {
     use std::{fs, path::PathBuf};
 
-    use arkdown_core::SdkConfig;
+    use arkdown_core::{ArktsLanguageVersion, SdkConfig};
 
     use super::SdkSnapshot;
+
+    #[test]
+    fn split_arkts_sdk_snapshot_keeps_component_root_and_dynamic_declarations() {
+        let temp = tempfile::tempdir().expect("temporary split SDK");
+        let component_root = temp.path().join("default/openharmony");
+        let dynamic_ets = component_root.join("ets/dynamic");
+        let static_ets = component_root.join("ets/static");
+        let loader = dynamic_ets.join("build-tools/ets-loader");
+        for path in [
+            loader.clone(),
+            dynamic_ets.join("api"),
+            dynamic_ets.join("arkts"),
+            dynamic_ets.join("kits"),
+            static_ets.join("api"),
+            static_ets.join("arkts"),
+            static_ets.join("kits"),
+        ] {
+            fs::create_dir_all(path).expect("split SDK directory");
+        }
+        let config = SdkConfig {
+            ets_loader_path: loader,
+            es2abc_path: PathBuf::new(),
+            restool_path: PathBuf::new(),
+            compile_api_version: 26,
+            sdk_component_api_version: 26,
+            has_rollup_plugin: true,
+            compile_sdk_version: "7.0.0.1".to_string(),
+        };
+
+        let snapshot = SdkSnapshot::from_config(&config).expect("split SDK snapshot");
+
+        assert_eq!(snapshot.sdk_root, component_root);
+        assert_eq!(
+            snapshot.global_module_paths.as_ref(),
+            &[
+                dynamic_ets.join("api"),
+                dynamic_ets.join("arkts"),
+                dynamic_ets.join("kits"),
+            ]
+        );
+
+        let static_snapshot = SdkSnapshot::from_config_for_runtime_with_arkts(
+            &config,
+            "OpenHarmony",
+            ArktsLanguageVersion::V1_2,
+        )
+        .expect("static split SDK snapshot");
+        assert_eq!(
+            static_snapshot.global_module_paths.as_ref(),
+            &[
+                static_ets.join("api"),
+                static_ets.join("arkts"),
+                static_ets.join("kits"),
+            ]
+        );
+    }
 
     #[test]
     fn harmonyos_snapshot_freezes_external_sdk_paths_and_system_capabilities() {

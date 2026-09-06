@@ -11,6 +11,7 @@ use rolldown_plugin::{
     HookLoadArgs, HookLoadOutput, HookLoadReturn, HookResolveIdArgs, HookResolveIdOutput,
     HookResolveIdReturn, HookUsage, Plugin, PluginContext,
 };
+use rustc_hash::FxHashMap;
 
 const HVIGOR_IGNORE_PREFIX: &str = "\0hvigor_ignore_";
 
@@ -36,6 +37,8 @@ pub struct OhosResolvePlugin {
     project_root: PathBuf,
     /// Mirror of [`ResolverConfig::use_normalized_ohm_url`].
     use_normalized_ohm_url: bool,
+    source_redirects: Arc<FxHashMap<PathBuf, PathBuf>>,
+    source_origins: Arc<FxHashMap<PathBuf, PathBuf>>,
 }
 
 impl std::fmt::Debug for OhosResolvePlugin {
@@ -43,6 +46,7 @@ impl std::fmt::Debug for OhosResolvePlugin {
         f.debug_struct("OhosResolvePlugin")
             .field("project_root", &self.project_root)
             .field("use_normalized_ohm_url", &self.use_normalized_ohm_url)
+            .field("source_redirects", &self.source_redirects.len())
             .finish_non_exhaustive()
     }
 }
@@ -72,7 +76,20 @@ impl OhosResolvePlugin {
             resolver,
             project_root,
             use_normalized_ohm_url,
+            source_redirects: Arc::new(FxHashMap::default()),
+            source_origins: Arc::new(FxHashMap::default()),
         }
+    }
+
+    pub fn with_source_redirects(mut self, redirects: Arc<FxHashMap<PathBuf, PathBuf>>) -> Self {
+        self.source_origins = Arc::new(
+            redirects
+                .iter()
+                .map(|(source, bridge)| (bridge.clone(), source.clone()))
+                .collect(),
+        );
+        self.source_redirects = redirects;
+        self
     }
 
     fn resolve_request(
@@ -92,12 +109,22 @@ impl OhosResolvePlugin {
             return Ok(Some(specifier.unresolved_external_output()));
         }
         if specifier.is_absolute_path() {
-            return Ok(None);
+            let path = arkdown_path::lexical_normalize(Path::new(specifier.as_str()));
+            return self
+                .source_redirects
+                .get(&path)
+                .map(|redirect| ResolveHookOutputMapper::local_output(redirect))
+                .transpose();
         }
 
         let importer_path_buf: PathBuf;
         let importer_path: &Path = if let Some(imp) = importer {
-            importer_path_buf = PathBuf::from(imp);
+            let importer = arkdown_path::lexical_normalize(Path::new(imp));
+            importer_path_buf = self
+                .source_origins
+                .get(&importer)
+                .cloned()
+                .unwrap_or(importer);
             &importer_path_buf
         } else {
             self.project_root.as_path()
@@ -109,7 +136,8 @@ impl OhosResolvePlugin {
             resolve_import_kind(import_kind),
         )?;
 
-        let output = ResolveHookOutputMapper::new(&self.project_root).map_resolved(resolved)?;
+        let output = ResolveHookOutputMapper::new(&self.project_root, &self.source_redirects)
+            .map_resolved(resolved)?;
         Ok(Some(output))
     }
 }
@@ -172,11 +200,23 @@ fn resolve_import_kind(kind: ImportKind) -> ResolveImportKind {
 /// | `RemotePackage` | `None` | absolute filesystem path |
 struct ResolveHookOutputMapper<'a> {
     project_root: &'a Path,
+    source_redirects: &'a FxHashMap<PathBuf, PathBuf>,
 }
 
 impl<'a> ResolveHookOutputMapper<'a> {
-    fn new(project_root: &'a Path) -> Self {
-        Self { project_root }
+    fn new(project_root: &'a Path, source_redirects: &'a FxHashMap<PathBuf, PathBuf>) -> Self {
+        Self {
+            project_root,
+            source_redirects,
+        }
+    }
+
+    fn local_output(path: &Path) -> anyhow::Result<HookResolveIdOutput> {
+        Ok(HookResolveIdOutput {
+            id: ArtifactPathSerializer::path_to_slash_string(path)?.into(),
+            external: None,
+            ..Default::default()
+        })
     }
 
     fn map_resolved(&self, resolved: OhosResolvedModule) -> anyhow::Result<HookResolveIdOutput> {
@@ -202,11 +242,9 @@ impl<'a> ResolveHookOutputMapper<'a> {
         } else {
             self.project_root.join(path)
         };
-        Ok(HookResolveIdOutput {
-            id: ArtifactPathSerializer::path_to_slash_string(&path)?.into(),
-            external: None,
-            ..Default::default()
-        })
+        let path = arkdown_path::lexical_normalize(&path);
+        let path = self.source_redirects.get(&path).unwrap_or(&path);
+        Self::local_output(path)
     }
 
     fn map_declaration_file(

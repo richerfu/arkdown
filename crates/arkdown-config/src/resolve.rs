@@ -171,6 +171,15 @@ impl<'a> ArkdownConfigLoader<'a> {
             &root.join("build-profile.json5"),
         )
         .decode()?;
+        let arkts_version = raw_product
+            .arkts_version
+            .as_deref()
+            .unwrap_or("1.1")
+            .parse()
+            .map_err(|error| ConfigError::ValidationError {
+                file: root.join("build-profile.json5"),
+                message: format!("invalid product arkTSVersion: {error}"),
+            })?;
 
         let product = ProductConfig {
             name: raw_product.name,
@@ -178,6 +187,7 @@ impl<'a> ArkdownConfigLoader<'a> {
                 .output
                 .and_then(|output| output.artifact_name)
                 .filter(|name| !name.is_empty()),
+            arkts_version,
             bundle_name,
             compatible_sdk_version: raw_product.compatible_sdk_version.clone(),
             compatible_sdk_version_stage: raw_product.compatible_sdk_version_stage.clone(),
@@ -402,6 +412,50 @@ mod tests {
         assert!(
             matches!(result, Err(ConfigError::FileNotFound(_))),
             "expected FileNotFound, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn selected_product_arkts_version_reaches_the_resolved_config() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project = temp.path().join("project");
+        let sdk = temp.path().join("sdk");
+        std::fs::create_dir_all(project.join("AppScope")).expect("AppScope");
+        std::fs::create_dir_all(project.join(".hvigor/cache")).expect("hvigor cache");
+        std::fs::create_dir_all(sdk.join("ets")).expect("SDK ETS component");
+        std::fs::write(
+            project.join("build-profile.json5"),
+            r#"{
+                app: {
+                    products: [{
+                        name: "default",
+                        arkTSVersion: "1.2",
+                        targetSdkVersion: "26",
+                        compatibleSdkVersion: "23",
+                        runtimeOS: "OpenHarmony",
+                    }],
+                },
+                modules: [],
+            }"#,
+        )
+        .expect("build profile");
+        std::fs::write(
+            project.join("AppScope/app.json5"),
+            r#"{ app: { bundleName: "com.example.static" } }"#,
+        )
+        .expect("app profile");
+        std::fs::write(
+            project.join(".hvigor/cache/project-config.json"),
+            serde_json::json!({ "sdkPath": sdk }).to_string(),
+        )
+        .expect("SDK selection cache");
+
+        let config = load_config(&project, BuildMode::Debug, OutputTarget::Hap, None, None)
+            .expect("resolve ArkTS 1.2 product");
+
+        assert_eq!(
+            config.product.arkts_version,
+            arkdown_core::ArktsLanguageVersion::V1_2
         );
     }
 

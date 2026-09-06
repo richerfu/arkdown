@@ -12,6 +12,7 @@ fn config(project_root: &std::path::Path, build_version: Option<&str>) -> Arkdow
         product: ProductConfig {
             name: "default".to_string(),
             artifact_name: None,
+            arkts_version: Default::default(),
             bundle_name: String::new(),
             compatible_sdk_version: "12".to_string(),
             compatible_sdk_version_stage: None,

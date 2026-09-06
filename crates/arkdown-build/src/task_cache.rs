@@ -523,6 +523,7 @@ mod tests {
             product: ProductConfig {
                 name: "default".to_string(),
                 artifact_name: None,
+                arkts_version: Default::default(),
                 bundle_name: "com.example.test".to_string(),
                 compatible_sdk_version: "12".to_string(),
                 compatible_sdk_version_stage: None,

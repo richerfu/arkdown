@@ -32,6 +32,7 @@ fn make_config() -> Arc<ArkdownConfig> {
         product: ProductConfig {
             name: "default".to_string(),
             artifact_name: None,
+            arkts_version: Default::default(),
             bundle_name: "com.test.packtest".to_string(),
             compatible_sdk_version: "5.0.0(12)".to_string(),
             compatible_sdk_version_stage: None,
@@ -184,6 +185,7 @@ fn minimal_pack_input(
         module_name: "entry".into(),
         target_name: "default".into(),
         abc_path: abc,
+        additional_abc_paths: Vec::new(),
         resources_index: res,
         module_json: modj,
         pack_info_module_json: None,
@@ -266,6 +268,26 @@ fn static_frontend_abc_keeps_the_source_defined_archive_name() {
     let mut archive = zip::ZipArchive::new(file).expect("valid static HAP");
     assert!(archive.by_name("ets/modules_static.abc").is_ok());
     assert!(archive.by_name("ets/modules.abc").is_err());
+}
+
+#[test]
+fn hybrid_arkts12_packages_dynamic_and_static_merged_abc_files() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (dynamic_abc, res, modj) = write_minimal_inputs(tmp.path());
+    let static_abc = tmp.path().join("modules_static.abc");
+    fs::write(&static_abc, b"static abc").expect("write static ABC fixture");
+    let out = tmp.path().join("hybrid-entry.hap");
+    let mut input = minimal_pack_input(static_abc, res, modj, out.clone());
+    input.additional_abc_paths.push(dynamic_abc);
+
+    Packager::new(make_config())
+        .pack_hap(input)
+        .expect("pack hybrid ArkTS 1.2 HAP");
+
+    let file = fs::File::open(out).expect("open hybrid HAP");
+    let mut archive = zip::ZipArchive::new(file).expect("valid hybrid HAP");
+    assert!(archive.by_name("ets/modules.abc").is_ok());
+    assert!(archive.by_name("ets/modules_static.abc").is_ok());
 }
 
 #[test]
@@ -1120,6 +1142,7 @@ fn test_hap_resource_files_copied_from_processed_dir() {
             module_name: "entry".into(),
             target_name: "default".into(),
             abc_path: abc,
+            additional_abc_paths: Vec::new(),
             resources_index: res,
             module_json: modj,
             pack_info_module_json: None,
@@ -1188,6 +1211,7 @@ fn test_missing_abc_returns_missing_input_error() {
         module_name: "entry".into(),
         target_name: "default".into(),
         abc_path: tmp.path().join("missing.abc"), // does not exist
+        additional_abc_paths: Vec::new(),
         resources_index: res,
         module_json: modj,
         pack_info_module_json: None,
@@ -1224,6 +1248,7 @@ fn test_missing_module_json_returns_missing_input_error() {
         module_name: "entry".into(),
         target_name: "default".into(),
         abc_path: tmp.path().join("m.abc"),
+        additional_abc_paths: Vec::new(),
         resources_index: tmp.path().join("m.index"),
         module_json: tmp.path().join("m.json"), // does not exist
         pack_info_module_json: None,
@@ -1267,6 +1292,7 @@ fn test_hsp_output_is_valid_zip() {
             module_name: "shared".into(),
             target_name: "default".into(),
             abc_path: abc,
+            additional_abc_paths: Vec::new(),
             resources_index: res,
             module_json: modj,
             pack_info_module_json: None,
@@ -1307,6 +1333,7 @@ fn test_hsp_pack_info_keeps_app_bundle_type_and_uses_shared_module_type() {
             module_name: "shared".into(),
             target_name: "default".into(),
             abc_path: abc,
+            additional_abc_paths: Vec::new(),
             resources_index: res,
             module_json: modj,
             pack_info_module_json: None,
@@ -1733,6 +1760,7 @@ fn test_pack_hap_embeds_integrated_hsp() {
             module_name: "entry".into(),
             target_name: "default".into(),
             abc_path: abc,
+            additional_abc_paths: Vec::new(),
             resources_index: res,
             module_json: modj,
             pack_info_module_json: None,

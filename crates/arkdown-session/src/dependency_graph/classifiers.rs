@@ -13,8 +13,12 @@ pub fn classify_node(node: &mut DependencyNodeSnapshot) {
         return;
     };
 
-    // Bytecode HAR: contains `ets/modules.abc`
-    if root.join("ets").join("modules.abc").is_file() {
+    // Bytecode HAR: dynamic and static frontends preserve distinct merged-ABC
+    // names in the package.
+    if ["modules.abc", "modules_static.abc"]
+        .into_iter()
+        .any(|file_name| root.join("ets").join(file_name).is_file())
+    {
         node.node_type = DependencyNodeType::BytecodeHar;
         return;
     }

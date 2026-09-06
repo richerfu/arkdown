@@ -43,8 +43,12 @@ test('runtime entry forwards native config and a normalized plugin ABI', async (
 
   assert.deepEqual(result.artifacts, ['entry.hap'])
   assert.equal(calls.length, 1)
-  assert.deepEqual(calls[0].config, { project: '/tmp/app', target: 'hap' })
-  assert.equal(calls[0].config.arktsVersion, undefined, 'ArkTS 1.1 remains the native default')
+  assert.deepEqual(calls[0].config, {
+    project: '/tmp/app',
+    target: 'hap',
+    nodeExecutable: process.execPath,
+  })
+  assert.equal(calls[0].config.arktsVersion, undefined, 'the selected product owns the ArkTS default')
   assert.equal(calls[0].plugins.length, 1)
   assert.deepEqual(calls[0].plugins[0].__arkdownPluginHooks, ['transform'])
   assert.equal(typeof calls[0].plugins[0].__arkdownDispatchPluginHook, 'function')

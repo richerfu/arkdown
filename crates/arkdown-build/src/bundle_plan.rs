@@ -630,6 +630,7 @@ impl BundleRuntime {
         self.bundlers.insert(key, bundler);
         result.map(|bundle_output| BundleStageOutput {
             bundle_output,
+            additional_abc_paths: Vec::new(),
             state: BundleStageState::Executed,
         })
     }
@@ -663,6 +664,10 @@ impl BundleRuntime {
 pub struct BundleStageOutput {
     /// Rolldown scan and CompileArkTS handoff output.
     pub bundle_output: BundleOutput,
+    /// Additional merged ABCs produced for the same ETS asset directory.
+    /// ArkTS 1.2 hybrid modules retain the dynamic `modules.abc` beside the
+    /// static driver's primary `modules_static.abc`.
+    pub additional_abc_paths: Vec<PathBuf>,
     pub state: BundleStageState,
 }
 
@@ -677,6 +682,7 @@ pub enum BundleStageState {
 
 pub struct BundlePackageOutput {
     pub modules_abc_path: PathBuf,
+    pub additional_abc_paths: Vec<PathBuf>,
     pub source_maps_path: Option<PathBuf>,
     pub preload_system_so_tasks: Vec<PreloadSystemSoTask>,
 }
@@ -704,8 +710,14 @@ impl BundleStageOutput {
                 insight_intent_sources: vec![],
                 crossplatform_collections: rustc_hash::FxHashMap::default(),
             },
+            additional_abc_paths: Vec::new(),
             state: BundleStageState::CacheHit,
         }
+    }
+
+    pub fn with_additional_abc_paths(mut self, paths: Vec<PathBuf>) -> Self {
+        self.additional_abc_paths = paths;
+        self
     }
 
     pub fn skipped_original_har(modules_abc_path: PathBuf, output_dir: PathBuf) -> Self {
@@ -725,6 +737,7 @@ impl BundleStageOutput {
     pub fn into_package_output(self) -> BundlePackageOutput {
         BundlePackageOutput {
             modules_abc_path: self.bundle_output.modules_abc_path,
+            additional_abc_paths: self.additional_abc_paths,
             source_maps_path: self.bundle_output.source_maps_path,
             preload_system_so_tasks: self.bundle_output.preload_system_so_tasks,
         }
@@ -772,6 +785,7 @@ impl BundleStage {
             .map_err(BundleStageError::Bundle)?;
         Ok(BundleStageOutput {
             bundle_output,
+            additional_abc_paths: Vec::new(),
             state: BundleStageState::Executed,
         })
     }

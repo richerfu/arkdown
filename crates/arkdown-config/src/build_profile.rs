@@ -244,6 +244,8 @@ pub struct RawProduct {
     pub name: String,
     #[serde(default)]
     pub output: Option<RawProductOutput>,
+    #[serde(rename = "arkTSVersion", default)]
+    pub arkts_version: Option<String>,
     /// Product-level app profile override.
     ///
     /// Hvigor resolves `hvigorfile appOpt` → product → `AppScope/app.json5`.
@@ -2728,6 +2730,7 @@ mod tests {
                     bundleName: "com.example.app",
                     compatibleSdkVersion: "5.0.0(12)",
                     compatibleSdkVersionStage: "beta3",
+                    arkTSVersion: "1.2",
                     runtimeOS: "HarmonyOS",
                 }],
             },
@@ -2743,6 +2746,10 @@ mod tests {
         assert_eq!(profile.app.products[0].name, "default");
         assert_eq!(profile.app.products[0].bundle_name, "com.example.app");
         assert_eq!(profile.app.products[0].runtime_os, "HarmonyOS");
+        assert_eq!(
+            profile.app.products[0].arkts_version.as_deref(),
+            Some("1.2")
+        );
         assert_eq!(
             parse_api_version(&profile.app.products[0].compatible_sdk_version),
             Some(12)

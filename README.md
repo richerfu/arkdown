@@ -85,10 +85,14 @@ the complete option list. Pass `--enable-zig` to compile native C/C++ sources wi
 the Zig executable must be available on `PATH`. ArkUI-X builds opt in with `--crossplatform`; add
 `--ignore-crossplatform-check` only when `11706007` should be reported as a warning instead of an error.
 
-ArkTS 1.1 is the default when `--arkts-version` is omitted. ArkTS 1.2 is entered
-only with `--arkts-version 1.2`; it currently requires an SDK containing the
-complete `ets/static` toolchain and is not yet a replacement-complete path. See
-the replacement plan for the source-backed 1.2 execution model and remaining
+The selected product's `arkTSVersion` chooses ArkTS 1.1 or 1.2; products that
+omit it retain the 1.1 schema default. `--arkts-version` is an explicit build
+override. ArkTS 1.2 requires an SDK containing the complete `ets/static`
+toolchain. Arkdown supports pure static, pure dynamic, and mixed static/dynamic
+1.2 modules; mixed HAP/HSP output carries both `modules_static.abc` and
+`modules.abc`. The current QEMU packaged SDK does not publish `ets/static`, and
+static bytecode obfuscation additionally requires its `ark_guard` executable.
+See the replacement plan for the source-backed execution model and validation
 gates.
 
 ### BuildProfile overrides

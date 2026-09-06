@@ -116,9 +116,11 @@ impl OhPkgMinimal {
             return None;
         }
 
-        let abc_path = ProfileModuleLayout::new(pkg_dir).ets_modules_abc();
-        if abc_path.exists() {
-            return Some(abc_path);
+        let layout = ProfileModuleLayout::new(pkg_dir);
+        for abc_path in [layout.ets_modules_abc(), layout.ets_modules_static_abc()] {
+            if abc_path.is_file() {
+                return Some(abc_path);
+            }
         }
 
         if let Some(path) = self
@@ -143,7 +145,7 @@ impl OhPkgMinimal {
             }
         }
 
-        let abc_path = ProfileModuleLayout::new(pkg_dir).index_abc();
+        let abc_path = layout.index_abc();
         abc_path.exists().then_some(abc_path)
     }
 
@@ -1955,6 +1957,28 @@ mod tests {
             results[0].declaration_entry,
             vec!["@normalized:N&entry&com.example&bytecode-har/src/main/ets/Worker&1.0.0"]
         );
+    }
+
+    #[test]
+    fn test_scan_static_bytecode_har_preserves_static_abc_path() {
+        let tmp = make_temp_dir();
+        let pkg_dir = tmp.path().join("oh_modules/static-bytecode-har");
+        write_abc(&pkg_dir.join("ets/modules_static.abc"));
+        write_file(
+            &pkg_dir.join("oh-package.json5"),
+            r#"{
+              name: "static-bytecode-har",
+              metadata: { byteCodeHar: true }
+            }"#,
+        );
+
+        let results =
+            ByteCodeHarMetadataWriter::scan_bytecode_har_deps_from_graph(tmp.path(), tmp.path());
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].abc_path.ends_with("ets/modules_static.abc"));
+        let (_, loader_entry) = results.into_iter().next().unwrap().into_loader_entry();
+        assert!(loader_entry.abc_path.ends_with("ets/modules_static.abc"));
     }
 
     #[test]

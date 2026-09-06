@@ -148,9 +148,11 @@ impl PackageManifestSnapshot {
 
     pub fn bytecode_abc_path(&self, package_root: &std::path::Path) -> Option<PathBuf> {
         if self.byte_code_har {
-            let path = package_root.join("ets/modules.abc");
-            if path.is_file() {
-                return Some(path);
+            for file_name in ["modules.abc", "modules_static.abc"] {
+                let path = package_root.join("ets").join(file_name);
+                if path.is_file() {
+                    return Some(path);
+                }
             }
         }
         if let Some(path) = self.abc_path.as_deref() {

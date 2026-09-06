@@ -125,9 +125,10 @@ impl BuildSessionBuilder {
         )?;
 
         // Phase 2: Build SDK snapshot.
-        let sdk = SdkSnapshot::from_config_for_runtime(
+        let sdk = SdkSnapshot::from_config_for_runtime_with_arkts(
             &self.config.sdk_config,
             &self.config.product.runtime_os,
+            self.arkts_language_version,
         )?;
 
         // Phase 3: Build path resolver.

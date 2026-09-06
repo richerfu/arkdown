@@ -133,9 +133,10 @@ fn static_arkts_har_declarations_use_oxc_static_struct_emission() {
     assert!(!declaration.contains("Text(this.title)"), "{declaration}");
 }
 
-/// Latest IDE `ets-loader::generateSourceFilesInHar` sends both source and
-/// generated `ModuleInfo.ts` through TypeScript's declaration emitter for a
-/// ByteCode HAR. The declarations are archived as exact CRLF/four-space bytes.
+/// Latest IDE `ets-loader::generateSourceFilesInHar` sends both the module-root
+/// public entry and generated `ModuleInfo.ts` through TypeScript's declaration
+/// emitter for a ByteCode HAR. The declarations are archived as exact
+/// CRLF/four-space bytes.
 #[test]
 fn bytecode_har_declarations_match_sdk_generated_entries_and_printer() {
     let temp = tempfile::tempdir().expect("create module root");
@@ -147,7 +148,7 @@ fn bytecode_har_declarations_match_sdk_generated_entries_and_printer() {
     std::fs::create_dir_all(module_info.parent().expect("generated profile parent"))
         .expect("create generated profile tree");
     std::fs::write(
-        source_dir.join("Index.ets"),
+        temp.path().join("Index.ets"),
         concat!(
             "export function formatGreeting(name: string): string {\n",
             "  return `Hello, ${name}!`;\n",
@@ -174,12 +175,13 @@ fn bytecode_har_declarations_match_sdk_generated_entries_and_printer() {
     let declarations_dir = temp.path().join("etsFortgz");
 
     HarDeclarationGenerator::new(temp.path(), &source_dir, declarations_dir.clone(), "entry")
+        .with_module_entry_source(Some("Index.ets"))
         .with_generated_source(&module_info)
         .generate()
         .expect("generate ByteCode HAR declarations");
 
     assert_eq!(
-        std::fs::read_to_string(declarations_dir.join("entry/src/main/ets/Index.d.ets"))
+        std::fs::read_to_string(declarations_dir.join("entry/Index.d.ets"))
             .expect("read source declaration"),
         concat!(
             "export declare function formatGreeting(name: string): string;\r\n",

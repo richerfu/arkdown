@@ -1,6 +1,6 @@
 # OXC/Rolldown 替换 Hvigor：当前架构与剩余工作
 
-状态：进行中
+状态：ArkTS 1.2 构建实现完成；替换认证等待 SDK 产物与设备门禁
 更新日期：2026-09-06
 
 本文档是替换工作的唯一状态文档。完成项不保留迁移流水账；历史以 Git
@@ -124,28 +124,41 @@ checker，也没有 SDK checker 兼容桥。其精确能力和保守的 `Unknown
    混淆时还会启动 `ark_guard`。
 
 SDK 中可能存在独立 `es2panda` 可执行文件，但上游普通构建不直接执行它；它
-只出现在 worker 崩溃后的本地诊断路径。因此 arkdown 当前
-`StaticArktsCompiler::validate_sdk` 强制检查独立 `es2panda` 是已确认缺口，
-应改为按源码校验 `libarkts.js`、`es2panda.node` 和实际子进程工具。
+只出现在 worker 崩溃后的本地诊断路径。因此
+`StaticArktsCompiler::validate_sdk` 按源码校验 driver、`libarkts.js`、
+`es2panda.node`、UI plugins 和对应阶段实际使用的子进程工具，不把独立
+`es2panda` 作为构建硬依赖。
 
-当前 `StaticArktsCompiler` 已生成 source inventory、依赖 module/alias 信息和
-普通构建的 UI syntax/UI/memo 插件顺序，并通过 Node driver 生成
-`modules_static.abc`。这是过渡接入，不是最终 Rust/OXC 实现。
+Arkdown 已由 Rust owner 完成 1.2 的版本选择、SDK/session 快照、源码分类、
+模块/alias/declaration/syscap 输入、interop declgen、driver 配置与执行、缓存、
+混淆、检查、preview、HAP/HSP/HAR/APP 布局和打包。静态 ArkTS 编译按上游
+设计交给 SDK driver/libarkts，而不是在 Arkdown 内复制编译器；Arkdown 拥有
+其 typed command plan、输入、诊断和产物生命周期。
+
+执行模型覆盖纯静态、纯动态和混合模块。`.ets` 仅在首个有效 directive 为
+`'use static'` 时进入静态分区，`.ts`/`.js` 留在动态分区；混合产物显式打包
+`modules_static.abc` 和 `modules.abc`，不扫描可能过期的 sibling ABC。Source
+HAR、ByteCode HAR、HSP 依赖和多模块输入均进入对应的 declaration、link 与
+package 路径。reload/quick-fix 因 static driver 没有 1.1 协议而 typed reject；
+widget 由 static UI plugin 链处理，不另造动态 widget 编译通道。
 
 ## 5. 剩余阻塞项
 
-### P0：ArkTS 1.2 完整替换
+### P0：ArkTS 1.2 替换认证的外部门禁
 
-- 按上述源码模型修正 SDK layout 验证，删除独立 `es2panda` 的错误硬要求。
-- 将 libarkts 的 parsed/checked/recheck 生命周期映射为 Rust 驱动的 OXC pass：
-  interop、UI、UI syntax、memo 的顺序和共享状态必须逐项来自源码。
-- 补齐 SDK alias、permissions、declaration generation 和 interop 输入。
-- 按静态源码 owner 接入 `dependency_analyzer`、`ark_link` 和 `ark_guard` 的
-  typed Rust command plan、缓存键、诊断及中间产物。
-- 补齐 1.2 的 preview、reload/quick-fix、widget、HAR/HSP 和多模块路径；源码
-  未定义或尚未实现的组合必须 typed reject。
-- 增加可用 `ets/static` SDK 的真实构建 fixture。缺少 `static/` 的 SDK 不能
-  用于宣称 1.2 运行时闭环。
+- QEMU 的 `out/arm64_virt/ohos_ets` staging 已产生 static driver、libarkts、
+  addon、UI plugins、`ark_link`、stdlib 和 declarations；另行构建
+  `dependency_analyzer` 后可组成已验证的临时 SDK。但当前 `out/sdk` 没有以
+  `sdk_build_arkts=true` 发布完整组件；正式 SDK 不能依赖仓库 staging 路径。
+- 普通、interop、cache、Source 混淆和动态 PandaGuard 路径已用真实工具执行。
+  static bytecode 混淆的 command/config/替换路径已有契约测试，但当前 QEMU
+  构建关闭 `abckit_enable`，未产生 static `ark_guard`；补齐该 SDK 工具后必须
+  再执行真实混合 bytecode-obfuscation fixture。
+- 当前 QEMU 自带 static sample 不能通过同 checkout 的编译器源码约束（默认
+  import、catch 类型、export annotation/private type）；不得修改样例或给
+  Arkdown 添加 fallback。上游提供有效样例后加入 strict 产物对比矩阵。
+- 用可发布 SDK 对 HAP/HSP/HAR/APP 完成结构、签名和设备/模拟器安装启动验证，
+  才能把 ArkTS 1.2 状态从 build-complete 提升为 replacement-complete。
 
 ### P1：1.1 长尾与架构收口
 
@@ -173,5 +186,6 @@ SDK 中可能存在独立 `es2panda` 可执行文件，但上游普通构建不�
 - 源码契约测试、workspace test、Clippy 和 format 全部通过。
 - HAP/HSP/HAR/APP 按变更范围完成结构、签名以及设备/模拟器验证。
 - 没有空 adapter、fake cache、双轨实现或只为保留 Hvigor 内部形状而存在的代码。
-- ArkTS 1.2 只有在上述 P0 全部完成并通过真实 SDK/产物验证后，才可标记为
-  replacement-complete；在此之前默认 1.1 行为不得受影响。
+- ArkTS 1.2 构建实现已标记为 build-complete；只有上述外部门禁全部完成并
+  通过真实发布 SDK、产物和设备验证后，才可标记为 replacement-complete。
+  在此之前默认 1.1 行为不得受影响。

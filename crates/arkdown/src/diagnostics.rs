@@ -66,9 +66,14 @@ pub struct BundlerDiagnostic {
 
 impl BundlerDiagnostic {
     pub fn from_rolldown_diagnostic(diagnostic: &BuildDiagnostic) -> Self {
+        // PluginError::message intentionally returns an empty string until
+        // `on_diagnostic` injects the hook-owned error. Render the public
+        // diagnostic instead of Display on the raw event so plugin failures
+        // retain their actionable module and cause.
+        let message = diagnostic.to_diagnostic().to_string();
         Self {
             kind: RolldownDiagnosticKind::new(diagnostic.kind()).kind(),
-            message: diagnostic.to_string(),
+            message,
             module_id: diagnostic.id(),
             line: None,
             column: None,

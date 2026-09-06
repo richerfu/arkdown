@@ -648,6 +648,31 @@ impl<'a> ModuleBuildLayout<'a> {
         self.loader_out_dir().join("etsFortgz")
     }
 
+    /// ArkTS 1.2 interop outputs observed in the current
+    /// `CompileArkTS`/`InteropManager` task handoff.
+    pub fn arkts_interop_dir(&self) -> PathBuf {
+        self.default_intermediate_dir("declgen")
+    }
+
+    pub fn arkts_declgen_v1_dir(&self) -> PathBuf {
+        self.arkts_interop_dir().join("declgenV1")
+    }
+
+    pub fn arkts_declgen_v2_dir(&self) -> PathBuf {
+        self.arkts_interop_dir().join("declgenV2")
+    }
+
+    pub fn arkts_declgen_bridge_dir(&self) -> PathBuf {
+        self.arkts_interop_dir().join("declgenBridgeCode")
+    }
+
+    pub fn arkts_decl_file_info(&self, package_name: &str) -> PathBuf {
+        self.arkts_interop_dir()
+            .join("decl-file-info")
+            .join(package_name)
+            .join("decl-fileInfo.json")
+    }
+
     pub fn resource_table_txt(&self) -> PathBuf {
         self.default_intermediate_file("res", "ResourceTable.txt")
     }

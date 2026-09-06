@@ -221,12 +221,20 @@ impl ComponentVersion {
 }
 
 impl ComponentMetadata {
-    /// Read ETS component metadata from `<sdk>/ets/oh-uni-package.json`.
+    /// Read ETS component metadata from the selected ETS component.
     ///
     /// Upstream: `SdkComponent` metadata populated by sdkmanager from
-    /// `oh-uni-package.json`.
-    pub fn from_sdk_root(sdk_root: &Path) -> Option<Self> {
-        let value = Self::read_package_value(&sdk_root.join("ets").join("oh-uni-package.json"))?;
+    /// `oh-uni-package.json`. ArkTS-enabled SDKs keep the dynamic component at
+    /// `<sdk>/ets/dynamic`; some packaged revisions keep the shared metadata at
+    /// `<sdk>/ets` while others retain it in the dynamic component.
+    pub fn from_ets_component_root(ets_component_root: &Path) -> Option<Self> {
+        let component_path = ets_component_root.join("oh-uni-package.json");
+        let value = Self::read_package_value(&component_path).or_else(|| {
+            if ets_component_root.file_name() != Some(std::ffi::OsStr::new("dynamic")) {
+                return None;
+            }
+            Self::read_package_value(&ets_component_root.parent()?.join("oh-uni-package.json"))
+        })?;
         let version = Self::json_string_field(&value, "version")?;
         let release_type = Self::json_string_field(&value, "releaseType")?;
         Some(Self {
@@ -274,7 +282,14 @@ impl SdkCompilePluginSnapshot {
         let feature_gate = SdkArkTsFeatureGate::for_api_version(api_version);
         let extensions = SdkSupportExtensionSet::default_arkts();
 
-        let ets_loader_path = sdk_root.join("ets").join("build-tools").join("ets-loader");
+        let ets_container_root = sdk_root.join("ets");
+        let split_dynamic_root = ets_container_root.join("dynamic");
+        let ets_component_root = if split_dynamic_root.is_dir() {
+            split_dynamic_root
+        } else {
+            ets_container_root
+        };
+        let ets_loader_path = ets_component_root.join("build-tools").join("ets-loader");
         let ets_loader = Some(EtsLoaderPath::new(
             ets_loader_path,
             vec![".ets".to_string(), ".ts".to_string(), ".js".to_string()],
@@ -283,11 +298,11 @@ impl SdkCompilePluginSnapshot {
         let js_loader_path = sdk_root.join("js").join("build-tools").join("js-loader");
         let js_loader = Some(JsLoaderPath::new(js_loader_path));
 
-        let sdk_ets_dir = Some(sdk_root.join("ets").join("api"));
+        let sdk_ets_dir = Some(ets_component_root.join("api"));
         let sdk_js_dir = Some(sdk_root.join("js").join("api"));
         let arkui_x_dir = Some(sdk_root.join("arkui-x"));
 
-        let component_metadata = ComponentMetadata::from_sdk_root(sdk_root);
+        let component_metadata = ComponentMetadata::from_ets_component_root(&ets_component_root);
 
         Self {
             ets_loader,
@@ -449,6 +464,33 @@ mod tests {
         assert_eq!(meta.version, "6.0.1.112");
         assert_eq!(meta.release_type, "Canary");
         std::fs::remove_dir_all(root).expect("remove temp sdk root");
+    }
+
+    #[test]
+    fn split_sdk_selects_dynamic_loader_and_shared_component_metadata() {
+        let root = TestSdk::temp_root("split-compile-plugin");
+        let ets_root = root.join("ets");
+        let dynamic_root = ets_root.join("dynamic");
+        std::fs::create_dir_all(dynamic_root.join("build-tools").join("ets-loader"))
+            .expect("create split ETS loader");
+        std::fs::write(
+            ets_root.join("oh-uni-package.json"),
+            r#"{"version":"6.0.2.44","releaseType":"Beta"}"#,
+        )
+        .expect("write shared ETS metadata");
+
+        let snap = SdkCompilePluginSnapshot::from_sdk_parts(&root, 20, "6.0.2.44");
+
+        assert_eq!(
+            snap.ets_loader().expect("ETS loader").path,
+            dynamic_root.join("build-tools").join("ets-loader")
+        );
+        let dynamic_api = dynamic_root.join("api");
+        assert_eq!(snap.sdk_ets_dir(), Some(&dynamic_api));
+        let metadata = snap.component_metadata().expect("component metadata");
+        assert_eq!(metadata.version, "6.0.2.44");
+        assert_eq!(metadata.release_type, "Beta");
+        std::fs::remove_dir_all(root).expect("remove temp SDK root");
     }
 
     #[test]
