@@ -35,6 +35,11 @@ JS adapter。
 结果增加无上游源码依据的启发式分支。若新源码没有定义该行为，必须停止实现并向用户确认，
 不得自行补规则或保留推测性兼容层。
 
+该约束是生产代码修改的前置门禁，而不是事后审计项：每个实现提交必须记录当前源码 owner
+及调用链；golden、产物 diff、cache diff 和 sourcemap token 解码只能证明实现是否对齐，不能
+用来决定该写什么分支。任何仅能用结果反推、却无法在当前源码中找到 owner 的本地逻辑都应
+删除或停止提交。
+
 主要入口：
 
 - `docs/kb/06-hvigor调用链分析.md`
@@ -53,15 +58,15 @@ JS adapter。
 
 - `crates/arkdown-ets-transform/tests/source-parity/arkts11.json`：129 个源码契约。
 - `packages/arkdown/tests/hvigor_parity.rs`：真实 hvigor 分层产物比较器。
-- `packages/arkdown/tests/parity_allowlist.json`：当前仅保留 1 个有真实产物证据的差异场景。
+- `packages/arkdown/tests/parity_allowlist.json`：严格验证使用空 allowlist。
 - `crates/arkdown-ets-checker`：嵌入式 OXC project checker；由 Rust 直接建立项目、
   package alias 和 SDK declaration type environment。
 - `crates/arkdown-build/src/static_arkts.rs`：ArkTS 1.2 SDK Node driver。
 
-2026-09-05 使用 DevEco Studio 6.1.1.280 的真实 `hvigorw`、同版本 SDK、release
-N-API binding 和空 allowlist 串行复验：31 项中 30 项通过。HAP/HSP/HAR、Test/OHOS Test、
+2026-09-06 使用 DevEco Studio 6.1.1.280 的真实 `hvigorw`、同版本 SDK、release
+N-API binding 和空 allowlist 串行复验：31 项全部通过。HAP/HSP/HAR、Test/OHOS Test、
 debug/release、source/ByteCode HAR、widget、多模块、share/startup、ComponentV2 冷构建与增量
-构建均已零差异；当前唯一失败项是 release ArkGuard fixture。
+构建以及 release ArkGuard 均已零差异。
 
 ## 3. 已完成且不得回退
 
@@ -80,18 +85,14 @@ debug/release、source/ByteCode HAR、widget、多模块、share/startup、Compo
 
 ### P0-1：清除真实产物 allowlist
 
-旧 allowlist 的描述已经过期：空 allowlist 实测已清除 11 个场景，当前只剩 1 个场景对应
-1 个失败测试。当前真实差异如下：
-
-| allowlist 场景 | 当前确定性差异 | 下一 owner |
-|---|---|---|
-| `release-obfuscation-hap` | ArkGuard merged config/reserved names 过度混淆路径、标识符和属性，连带改变 ABC、map、filesInfo/cache/nameCache | `arkdown-obfuscate` / build obfuscation plan |
+旧 allowlist 的描述已经过期：当前空 allowlist 的 31 项严格矩阵全部通过，不再存在已知
+ArkTS 1.1 产物 allowlist 项。
 
 本轮已从 allowlist 删除并以真实 hvigor 空白名单确认：`minimal-hap`、
 `minimal-hap-release`、`bc-har-dep-hap`、`widget-hap`、`share-config-hap`、
 `bytecode-har`（同时覆盖 debug/release）、`startup-config-hap`、
 `minimal-hap-ohos-test`、`multi-module-hap`、`component-v2-lifecycle-hap` 和
-`component-v2-lifecycle-incremental`。ComponentV2 修复依据
+`component-v2-lifecycle-incremental`，以及 `release-obfuscation-hap`。ComponentV2 修复依据
 `process_struct_componentV2.ts::createPropertyAssignNode` 的 factory-node/source-initializer
 所有权，在 AST boundary inventory 中保留 synthetic assignment 占位；同时删除了扫描生成
 文本并手工改写 token 的 `ComponentV2SourceMapProjector`。
@@ -170,7 +171,19 @@ source-map chain、watchChange、cache invalidation 和 close；所有公开 hoo
 
 ## 5. ArkTS 1.2 阻断项
 
-版本分流已完成，但实际构建仍由 `static_arkts.rs` 启动 Node SDK driver。当前没有完整实现：
+版本分流及普通工程的静态 SDK 编译入口已完成，实际构建仍由 `static_arkts.rs` 启动 Node
+SDK driver。当前实现直接依据静态前端与 ArkUI 插件源码完成：
+
+1. 普通构建按源码顺序只加载 `ui_syntax_plugin`、`ui_plugin`、`memo_plugin`；不把仅属于
+   declgen 配置的 `interop_plugin` 注入普通编译。
+2. `compileFiles` 合并 active source inventory、loader entries 与 Rolldown 图中的构建入口；
+   dependency language 使用 `getFileLanguageVersion` 的首个有效行算法。
+3. `dependencyModuleList`/`moduleFiles`、alias `originalPackageNameMap`、ByteCode HAR 的
+   `modules.abc`/`modules_static.abc` 语言分类按 driver 源码生成。
+4. driver 固定输出 `modules_static.abc`，包内保留源码定义的 `ets/modules_static.abc`，
+   不重命名成动态前端的 `modules.abc`。
+
+当前没有完整实现：
 
 1. interop parsed → UI parsed；
 2. type/semantic checkpoint；
@@ -178,7 +191,8 @@ source-map chain、watchChange、cache invalidation 和 close；所有公开 hoo
 4. memo checked → recheck；
 5. permissions、SDK alias、interop SDK path、declgen 等完整配置；
 6. Rust 直接编排 es2panda、dependency analyzer、ark_link；
-7. static widget/reload，以及声明范围内的 preview/HAR/HSP 行为。
+7. static `ark_guard` rule/config/source-map/name-cache 生命周期；
+8. static widget/reload，以及声明范围内的 preview/HAR/HSP 行为。
 
 最终路径必须是 OXC static passes + Rust native command plan。Node SDK driver 只能作为迁移期
 对照，完成后必须删除，不保留双轨兼容层。
@@ -196,9 +210,11 @@ source-map chain、watchChange、cache invalidation 和 close；所有公开 hoo
 | P1-5 | HAR dedup/duplicate check 等 hot collector 使用 `Arc<Mutex>` | Rolldown adapter 产生 per-module typed facts，bundle 完成后按 module ID 排序归并 |
 | P1-6 | PreBuild/profile/loader/module map 仍有重复读盘或扫描 | `BuildSession` 成为唯一 startup inventory，后续 owner 只消费 immutable snapshot/plan |
 | P1-7 | coordinator 大量 `anyhow/bail`，诊断结构不统一 | domain crate 返回 typed error；application 统一转换为 code/stage/module/path/span/severity/suggestion 并稳定排序 |
-| P1-8 | 已完成：OHPM 使用完整 Rust install pipeline | `arkdown-build::OhpmInstallStage` 在首次 `BuildSession` 快照前直接调用 `ohpm-core::install`，沿用其 lock graph、store、materialization、auth/proxy/mirror、workspace、override、parameterFile、生命周期 hook 与原子安装语义；watch 重建不重复安装。旧 `arkdown-ohpm` acquire 实现和自创 offline/prefer-offline/online 构建参数已删除 |
+| P1-8 | 已完成：删除构建内隐式 OHPM install | 当前 `developtools_ace_ets2bundle` 编译源码只消费 `loader.json` 中的 `packageManagerType`、已物化的 `oh_modules/.ohpm` 和 package graph；当前 hvigor wrapper 只为 hvigor engine workspace 准备工具/依赖并注入 `ohpmBin`，没有在应用构建前执行项目 `ohpm install`。`arkdown-build::OhpmInstallStage`、`ohpm-core` 依赖和 `bisync` patch 已删除；`BuildSession` 只快照外部已物化的依赖图 |
 
-OHPM 发布门禁：`ohpm-rs` 已提交 `gix 0.87` 升级和 lockfile debug stderr 清理；在包含这两项修复的新版本发布前，arkdown 仍固定使用 `ohpm-core 0.2.0`，并仅在 Cargo source 层补回其被 crates.io 撤回的 `bisync`。发布新版本后必须更新版本并删除 `[patch.crates-io] bisync`；不得把这个依赖分发问题扩张为 arkdown 内部的 OHPM wrapper 或兼容实现。
+`ohpm-rs` 中 git/workspace 等安装协议仍由其自身源码 owner 保留，但不应被包装成 arkdown
+构建的隐式前置阶段。若将来需要新增显式包管理命令，必须先取得独立产品契约，并从唯一 JS
+CLI 显式进入 Rust `ohpm-rs` API；不得把该新能力伪装成 hvigor 源码行为。
 
 性能实现必须同时证明 `RAYON_NUM_THREADS=1` 与 `8` 产物字节一致，不能用并发换取非确定
 输出。资源二进制不得进入长生命周期 BuildSession；OXC allocator AST 不得跨任务或持久化。

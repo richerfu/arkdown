@@ -59,7 +59,8 @@ pub struct PackInput {
     pub module_name: String,
     /// Effective Hvigor target name used by MakePackInfo archive identity.
     pub target_name: String,
-    /// Path to `modules.abc` produced by SDK es2abc.
+    /// Path to the SDK frontend's merged ABC. Dynamic ArkTS produces
+    /// `modules.abc`; static ArkTS produces `modules_static.abc`.
     pub abc_path: PathBuf,
     /// Path to `resources.index` produced by arkdown-resource.
     pub resources_index: PathBuf,

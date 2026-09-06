@@ -2,31 +2,32 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use arkdown_ets_transform::HvigorTypescriptPrinter;
 use arkdown_path::{
     canonicalize_or_owned, ArtifactPathSerializer, ModuleSpecifierText, RelPath, SpecifierKind,
 };
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    AccessorProperty, ArrowFunctionBody, ArrowFunctionExpression, Class, ComputedMemberExpression,
-    ExportAllDeclaration, ExportDeclaration, ExportDefaultDeclaration, ExportFromDeclaration,
-    ExportNamedDeclaration, Expression, FormalParameter, FormalParameterRest, Function,
-    FunctionBody, IdentifierName, ImportDeclaration, ImportExpression, LazyImportDeclaration,
-    MethodDefinition, MethodDefinitionKind, ModuleExportName, NumericLiteral, ObjectExpression,
-    ObjectProperty, PrivateFieldExpression, Program, PropertyDefinition, PropertyKey, Statement,
+    AccessorProperty, BindingIdentifier, Class, ComputedMemberExpression, ExportAllDeclaration,
+    ExportDeclaration, ExportDefaultDeclaration, ExportFromDeclaration, ExportNamedDeclaration,
+    Expression, FormalParameter, FormalParameterRest, Function, IdentifierName,
+    IdentifierReference, ImportDeclaration, ImportExpression, LazyImportDeclaration,
+    MethodDefinition, MethodDefinitionKind, ModuleExportName, ObjectProperty,
+    PrivateFieldExpression, Program, PropertyDefinition, PropertyKey, Statement,
     StaticMemberExpression, StringLiteral, TSEnumDeclaration, TSEnumMemberName,
     TSInterfaceDeclaration, TSMethodSignature, TSPropertySignature, VariableDeclaration,
 };
 use oxc_ast_visit::{walk, walk_mut, Visit, VisitMut};
 use oxc_codegen::{Codegen, CodegenOptions, CommentOptions, IndentChar};
 use oxc_parser::Parser;
-use oxc_semantic::SemanticBuilder;
-use oxc_span::{GetSpan, SourceType, Span};
+use oxc_semantic::{Scoping, SemanticBuilder};
+use oxc_span::{SourceType, Span};
 use oxc_str::{Ident, Str};
-use oxc_syntax::symbol::SymbolFlags;
-use rolldown_sourcemap::{collapse_sourcemaps, OwnedSourceMap};
+use oxc_syntax::reference::ReferenceId;
+use oxc_syntax::symbol::{SymbolFlags, SymbolId};
+use rolldown_sourcemap::{OwnedSourceMap, SourceMapBuilder};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde_json::{Map, Value};
-use string_wizard::{Hires, MagicString, SourceMapOptions};
 
 use arkdown_core::HvigorModuleSourceFile;
 
@@ -552,8 +553,9 @@ impl<'a> ArkguardModuleRunner<'a> {
                     .join("\n"),
             });
         }
-        let mut semantic = semantic_return.semantic;
-        self.apply_symbol_names(&mut semantic, &symbol_plan);
+        let mut scoping = semantic_return.semantic.into_scoping();
+        let mut synthetic_symbol_spans = self.apply_symbol_names(&mut scoping, &symbol_plan);
+        synthetic_symbol_spans.transform(&mut program);
 
         let obfuscated_relative_path = self.obfuscated_relative_path(&file.relative_path);
         let logical_path =
@@ -579,26 +581,44 @@ impl<'a> ArkguardModuleRunner<'a> {
         if !is_declaration {
             codegen_options.source_map_path = Some(PathBuf::from(&file.relative_path));
         }
-        let generated = Codegen::new()
-            .with_options(codegen_options)
-            .with_scoping(Some(semantic.into_scoping()))
-            .build(&program);
-        let (code, printer_map) = if self.rules.compact {
-            (generated.code, None)
+        let (code, generated_map) = if self.rules.compact {
+            let generated = Codegen::new()
+                .with_options(codegen_options)
+                .with_scoping(Some(scoping))
+                .build(&program);
+            (
+                generated.code,
+                generated.map.map(oxc_sourcemap::SourceMap::into_owned),
+            )
+        } else if is_declaration {
+            (
+                HvigorTypescriptPrinter::print_with_scoping(&program, codegen_options, scoping),
+                None,
+            )
         } else {
-            let normalized = ArkguardTypeScriptPrinter::new(source, &program).normalize(
-                &generated.code,
-                source_type,
-                &file.relative_path,
-            )?;
-            (normalized.code, normalized.source_map)
+            let printed = HvigorTypescriptPrinter::print_with_source_map_and_scoping(
+                &program,
+                codegen_options,
+                source,
+                scoping,
+            );
+            let map = printed
+                .source_map
+                .as_deref()
+                .map(|source_map| {
+                    OwnedSourceMap::from_json_string(source_map)
+                        .map(|map| map.as_source_map().clone().into_owned())
+                })
+                .transpose()
+                .map_err(|error| ObfuscationError::CodegenError(error.to_string()))?;
+            (printed.code, map)
         };
         let source_map = if is_declaration {
             None
         } else {
-            generated
-                .map
-                .map(|map| self.compose_source_map(file, &map, printer_map.as_ref()))
+            generated_map
+                .as_ref()
+                .map(|map| self.compose_source_map(file, map))
                 .transpose()?
         };
         if !is_declaration {
@@ -723,7 +743,11 @@ impl<'a> ArkguardModuleRunner<'a> {
         matches.next().is_none().then_some(name)
     }
 
-    fn apply_symbol_names(&self, semantic: &mut oxc_semantic::Semantic<'_>, plan: &[SymbolRename]) {
+    fn apply_symbol_names(
+        &self,
+        scoping: &mut Scoping,
+        plan: &[SymbolRename],
+    ) -> ArkguardSyntheticSymbolSpans {
         let by_declaration = plan
             .iter()
             .map(|rename| {
@@ -733,15 +757,28 @@ impl<'a> ArkguardModuleRunner<'a> {
                 )
             })
             .collect::<FxHashMap<_, _>>();
-        let scoping = semantic.scoping_mut();
+        let mut synthetic = ArkguardSyntheticSymbolSpans::default();
         let symbol_ids = scoping.symbol_ids().collect::<Vec<_>>();
         for symbol_id in symbol_ids {
             let span = scoping.symbol_span(symbol_id);
             let original = scoping.symbol_name(symbol_id);
             if let Some(replacement) = by_declaration.get(&(span.start, original)) {
+                // RenameIdentifierTransformer.updateNameNode replaces every
+                // renamed declaration identifier with factory.createIdentifier.
+                // TypeScript factory-created nodes carry synthesized positions,
+                // so the printer emits mappings only from their source-backed
+                // parent declarations.
+                synthetic.symbols.insert(symbol_id);
+                synthetic.references.extend(
+                    scoping
+                        .get_resolved_reference_ids(symbol_id)
+                        .iter()
+                        .copied(),
+                );
                 scoping.set_symbol_name(symbol_id, Ident::from(*replacement));
             }
         }
+        synthetic
     }
 
     fn plan_property_names(&mut self, names: Vec<String>) -> FxHashMap<String, String> {
@@ -904,7 +941,6 @@ impl<'a> ArkguardModuleRunner<'a> {
         &self,
         file: &ObfuscationModuleFile,
         generated: &oxc_sourcemap::SourceMap<'_>,
-        printer_map: Option<&oxc_sourcemap::SourceMap<'_>>,
     ) -> Result<Value, ObfuscationError> {
         let previous = file
             .previous_source_map
@@ -912,21 +948,23 @@ impl<'a> ArkguardModuleRunner<'a> {
             .map(|value| OwnedSourceMap::from_json_string(&value.to_string()))
             .transpose()
             .map_err(|error| ObfuscationError::CodegenError(error.to_string()))?;
-        let mut maps = Vec::with_capacity(3);
-        if let Some(previous) = previous.as_ref() {
-            maps.push(previous.as_source_map());
-        }
-        maps.push(generated);
-        if let Some(printer_map) = printer_map {
-            maps.push(printer_map);
-        }
-        let owned = if maps.len() == 1 {
-            generated.clone().into_owned()
+        let (owned, mapping_line_count) = if let Some(previous) = previous.as_ref() {
+            let merged = ArkguardSourceMapMerger::new(previous.as_source_map(), generated).merge();
+            (merged.source_map, Some(merged.mapping_line_count))
         } else {
-            collapse_sourcemaps(&maps)
+            (generated.clone().into_owned(), None)
         };
         let mut value: Value = serde_json::from_str(&owned.to_json_string())?;
         if let Some(map) = value.as_object_mut() {
+            if let (Some(mapping_line_count), Some(Value::String(mappings))) =
+                (mapping_line_count, map.get_mut("mappings"))
+            {
+                let encoded_line_count = mappings.bytes().filter(|byte| *byte == b';').count() + 1;
+                mappings.extend(std::iter::repeat_n(
+                    ';',
+                    mapping_line_count.saturating_sub(encoded_line_count),
+                ));
+            }
             map.insert(
                 "file".to_string(),
                 Value::String(
@@ -1127,356 +1165,127 @@ struct NativeSourceOutput {
     source_map: Option<Value>,
 }
 
-/// OXC owns ArkGuard parsing, semantic renaming, and code generation. This
-/// final printer pass mirrors the observable formatting choices made by
-/// TypeScript's `createPrinter`, which is what `ArkObfuscator.createObfsPrinter`
-/// uses upstream. Every edit is selected from parsed AST nodes and MagicString
-/// produces the additional source-map stage.
-struct ArkguardTypeScriptPrinter {
-    original_numeric_literals: Vec<String>,
-    original_inline_objects: Vec<bool>,
+/// ArkGuard's `SourceMapMergingUtil.SourceMapLink` deliberately drops a
+/// current-stage segment when the selected previous-stage segment is unmapped.
+/// Rolldown's general-purpose collapse keeps such a segment as an explicit
+/// unmapped token, so source-mode obfuscation must use ArkGuard's algorithm.
+struct ArkguardSourceMapMerger<'a> {
+    previous: &'a oxc_sourcemap::SourceMap<'a>,
+    current: &'a oxc_sourcemap::SourceMap<'a>,
 }
 
-struct ArkguardPrintedOutput {
-    code: String,
-    source_map: Option<oxc_sourcemap::SourceMap<'static>>,
-}
-
-#[derive(Clone)]
-struct ArkguardPrinterObject {
-    span: Span,
-    properties: Vec<Span>,
-    inline: bool,
-}
-
-#[derive(Clone)]
-struct ArkguardPrinterEdit {
-    span: Span,
-    replacement: String,
-}
-
-impl ArkguardTypeScriptPrinter {
-    fn new<'a>(original_source: &'a str, program: &Program<'a>) -> Self {
-        let mut shape = ArkguardOriginalPrinterShape {
-            source: original_source,
-            numeric_literals: Vec::new(),
-            inline_objects: Vec::new(),
-        };
-        shape.visit_program(program);
-        Self {
-            original_numeric_literals: shape.numeric_literals,
-            original_inline_objects: shape.inline_objects,
-        }
+impl<'a> ArkguardSourceMapMerger<'a> {
+    fn new(
+        previous: &'a oxc_sourcemap::SourceMap<'a>,
+        current: &'a oxc_sourcemap::SourceMap<'a>,
+    ) -> Self {
+        Self { previous, current }
     }
 
-    fn normalize(
-        &self,
-        generated: &str,
-        source_type: SourceType,
-        source_path: &str,
-    ) -> Result<ArkguardPrintedOutput, ObfuscationError> {
-        let allocator = Allocator::default();
-        let parsed = Parser::new(&allocator, generated, source_type).parse();
-        if !parsed.diagnostics.is_empty() {
-            return Err(ObfuscationError::CodegenError(
-                parsed
-                    .diagnostics
-                    .into_iter()
-                    .map(|diagnostic| diagnostic.to_string())
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            ));
-        }
-        let mut generated_shape = ArkguardGeneratedPrinterShape::default();
-        generated_shape.visit_program(&parsed.program);
-        if self.original_numeric_literals.len() != generated_shape.numeric_literals.len()
-            || self.original_inline_objects.len() != generated_shape.objects.len()
-        {
-            return Err(ObfuscationError::CodegenError(format!(
-                "ArkGuard printer AST shape changed: source has {} numeric literals and {} objects, generated code has {} numeric literals and {} objects",
-                self.original_numeric_literals.len(),
-                self.original_inline_objects.len(),
-                generated_shape.numeric_literals.len(),
-                generated_shape.objects.len()
-            )));
-        }
-
-        let mut leaf_edits = self.numeric_literal_edits(generated, &generated_shape);
-        leaf_edits.extend(self.empty_body_edits(generated, &generated_shape));
-        for (object, inline) in generated_shape
-            .objects
-            .iter_mut()
-            .zip(&self.original_inline_objects)
-        {
-            object.inline = *inline && Self::has_plain_object_gaps(generated, object);
-        }
-        let root_objects = generated_shape
-            .objects
-            .iter()
-            .enumerate()
-            .filter(|(_, object)| object.inline)
-            .filter(|(index, object)| {
-                !generated_shape
-                    .objects
-                    .iter()
-                    .enumerate()
-                    .any(|(parent, candidate)| {
-                        parent != *index
-                            && candidate.inline
-                            && Self::strictly_contains(candidate.span, object.span)
-                    })
-            })
-            .map(|(index, _)| index)
-            .collect::<Vec<_>>();
-
-        let mut edits = root_objects
-            .iter()
-            .map(|index| ArkguardPrinterEdit {
-                span: generated_shape.objects[*index].span,
-                replacement: self.render_object(
-                    generated,
-                    *index,
-                    &generated_shape.objects,
-                    &leaf_edits,
-                ),
-            })
-            .collect::<Vec<_>>();
-        edits.extend(leaf_edits.drain(..).filter(|edit| {
-            !root_objects
-                .iter()
-                .any(|index| Self::contains(generated_shape.objects[*index].span, edit.span))
-        }));
-        if edits.is_empty() {
-            return Ok(ArkguardPrintedOutput {
-                code: generated.to_string(),
-                source_map: None,
+    fn merge(&self) -> ArkguardMergedSourceMap {
+        // `SourceMapLink.traceMappings` retains one output row for every row
+        // in the current decoded map, even when tracing drops every segment on
+        // a trailing row. OXC's token model does not store empty mapping rows,
+        // so retain that source-owned row count alongside the merged tokens.
+        let mapping_line_count = self
+            .current
+            .get_tokens()
+            .last()
+            .map_or(0, |token| token.get_dst_line() as usize + 1);
+        let mut traced = Vec::with_capacity(self.current.get_tokens().len());
+        for token in self.current.get_tokens() {
+            if token.get_source_id() != Some(0) {
+                continue;
+            }
+            let Some(previous) =
+                self.trace_previous_segment(token.get_src_line(), token.get_src_col())
+            else {
+                continue;
+            };
+            if previous.get_source_id() != Some(0) {
+                continue;
+            }
+            let name = previous
+                .get_name_id()
+                .and_then(|id| self.previous.get_name(id))
+                .or_else(|| token.get_name_id().and_then(|id| self.current.get_name(id)));
+            traced.push(ArkguardTracedSourceMapToken {
+                dst_line: token.get_dst_line(),
+                dst_col: token.get_dst_col(),
+                src_line: previous.get_src_line(),
+                src_col: previous.get_src_col(),
+                name,
             });
         }
-        edits.sort_by_key(|edit| std::cmp::Reverse(edit.span.start));
-        let mut magic = MagicString::new(generated);
-        for edit in edits {
-            magic
-                .update(edit.span.start, edit.span.end, edit.replacement)
-                .map_err(ObfuscationError::CodegenError)?;
+
+        let mut builder = SourceMapBuilder::default();
+        if !traced.is_empty() {
+            builder.set_source_and_content(self.previous.get_source(0).unwrap_or_default(), "");
         }
-        let source_map = magic.source_map(SourceMapOptions {
-            source: Arc::<str>::from(source_path),
-            hires: Hires::Boundary,
-            ..SourceMapOptions::default()
-        });
-        Ok(ArkguardPrintedOutput {
-            code: magic.to_string(),
-            source_map: Some(source_map),
-        })
-    }
-
-    fn numeric_literal_edits(
-        &self,
-        generated: &str,
-        shape: &ArkguardGeneratedPrinterShape,
-    ) -> Vec<ArkguardPrinterEdit> {
-        self.original_numeric_literals
-            .iter()
-            .zip(&shape.numeric_literals)
-            .filter(|(raw, span)| raw.as_str() != Self::text(generated, **span))
-            .map(|(raw, span)| ArkguardPrinterEdit {
-                span: *span,
-                replacement: raw.clone(),
-            })
-            .collect()
-    }
-
-    fn empty_body_edits(
-        &self,
-        generated: &str,
-        shape: &ArkguardGeneratedPrinterShape,
-    ) -> Vec<ArkguardPrinterEdit> {
-        shape
-            .empty_bodies
-            .iter()
-            .filter(|(span, _)| Self::text(generated, *span) == "{}")
-            .map(|(span, arrow)| {
-                let replacement = if *arrow {
-                    "{ }".to_string()
-                } else {
-                    let line_start = generated[..span.start as usize]
-                        .rfind('\n')
-                        .map_or(0, |index| index + 1);
-                    let indentation = generated[line_start..span.start as usize]
-                        .chars()
-                        .take_while(|character| character.is_whitespace())
-                        .collect::<String>();
-                    format!("{{\n{indentation}}}")
-                };
-                ArkguardPrinterEdit {
-                    span: *span,
-                    replacement,
-                }
-            })
-            .collect()
-    }
-
-    fn render_object(
-        &self,
-        generated: &str,
-        index: usize,
-        objects: &[ArkguardPrinterObject],
-        leaf_edits: &[ArkguardPrinterEdit],
-    ) -> String {
-        let object = &objects[index];
-        if object.properties.is_empty() {
-            return "{}".to_string();
-        }
-        let properties = object
-            .properties
-            .iter()
-            .map(|span| self.render_range(generated, *span, objects, leaf_edits))
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!("{{ {properties} }}")
-    }
-
-    fn render_range(
-        &self,
-        generated: &str,
-        span: Span,
-        objects: &[ArkguardPrinterObject],
-        leaf_edits: &[ArkguardPrinterEdit],
-    ) -> String {
-        let child_objects = objects
-            .iter()
-            .enumerate()
-            .filter(|(_, object)| object.inline && Self::strictly_contains(span, object.span))
-            .filter(|(index, object)| {
-                !objects.iter().enumerate().any(|(parent, candidate)| {
-                    parent != *index
-                        && candidate.inline
-                        && Self::strictly_contains(span, candidate.span)
-                        && Self::strictly_contains(candidate.span, object.span)
-                })
-            })
-            .map(|(index, _)| index)
-            .collect::<Vec<_>>();
-        let mut edits = child_objects
-            .iter()
-            .map(|index| ArkguardPrinterEdit {
-                span: objects[*index].span,
-                replacement: self.render_object(generated, *index, objects, leaf_edits),
-            })
-            .collect::<Vec<_>>();
-        edits.extend(
-            leaf_edits
-                .iter()
-                .filter(|edit| {
-                    Self::contains(span, edit.span)
-                        && !child_objects
-                            .iter()
-                            .any(|index| Self::contains(objects[*index].span, edit.span))
-                })
-                .cloned(),
-        );
-        edits.sort_by_key(|edit| std::cmp::Reverse(edit.span.start));
-        let mut rendered = Self::text(generated, span).to_string();
-        for edit in edits {
-            rendered.replace_range(
-                (edit.span.start - span.start) as usize..(edit.span.end - span.start) as usize,
-                &edit.replacement,
+        for token in traced {
+            let name_id = token.name.map(|name| builder.add_name(name));
+            builder.add_token(
+                token.dst_line,
+                token.dst_col,
+                token.src_line,
+                token.src_col,
+                Some(0),
+                name_id,
             );
         }
-        rendered
+        let mut map = builder.into_owned_sourcemap().into_inner();
+        map.set_source_contents(map.get_sources().map(|_| None).collect::<Vec<_>>());
+        ArkguardMergedSourceMap {
+            source_map: map,
+            mapping_line_count,
+        }
     }
 
-    fn has_plain_object_gaps(generated: &str, object: &ArkguardPrinterObject) -> bool {
-        let mut cursor = object.span.start + 1;
-        for property in &object.properties {
-            if !Self::text(generated, Span::new(cursor, property.start))
-                .chars()
-                .all(|character| character.is_whitespace() || character == ',')
-            {
-                return false;
+    /// Port of
+    /// `arkguard/src/utils/SourceMapMergingUtil.ts::SourceMapLink.traceSegment`.
+    /// Its convergence rule is intentionally not a greatest-lower-bound
+    /// lookup: once the binary-search window contains one segment, that
+    /// segment is selected even when its generated column differs from the
+    /// requested column. An unmapped selected segment terminates the trace.
+    fn trace_previous_segment(&self, line: u32, column: u32) -> Option<oxc_sourcemap::Token> {
+        let tokens = self.previous.get_tokens().collect::<Vec<_>>();
+        let line_start = tokens.partition_point(|token| token.get_dst_line() < line);
+        let line_end = tokens.partition_point(|token| token.get_dst_line() <= line);
+        let segments = tokens.get(line_start..line_end)?;
+        if segments.is_empty() {
+            return None;
+        }
+
+        let mut search_start = 0_isize;
+        let mut search_end = segments.len() as isize - 1;
+        while search_start <= search_end {
+            let middle = (search_start + search_end) >> 1;
+            let segment = &segments[middle as usize];
+            let segment_column = segment.get_dst_col();
+            if segment_column == column || search_start == search_end {
+                return segment.get_source_id().is_some().then_some(*segment);
             }
-            cursor = property.end;
+            if segment_column > column {
+                search_end = middle - 1;
+            } else {
+                search_start = middle + 1;
+            }
         }
-        Self::text(
-            generated,
-            Span::new(cursor, object.span.end.saturating_sub(1)),
-        )
-        .chars()
-        .all(|character| character.is_whitespace() || character == ',')
-    }
-
-    fn text(source: &str, span: Span) -> &str {
-        &source[span.start as usize..span.end as usize]
-    }
-
-    fn contains(outer: Span, inner: Span) -> bool {
-        outer.start <= inner.start && inner.end <= outer.end
-    }
-
-    fn strictly_contains(outer: Span, inner: Span) -> bool {
-        Self::contains(outer, inner) && outer != inner
+        None
     }
 }
 
-struct ArkguardOriginalPrinterShape<'a> {
-    source: &'a str,
-    numeric_literals: Vec<String>,
-    inline_objects: Vec<bool>,
+struct ArkguardMergedSourceMap {
+    source_map: oxc_sourcemap::SourceMap<'static>,
+    mapping_line_count: usize,
 }
 
-impl<'a> Visit<'a> for ArkguardOriginalPrinterShape<'_> {
-    fn visit_numeric_literal(&mut self, literal: &NumericLiteral<'a>) {
-        self.numeric_literals.push(literal.raw_str().into_owned());
-    }
-
-    fn visit_object_expression(&mut self, object: &ObjectExpression<'a>) {
-        self.inline_objects.push(
-            !ArkguardTypeScriptPrinter::text(self.source, object.span).contains(['\n', '\r']),
-        );
-        walk::walk_object_expression(self, object);
-    }
-}
-
-#[derive(Default)]
-struct ArkguardGeneratedPrinterShape {
-    numeric_literals: Vec<Span>,
-    objects: Vec<ArkguardPrinterObject>,
-    arrow_bodies: FxHashSet<Span>,
-    empty_bodies: Vec<(Span, bool)>,
-}
-
-impl<'a> Visit<'a> for ArkguardGeneratedPrinterShape {
-    fn visit_numeric_literal(&mut self, literal: &NumericLiteral<'a>) {
-        self.numeric_literals.push(literal.span);
-    }
-
-    fn visit_object_expression(&mut self, object: &ObjectExpression<'a>) {
-        self.objects.push(ArkguardPrinterObject {
-            span: object.span,
-            properties: object
-                .properties
-                .iter()
-                .map(GetSpan::span)
-                .collect::<Vec<_>>(),
-            inline: false,
-        });
-        walk::walk_object_expression(self, object);
-    }
-
-    fn visit_arrow_function_expression(&mut self, arrow: &ArrowFunctionExpression<'a>) {
-        if let ArrowFunctionBody::FunctionBody(body) = &arrow.body {
-            self.arrow_bodies.insert(body.span);
-        }
-        walk::walk_arrow_function_expression(self, arrow);
-    }
-
-    fn visit_function_body(&mut self, body: &FunctionBody<'a>) {
-        if body.directives.is_empty() && body.statements.is_empty() {
-            self.empty_bodies
-                .push((body.span, self.arrow_bodies.contains(&body.span)));
-        }
-        walk::walk_function_body(self, body);
-    }
+struct ArkguardTracedSourceMapToken<'a> {
+    dst_line: u32,
+    dst_col: u32,
+    src_line: u32,
+    src_col: u32,
+    name: Option<&'a str>,
 }
 
 struct SymbolRename {
@@ -2062,6 +1871,40 @@ impl<'a> Visit<'a> for PropertyNameCollector {
     }
 }
 
+#[derive(Default)]
+struct ArkguardSyntheticSymbolSpans {
+    symbols: FxHashSet<SymbolId>,
+    references: FxHashSet<ReferenceId>,
+}
+
+impl ArkguardSyntheticSymbolSpans {
+    fn transform<'a>(&mut self, program: &mut Program<'a>) {
+        self.visit_program(program);
+    }
+}
+
+impl<'a> VisitMut<'a> for ArkguardSyntheticSymbolSpans {
+    fn visit_binding_identifier(&mut self, identifier: &mut BindingIdentifier<'a>) {
+        if identifier
+            .symbol_id
+            .get()
+            .is_some_and(|symbol_id| self.symbols.contains(&symbol_id))
+        {
+            identifier.span = Span::default();
+        }
+    }
+
+    fn visit_identifier_reference(&mut self, identifier: &mut IdentifierReference<'a>) {
+        if identifier
+            .reference_id
+            .get()
+            .is_some_and(|reference_id| self.references.contains(&reference_id))
+        {
+            identifier.span = Span::default();
+        }
+    }
+}
+
 struct NativeArkguardAstTransform<'a, 'm> {
     allocator: &'a Allocator,
     properties: &'m FxHashMap<String, String>,
@@ -2100,6 +1943,7 @@ impl<'a, 'm> NativeArkguardAstTransform<'a, 'm> {
     fn rename_identifier(&self, identifier: &mut IdentifierName<'a>) {
         if let Some(replacement) = self.properties.get(identifier.name.as_str()) {
             identifier.name = Ident::from_str_in(replacement, &self.allocator);
+            identifier.span = Span::default();
         }
     }
 
@@ -2107,6 +1951,7 @@ impl<'a, 'm> NativeArkguardAstTransform<'a, 'm> {
         if let Some(replacement) = self.properties.get(literal.value.as_str()) {
             literal.value = Str::from_str_in(replacement, &self.allocator);
             literal.raw = None;
+            literal.span = Span::default();
         }
     }
 
@@ -2120,6 +1965,7 @@ impl<'a, 'm> NativeArkguardAstTransform<'a, 'm> {
         if literal.value != replacement {
             literal.value = Str::from_str_in(&replacement, &self.allocator);
             literal.raw = None;
+            literal.span = Span::default();
         }
     }
 }
@@ -2148,6 +1994,7 @@ impl<'a> VisitMut<'a> for NativeArkguardAstTransform<'a, '_> {
             PropertyKey::PrivateIdentifier(identifier) => {
                 if let Some(replacement) = self.properties.get(identifier.name.as_str()) {
                     identifier.name = Ident::from_str_in(replacement, &self.allocator);
+                    identifier.span = Span::default();
                 }
             }
             PropertyKey::StringLiteral(literal) if self.rename_strings => {
@@ -2165,6 +2012,7 @@ impl<'a> VisitMut<'a> for NativeArkguardAstTransform<'a, '_> {
     fn visit_private_field_expression(&mut self, member: &mut PrivateFieldExpression<'a>) {
         if let Some(replacement) = self.properties.get(member.field.name.as_str()) {
             member.field.name = Ident::from_str_in(replacement, &self.allocator);
+            member.field.span = Span::default();
         }
         walk_mut::walk_expression(self, &mut member.object);
     }

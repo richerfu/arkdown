@@ -82,7 +82,7 @@ impl BuildCoordinator {
             ),
         ) in loader_jsons
             .iter()
-            .zip(bundle_outs.iter())
+            .zip(bundle_outs.iter_mut())
             .zip(all_bc_har_deps.iter())
             .enumerate()
         {
@@ -243,7 +243,7 @@ impl BuildCoordinator {
                     anyhow::anyhow!("missing module compile context for {}", module.name)
                 })?;
                 let loader_json_path = module_layout.loader_json();
-                StaticArktsCompiler::new(StaticArktsCompileInput {
+                let static_abc = StaticArktsCompiler::new(StaticArktsCompileInput {
                     config: module_config.as_ref(),
                     module,
                     manifest,
@@ -251,6 +251,7 @@ impl BuildCoordinator {
                     module_context: &module_context,
                     module_layout: &module_layout,
                     loader_json_path: &loader_json_path,
+                    module_source_files: &bundle_out.bundle_output.module_source_files,
                     node_executable: args.resolved_node_executable(),
                     output_abc: &bundle_out.bundle_output.modules_abc_path,
                     preview_mode: args.preview
@@ -261,7 +262,9 @@ impl BuildCoordinator {
                     ui_transform_optimization: args.ui_transform_optimization,
                     bundle_type: &session.project.bundle_type,
                 })?
-                .compile()
+                .compile()?;
+                bundle_out.bundle_output.modules_abc_path = static_abc;
+                Ok(())
             } else if let Some(reload_plan) = hot_reload_compile_plan.as_ref() {
                 let initial = reload_plan.phase == HotReloadCompilePhase::Initial;
                 Self::compile_bytecode(

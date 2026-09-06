@@ -18,7 +18,7 @@ mod insight_intent;
 pub(crate) mod legacy_extend;
 mod local_builder;
 mod navigation;
-pub(crate) mod source_emit;
+pub mod source_emit;
 mod source_text;
 mod static_graph;
 mod syntax;

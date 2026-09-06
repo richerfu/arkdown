@@ -57,6 +57,7 @@ pub use source::{
     TransformSourceSnapshot,
 };
 pub use sys_resource::SystemResourceReferenceLoader;
+pub use transform::source_emit::{HvigorTypescriptPrintOutput, HvigorTypescriptPrinter};
 pub use transform::{
     ArktsTransformer, ArkuiComponentNameCollector, CheckerMode, CrossplatformSourceCollection,
     InsightIntentDeclaration, InsightIntentEntityDeclaration, InsightIntentSchemaCatalog,

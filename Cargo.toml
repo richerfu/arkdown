@@ -48,11 +48,6 @@ arkdown-session = { path = "crates/arkdown-session" }
 arkdown-sign = { path = "crates/arkdown-sign" }
 arkdown-watcher = { path = "crates/arkdown-watcher" }
 
-# Full Rust OHPM implementation. Arkdown invokes its library API before the
-# immutable build session is captured; no OHPM subprocess or duplicate
-# package-acquisition implementation remains in this workspace.
-ohpm-core = "=0.2.0"
-
 # OpenHarmony signing backend. Keep the CLI disabled: arkdown owns project
 # discovery and orchestration, while hapsigner owns the signing formats.
 hapsigner = { version = "0.2.0", default-features = false }
@@ -82,7 +77,6 @@ rolldown_plugin = { git = "https://github.com/ohos-rs/rolldown", rev = "3aac1451
 rolldown_sourcemap = { git = "https://github.com/ohos-rs/rolldown", rev = "3aac1451ad00e255acfaaecb5c94fc2d52c31c03" }
 rolldown_utils = { git = "https://github.com/ohos-rs/rolldown", rev = "3aac1451ad00e255acfaaecb5c94fc2d52c31c03" }
 rolldown_error = { git = "https://github.com/ohos-rs/rolldown", rev = "3aac1451ad00e255acfaaecb5c94fc2d52c31c03" }
-string_wizard = "=1.2.4"
 
 # NAPI-RS (Node.js native addon bridge — used by packages/arkdown)
 napi = { version = "3.9.1", features = [
@@ -172,12 +166,6 @@ aes-gcm     = "0.10"
 pbkdf2      = { version = "0.12", default-features = false, features = ["hmac"] }
 hex         = "0.4"
 tempfile = "3"
-
-# ohpm-core 0.2.0 resolves through gix 0.86, whose bisync dependency was
-# yanked from crates.io. Keep the published OHPM API consumable until the
-# gix 0.87 fix from ohpm-rs is released.
-[patch.crates-io]
-bisync = { git = "https://github.com/JM4ier/bisync", rev = "be3a0a6255a0af592e66be8614a149151f67fdf5" }
 
 [profile.release]
 lto = true

@@ -2006,6 +2006,11 @@ impl BuildCoordinator {
                 .map_err(|e| anyhow::anyhow!("Obfuscation config invalid: {}", e))?;
                 match obfuscator.mode() {
                     ObfuscationMode::Bytecode => {
+                        if session.arkts_language_version.is_static() {
+                            anyhow::bail!(
+                                "ARKDOWN_ARKTS12_BYTECODE_OBFUSCATION_PENDING: the static frontend requires the source-defined ark_guard config and modules_static.abc lifecycle"
+                            );
+                        }
                         pending_bytecode_obfuscations[bundle_index] =
                             Some(PendingBytecodeObfuscation::new(
                                 obfuscator,
@@ -2013,6 +2018,14 @@ impl BuildCoordinator {
                             ));
                     }
                     ObfuscationMode::Source => {
+                        if session.arkts_language_version.is_static() {
+                            // Static frontend
+                            // `initObfuscationConfig`/`genObfuscationConfig`
+                            // only schedules native bytecode obfuscation when
+                            // `-enable-bytecode-obfuscation` is present. It
+                            // never rewrites the Rolldown projection sources.
+                            continue;
+                        }
                         let output = obfuscator
                             .obfuscate_module(module_input)
                             .map_err(|e| anyhow::anyhow!("Obfuscation failed: {}", e))?;
