@@ -495,7 +495,7 @@ test('explicit plugin factories and nested arrays retain deterministic native or
   )
 })
 
-test('configured CJS plugin modules use default exports and path fields do not reach Rust build config', async (context) => {
+test('configured CJS plugin modules use default exports and only the Node executable reaches Rust', async (context) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'arkdown-plugin-adapter-'))
   const pluginFile = path.join(root, 'compile-plugin.cjs')
   fs.writeFileSync(pluginFile, "exports.default = { name: 'configured', transform(code) { return code } }\n")
@@ -507,7 +507,11 @@ test('configured CJS plugin modules use default exports and path fields do not r
     compilePluginPath: './compile-plugin.cjs',
   })
 
-  assert.deepEqual(prepared.config, { project: root, target: 'hap' })
+  assert.deepEqual(prepared.config, {
+    project: root,
+    target: 'hap',
+    nodeExecutable: process.execPath,
+  })
   assert.equal(prepared.plugins.length, 1)
   assert.equal(prepared.plugins[0].name, 'configured')
   assert.equal(prepared.plugins[0].__arkdownHvigorCompilePlugin, true)

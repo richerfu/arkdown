@@ -109,6 +109,7 @@ impl RolldownEtsTransformPlan {
         component_metadata: transform::component_meta::ComponentMetadata,
         sources: TransformSourceSnapshot,
     ) -> Self {
+        let module_name = module_name.into();
         let module_exports = ModuleExportIndex::build(&sources, &module_roots, &component_metadata);
         let const_enum_exports = Arc::new(ConstEnumExportCache::new(sources.clone()));
         let resource_reference_index = Arc::new(ResourceReferenceIndex::new(&resource_refs));
@@ -117,7 +118,7 @@ impl RolldownEtsTransformPlan {
             api_available: ApiAvailableTransformOptions::default(),
             system_api: SystemApiCheckOptions::default(),
             bundle_name: bundle_name.into(),
-            module_name: module_name.into(),
+            module_name,
             project_root,
             project_path,
             module_roots,
@@ -389,9 +390,15 @@ impl RolldownEtsTransformer {
     ) -> Result<Option<RolldownEtsTransformOutput>, EtsTransformError> {
         let source_kind = SourceClassifier::classify(id);
         if !source_kind.is_ets_transform_input() {
-            let javascript_source_map = source_kind
-                .is_javascript_runtime()
-                .then(|| source_map::JavaScriptIdentitySourceMapBuilder::new(code, id).build());
+            let rolldown_source = if source_kind.is_javascript_runtime() {
+                LazyImportRolldownAdapter::new(code, id, ArktsLanguageVersion::V1_1).lower()
+            } else {
+                Cow::Borrowed(code)
+            };
+            let code_for_rolldown = rolldown_source.as_ref();
+            let javascript_source_map = (source_kind.is_javascript_runtime()
+                && matches!(rolldown_source, Cow::Borrowed(_)))
+            .then(|| source_map::JavaScriptIdentitySourceMapBuilder::new(code, id).build());
             let crossplatform_collection = if source_kind.is_javascript_runtime()
                 && Path::new(id)
                     .extension()
@@ -402,7 +409,7 @@ impl RolldownEtsTransformer {
                 let allocator = Allocator::default();
                 let source_type = SourceType::from_path(id)
                     .unwrap_or_else(|_| SourceType::mjs().with_module(true));
-                let parsed = Parser::new(&allocator, code, source_type).parse();
+                let parsed = Parser::new(&allocator, code_for_rolldown, source_type).parse();
                 if parsed.diagnostics.is_empty() {
                     transform::CrossplatformSourceCollection::modules_from_program(
                         &parsed.program,
@@ -415,9 +422,9 @@ impl RolldownEtsTransformer {
                 transform::CrossplatformSourceCollection::default()
             };
             let pipeline = HvigorSourcePipeline::new(self, id);
-            if pipeline.should_finalize_unclassified_source(code) {
-                let finalization = pipeline.finalize_source(code)?;
-                if finalization.code != code || !finalization.warnings.is_empty() {
+            if pipeline.should_finalize_unclassified_source(code_for_rolldown) {
+                let finalization = pipeline.finalize_source(code_for_rolldown)?;
+                if finalization.code != code_for_rolldown || !finalization.warnings.is_empty() {
                     return Ok(Some(RolldownEtsTransformOutput {
                         code: finalization.code.into_owned(),
                         warnings: finalization.warnings,
@@ -434,7 +441,7 @@ impl RolldownEtsTransformer {
             }
             if !crossplatform_collection.is_empty() {
                 return Ok(Some(RolldownEtsTransformOutput {
-                    code: code.to_string(),
+                    code: code_for_rolldown.to_string(),
                     warnings: Vec::new(),
                     module_source_code: None,
                     source_map: javascript_source_map,
@@ -452,6 +459,20 @@ impl RolldownEtsTransformer {
                     warnings: Vec::new(),
                     module_source_code: None,
                     source_map: Some(source_map),
+                    record_module_source_code: false,
+                    emits_javascript: false,
+                    is_comment_only_javascript: false,
+                    is_shared_module: false,
+                    insight_intent: transform::InsightIntentSourceMetadata::default(),
+                    crossplatform_collection,
+                }));
+            }
+            if matches!(rolldown_source, Cow::Owned(_)) {
+                return Ok(Some(RolldownEtsTransformOutput {
+                    code: code_for_rolldown.to_string(),
+                    warnings: Vec::new(),
+                    module_source_code: None,
+                    source_map: None,
                     record_module_source_code: false,
                     emits_javascript: false,
                     is_comment_only_javascript: false,
@@ -2571,7 +2592,8 @@ struct Index {
         .with_arkts_language_version(ArktsLanguageVersion::V1_2)
         .with_checker_mode(CheckerMode::Off);
         let transformer = RolldownEtsTransformer::new(Arc::new(plan));
-        let source = r#"import { value } from "./value"
+        let source = r#"'use static';
+import { value } from "./value"
 @Entry @Component struct StaticPage {
   build() { Text(value); Text($r(resourceName)) }
 }
@@ -2611,7 +2633,7 @@ struct Index {
     }
 
     #[test]
-    fn static_arkts_ts_sources_use_the_static_frontend_and_graph_projection() {
+    fn static_product_keeps_typescript_sources_in_the_dynamic_pipeline() {
         let plan = RolldownEtsTransformPlan::new(
             "com.example",
             "entry",
@@ -2631,12 +2653,92 @@ struct Index {
         let output = transformer
             .compile_transform(source, "/tmp/project/entry/src/main/ets/value.ts")
             .unwrap()
-            .expect("static TypeScript must produce a Rolldown graph projection");
+            .expect("TypeScript in an ArkTS 1.2 product stays dynamic");
 
-        assert_eq!(output.code, "import \"./value\";\nexport {};\n");
-        assert_eq!(output.module_source_code.as_deref(), Some(source));
+        assert!(output.code.contains("import { value } from \"./value\";"));
+        assert!(output.code.contains("export function read(): number"));
+        assert_eq!(output.module_source_code.as_deref(), Some(&*output.code));
         assert!(!output.emits_javascript);
         assert!(output.record_module_source_code);
+    }
+
+    #[test]
+    fn static_product_projects_dynamic_import_from_hybrid_dependency() {
+        let plan = RolldownEtsTransformPlan::new(
+            "com.example",
+            "entry",
+            PathBuf::from("/tmp/project"),
+            PathBuf::from("/tmp/project/entry/src/main/ets"),
+            vec![
+                ("entry".to_string(), PathBuf::from("/tmp/project/entry")),
+                ("library".to_string(), PathBuf::from("/tmp/project/library")),
+            ],
+            20,
+            FxHashMap::default(),
+            transform::component_meta::ComponentMetadata::default(),
+            TransformSourceSnapshot::default(),
+        )
+        .with_arkts_language_version(ArktsLanguageVersion::V1_2)
+        .with_checker_mode(CheckerMode::Off);
+        let transformer = RolldownEtsTransformer::new(Arc::new(plan));
+        // OpenHarmony ArkTSStaticSample/library uses this shape. The current
+        // frontend classifies the dependency module as hybrid and this file as
+        // 1.1 because its first effective line is not `use static`.
+        let source = concat!(
+            "\u{feff}/* OpenHarmony sample license */\n",
+            "import('./sta_bridge/InitStatic');\n",
+            "const factory = function () { return 1; };\n",
+            "export { DataParser } from './dispatch/DataParser';\n",
+        );
+        let output = transformer
+            .compile_transform(
+                source,
+                "/tmp/project/library/src/main/ets/components/Index.ets",
+            )
+            .unwrap()
+            .expect("hybrid dependency source must produce a graph projection");
+
+        assert!(
+            output.code.contains("import('./sta_bridge/InitStatic')"),
+            "{}",
+            output.code
+        );
+        assert_eq!(output.module_source_code.as_deref(), Some(source));
+    }
+
+    #[test]
+    fn javascript_lazy_import_is_lowered_only_for_rolldown() {
+        let plan = RolldownEtsTransformPlan::new(
+            "com.example",
+            "entry",
+            PathBuf::from("/tmp/project"),
+            PathBuf::from("/tmp/project/entry/src/main/ets"),
+            Vec::new(),
+            20,
+            FxHashMap::default(),
+            transform::component_meta::ComponentMetadata::default(),
+            TransformSourceSnapshot::default(),
+        )
+        .with_arkts_language_version(ArktsLanguageVersion::V1_2)
+        .with_checker_mode(CheckerMode::Off);
+        let transformer = RolldownEtsTransformer::new(Arc::new(plan));
+        let source = concat!(
+            "import lazy { DataParser as DataParserDyn } from '../dyn/DataParser';\n",
+            "export { DataParserDyn };\n",
+        );
+        let output = transformer
+            .compile_transform(source, "/tmp/project/library/dispatch/DataParser.js")
+            .unwrap()
+            .expect("JavaScript lazy import needs a standard ESM graph projection");
+
+        assert!(!output.code.contains("import lazy"), "{}", output.code);
+        assert!(
+            output.code.contains("from \"../dyn/DataParser\""),
+            "{}",
+            output.code
+        );
+        assert!(output.module_source_code.is_none());
+        assert!(!output.record_module_source_code);
     }
 
     #[test]

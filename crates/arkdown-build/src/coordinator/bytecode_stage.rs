@@ -230,18 +230,45 @@ impl BuildCoordinator {
             "ARKDOWN_ARKTS12_RELOAD_UNSUPPORTED: the static SDK driver does not expose the 1.1 hot/cold reload protocol"
           );
                 }
-                if widget_bundle_outs
-                    .get(bundle_index)
-                    .and_then(Option::as_ref)
-                    .is_some()
-                {
-                    anyhow::bail!(
-            "ARKDOWN_ARKTS12_WIDGET_UNSUPPORTED: a separate static widget compilation plan is required"
-          );
-                }
                 let module_context = session.module_context(&module.name).ok_or_else(|| {
                     anyhow::anyhow!("missing module compile context for {}", module.name)
                 })?;
+                let requires_dynamic_abc = module_layout
+                    .arkts_interop_dir()
+                    .join("declgen-v2-request.json")
+                    .is_file();
+                let dynamic_abc = bundle_out.bundle_output.modules_abc_path.clone();
+                if requires_dynamic_abc {
+                    Self::compile_bytecode(
+                        RolldownBytecodeCompiler::new(
+                            abc_ts2abc_backend_inner,
+                            config.sdk_config.es2abc_path.clone(),
+                            Arc::clone(&session.sdk.es2abc_options),
+                            compile_target.api_version(),
+                            config.build_mode.is_debuggable(),
+                        )
+                        .with_target_api_sub_version(compile_target.api_sub_version())
+                        .with_branch_elimination(branch_elimination)
+                        .with_transform_lib(transform_lib.clone()),
+                        RolldownBytecodeCompileInput {
+                            module_source_files: bundle_out
+                                .bundle_output
+                                .module_source_files
+                                .clone(),
+                            external_module_requests: bundle_out
+                                .bundle_output
+                                .external_module_requests
+                                .clone(),
+                            npm_entries: bundle_out.bundle_output.npm_entries.clone(),
+                            modules_abc_path: bundle_out.bundle_output.modules_abc_path.clone(),
+                            cache_dir: bytecode_cache_dir.clone(),
+                            cache_file: effective_cache_file.clone(),
+                            abc_input_files: abc_input_files.clone(),
+                            compile_context_info_path: compile_context_info_path.clone(),
+                            byte_code_har: loader_json.byte_code_har.unwrap_or(false),
+                        },
+                    )?;
+                }
                 let loader_json_path = module_layout.loader_json();
                 let static_abc = StaticArktsCompiler::new(StaticArktsCompileInput {
                     config: module_config.as_ref(),
@@ -261,9 +288,40 @@ impl BuildCoordinator {
                     is_crossplatform: args.is_crossplatform,
                     ui_transform_optimization: args.ui_transform_optimization,
                     bundle_type: &session.project.bundle_type,
+                    obfuscation: pending_bytecode_obfuscations[bundle_index]
+                        .as_ref()
+                        .and_then(PendingBytecodeObfuscation::static_driver_plan),
                 })?
                 .compile()?;
-                bundle_out.bundle_output.modules_abc_path = static_abc;
+                if let Some(static_abc) = static_abc {
+                    // The dynamic SDK invokes Hvigor's `beforeObfuscate`
+                    // callback before its own BytecodeObfuscator. Execute the
+                    // static driver plan at the same boundary so both sides
+                    // can share the ordered name cache without overwriting the
+                    // static driver's config before it is consumed.
+                    if let Some(pending) = pending_bytecode_obfuscations[bundle_index].as_mut() {
+                        pending.run_static(&module.name, &static_abc)?;
+                    }
+                    bundle_out.bundle_output.modules_abc_path = static_abc;
+                    bundle_out.additional_abc_paths = requires_dynamic_abc
+                        .then_some(dynamic_abc)
+                        .into_iter()
+                        .collect();
+                } else if requires_dynamic_abc {
+                    if !dynamic_abc.is_file() {
+                        anyhow::bail!(
+                            "ARKDOWN_ARKTS12_DYNAMIC_OUTPUT_MISSING: {}",
+                            dynamic_abc.display()
+                        );
+                    }
+                    bundle_out.bundle_output.modules_abc_path = dynamic_abc;
+                    bundle_out.additional_abc_paths.clear();
+                } else {
+                    anyhow::bail!(
+                        "ARKDOWN_ARKTS12_OUTPUT_EMPTY: module '{}' has no dynamic sources, static compiler roots, or linkable ByteCode HAR inputs",
+                        module.name
+                    );
+                }
                 Ok(())
             } else if let Some(reload_plan) = hot_reload_compile_plan.as_ref() {
                 let initial = reload_plan.phase == HotReloadCompilePhase::Initial;
@@ -391,7 +449,7 @@ impl BuildCoordinator {
                 .generate(&bundle_out.bundle_output.modules_abc_path)?;
 
                 if let Some(pending) = pending_bytecode_obfuscations[bundle_index].take() {
-                    pending.run(&module.name)?;
+                    pending.run_dynamic(&module.name)?;
                 }
             }
 

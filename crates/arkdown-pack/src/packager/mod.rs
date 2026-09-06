@@ -489,19 +489,27 @@ impl Packager {
             Self::add_loader_out_ets_assets(&mut writer, ets_dir, &input.output_path)?;
         }
 
-        // Preserve the source frontend's merged-ABC name. The static driver
-        // declares `modules_static.abc`; the dynamic compiler declares
-        // `modules.abc`. API >= 9 places either artifact below `ets/`.
-        if input.abc_path.exists() {
-            let abc_name = input
-                .abc_path
+        // Current Hvigor `BasePackHapTask.generateCommand` passes the complete
+        // loader-out ETS directory through `--ets-path`. A hybrid ArkTS 1.2
+        // module therefore packages both the dynamic and static merged ABCs.
+        // Keep the compiler-owned primary path first, then the explicitly
+        // declared additional artifacts; never infer a stale sibling file.
+        let mut abc_paths = Vec::with_capacity(1 + input.additional_abc_paths.len());
+        abc_paths.push(input.abc_path.clone());
+        abc_paths.extend(input.additional_abc_paths.iter().cloned());
+        abc_paths.dedup();
+        for abc_path in abc_paths {
+            if !abc_path.is_file() {
+                return Err(PackError::MissingInput(abc_path.display().to_string()));
+            }
+            let abc_name = abc_path
                 .file_name()
                 .and_then(|name| name.to_str())
                 .filter(|name| matches!(*name, "modules.abc" | "modules_static.abc"))
                 .ok_or_else(|| {
                     PackError::MissingInput(format!(
                         "unsupported merged ABC name ({})",
-                        input.abc_path.display()
+                        abc_path.display()
                     ))
                 })?;
             let abc_dest = if self.config.sdk_config.compile_api_version >= 9 {
@@ -509,11 +517,7 @@ impl Packager {
             } else {
                 abc_name.to_string()
             };
-            zip_writer::add_file_stored(&mut writer, &abc_dest, &input.abc_path)?;
-        } else {
-            return Err(PackError::MissingInput(
-                input.abc_path.display().to_string(),
-            ));
+            zip_writer::add_file_stored(&mut writer, &abc_dest, &abc_path)?;
         }
 
         if let Some(source_maps_path) = &input.source_maps_path {

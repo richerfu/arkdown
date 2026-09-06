@@ -8,10 +8,9 @@ use thiserror::Error;
 
 /// ArkTS source language selected for one arkdown build invocation.
 ///
-/// The selection is intentionally explicit. Source extensions, directives,
-/// manifests, and dependency metadata must not silently switch the project to
-/// ArkTS 1.2. This keeps existing builds on the ArkTS 1.1 pipeline unless the
-/// caller opts in with the public build parameter.
+/// The selected product owns the default language version, matching hvigor's
+/// `targetData.getProduct().arkTSVersion` handoff. A typed build request may
+/// explicitly override it; source extensions and directives never do.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ArktsLanguageVersion {
     /// Dynamic ArkTS / ArkTS 1.1.
@@ -33,6 +32,18 @@ impl ArktsLanguageVersion {
 
     pub const fn is_static(self) -> bool {
         matches!(self, Self::V1_2)
+    }
+
+    /// Merged bytecode filename owned by the selected frontend.
+    ///
+    /// The ArkTS 1.2 SDK driver declares `modules_static.abc` in
+    /// `driver/build_system/src/pre_define.ts::MERGED_ABC_FILE`; the dynamic
+    /// ets2abc pipeline retains `modules.abc`.
+    pub const fn merged_abc_file_name(self) -> &'static str {
+        match self {
+            Self::V1_1 => "modules.abc",
+            Self::V1_2 => "modules_static.abc",
+        }
     }
 }
 

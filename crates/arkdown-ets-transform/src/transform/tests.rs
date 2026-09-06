@@ -1133,7 +1133,8 @@ struct Parent {
 
 #[test]
 fn static_arkts_uses_the_source_ui_syntax_wrap_builder_rule_only() {
-    let invalid_wrap = r#"function Content(): void {}
+    let invalid_wrap = r#"'use static';
+function Content(): void {}
 const wrapped = wrapBuilder(Content)
 "#;
     let options =
@@ -1150,7 +1151,8 @@ const wrapped = wrapBuilder(Content)
         "{error}"
     );
 
-    let mutable = r#"function Content(): void {}
+    let mutable = r#"'use static';
+function Content(): void {}
 const wrapped = mutableBuilder(Content)
 "#;
     let result = TransformHarness::transform_with_options(
@@ -1163,7 +1165,8 @@ const wrapped = mutableBuilder(Content)
 
 #[test]
 fn static_arkts_never_routes_components_through_the_legacy_view_lowerers() {
-    let source = r#"@Entry
+    let source = r#"'use static';
+@Entry
 @Component
 struct StaticPage {
   build() { Text("static") }
@@ -1178,6 +1181,32 @@ struct StaticPage {
     assert_eq!(result, source);
     assert!(!result.contains("ViewPU"));
     assert!(!result.contains("ViewV2"));
+}
+
+#[test]
+fn static_product_routes_dynamic_ets_through_the_legacy_view_lowerers() {
+    let source = r#"@Entry
+@Component
+struct DynamicPage {
+  build() { Text("dynamic") }
+}
+"#;
+    let options = TransformOptions {
+        arkts_language_version: ArktsLanguageVersion::V1_2,
+        bundle_name: Some("com.example".to_string()),
+        module_name: Some("entry".to_string()),
+        project_root: Some(PathBuf::from("/project")),
+        project_path: Some(PathBuf::from("/project/entry/src/main/ets")),
+        entry_source: true,
+        ..TransformOptions::default()
+    };
+    let result =
+        TransformHarness::transform_with_options(&make_source("DynamicPage.ets", source), &options)
+            .expect("an ArkTS 1.2 product can contain dynamic ArkTS 1.1 sources");
+
+    assert_ne!(result, source);
+    assert!(result.contains("ViewPU"), "{result}");
+    assert!(!result.contains("struct DynamicPage"), "{result}");
 }
 
 #[test]

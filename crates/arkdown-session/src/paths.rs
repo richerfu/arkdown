@@ -85,18 +85,24 @@ impl<'a> ModulePathLayout<'a> {
     }
 
     pub fn bytecode_har_abc_candidates(&self) -> Vec<PathBuf> {
-        vec![
-            self.module_root.join("modules.abc"),
-            self.module_root.join("ets").join("modules.abc"),
-            self.module_root
-                .join("build")
-                .join("default")
-                .join("intermediates")
-                .join("loader_out")
-                .join("default")
-                .join("ets")
-                .join("modules.abc"),
-        ]
+        let build_ets = self
+            .module_root
+            .join("build")
+            .join("default")
+            .join("intermediates")
+            .join("loader_out")
+            .join("default")
+            .join("ets");
+        ["modules.abc", "modules_static.abc"]
+            .into_iter()
+            .flat_map(|file_name| {
+                [
+                    self.module_root.join(file_name),
+                    self.module_root.join("ets").join(file_name),
+                    build_ets.join(file_name),
+                ]
+            })
+            .collect()
     }
 }
 

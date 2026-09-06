@@ -164,7 +164,8 @@ impl OhPackage {
     /// Resolve the `.abc` artifact path for a ByteCode HAR.
     ///
     /// Checks (in priority order):
-    /// 1. `metadata.byteCodeHar == true` → `ets/modules.abc`
+    /// 1. `metadata.byteCodeHar == true` → the installed dynamic or static
+    ///    merged ABC under `ets/`
     /// 2. `metadata.abcPath` (explicit override)
     /// 3. `main` field ending with `.abc`
     /// 4. `index.abc` in package root
@@ -172,9 +173,11 @@ impl OhPackage {
     /// Returns `None` if none of the above paths exist on disk.
     pub fn bytecode_abc_path(&self) -> Option<PathBuf> {
         if self.metadata.byte_code_har {
-            let abc = self.pkg_dir.join("ets").join("modules.abc");
-            if abc.exists() {
-                return Some(abc);
+            for file_name in ["modules.abc", "modules_static.abc"] {
+                let abc = self.pkg_dir.join("ets").join(file_name);
+                if abc.is_file() {
+                    return Some(abc);
+                }
             }
         }
         if let Some(ref rel) = self.metadata.abc_path {
@@ -343,6 +346,26 @@ mod tests {
             .bytecode_abc_path()
             .expect("abc path")
             .ends_with("ets/modules.abc"));
+    }
+
+    #[test]
+    fn test_is_static_bytecode_har_hvigor_marker() {
+        let (dir, path) = write_temp(
+            r#"{ "name": "foo", "version": "1.0.0", "metadata": { "byteCodeHar": true } }"#,
+        );
+        std::fs::create_dir_all(dir.path().join("ets")).unwrap();
+        std::fs::write(
+            dir.path().join("ets").join("modules_static.abc"),
+            b"PANDA\x00\x00\x00",
+        )
+        .unwrap();
+        let pkg = OhPackage::load(&path).unwrap();
+
+        assert!(pkg.is_bytecode_har());
+        assert!(pkg
+            .bytecode_abc_path()
+            .expect("static abc path")
+            .ends_with("ets/modules_static.abc"));
     }
 
     #[test]

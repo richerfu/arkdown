@@ -26,7 +26,7 @@ pub struct HarDeclarationGenerator<'a> {
     output_dir: PathBuf,
     module_output_prefix: PathBuf,
     output_prefix: PathBuf,
-    generated_sources: Vec<&'a Path>,
+    additional_sources: Vec<PathBuf>,
     bundled_entries: Vec<PathBuf>,
     dependency_packages: BTreeMap<String, (PathBuf, PathBuf)>,
     arkts_language_version: ArktsLanguageVersion,
@@ -46,19 +46,37 @@ impl<'a> HarDeclarationGenerator<'a> {
             output_dir,
             output_prefix: module_output_prefix.join("src/main/ets"),
             module_output_prefix,
-            generated_sources: Vec::new(),
+            additional_sources: Vec::new(),
             bundled_entries: Vec::new(),
             dependency_packages: BTreeMap::new(),
             arkts_language_version: ArktsLanguageVersion::default(),
         }
     }
 
-    /// The latest `ets-loader` declaration pass also emits declarations for
-    /// generated TypeScript compile entries. ByteCode HAR's `ModuleInfo.ts` is
-    /// the concrete example: `generateSourceFilesInHar` preserves its path
-    /// relative to the consuming module below `etsFortgz`.
-    pub fn with_generated_source(mut self, source: &'a Path) -> Self {
-        self.generated_sources.push(source);
+    /// The latest `ets-loader` declaration pass emits declarations for every
+    /// compiled source, including generated TypeScript entries. ByteCode HAR's
+    /// `ModuleInfo.ts` is the concrete generated example:
+    /// `generateSourceFilesInHar` preserves its module-relative path below
+    /// `etsFortgz`.
+    pub fn with_generated_source(mut self, source: &Path) -> Self {
+        self.additional_sources.push(source.to_path_buf());
+        self
+    }
+
+    /// Include the package's public module-relative entry in the declaration
+    /// input set. Current static `generateBuildConfig` binds binary HAR imports
+    /// to `Index`, while the ArkTS binding source inventory scans the whole
+    /// module root rather than only `src/main/ets`; therefore a root
+    /// `Index.ets` must be emitted as `etsFortgz/<module>/Index.d.ets`.
+    pub fn with_module_entry_source(mut self, main: Option<&str>) -> Self {
+        if let Some(main) = main.filter(|main| !main.is_empty()) {
+            let main = Path::new(main);
+            self.additional_sources.push(if main.is_absolute() {
+                main.to_path_buf()
+            } else {
+                self.module_root.join(main)
+            });
+        }
         self
     }
 
@@ -161,16 +179,30 @@ impl<'a> HarDeclarationGenerator<'a> {
             declarations.insert(path, declaration);
         }
 
-        for source_path in &self.generated_sources {
+        for source_path in &self.additional_sources {
             let relative = source_path
                 .strip_prefix(self.module_root)
                 .with_context(|| {
                     format!(
-                        "generated declaration source {} is outside module root {}",
+                        "additional declaration source {} is outside module root {}",
                         source_path.display(),
                         self.module_root.display()
                     )
                 })?;
+            if relative.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                )
+            }) {
+                anyhow::bail!(
+                    "additional declaration source {} escapes module root {}",
+                    source_path.display(),
+                    self.module_root.display()
+                );
+            }
             let (path, declaration) = self.emit_source(
                 source_path,
                 output_dir.join(&self.module_output_prefix).join(relative),

@@ -1,13 +1,15 @@
+use std::path::Path;
 use std::sync::Arc;
 
 use arkdown_core::ArktsLanguageVersion;
 use oxc_allocator::Allocator;
 
 use crate::error::EtsTransformError;
-use crate::source::CompileArktsSourceType;
+use crate::source::{ArktsSourceLanguageDetector, CompileArktsSourceType};
 use crate::transform::api_available::ApiAvailableTransformOptions;
 use crate::transform::component_meta::ComponentMetadata;
 use crate::transform::legacy_extend::LegacyExtendSource;
+use crate::transform::static_directive::StaticDirectiveSource;
 use crate::transform::system_api::Arkts11SystemApiValidator;
 use crate::transform::{
     CustomComponentSemanticInventory, ModuleExportIndex, SystemApiCheckOptions, TransformOptions,
@@ -116,11 +118,20 @@ impl ArktsSourceChecker {
     pub fn check(&self, source_id: &str, content: &str) -> EtsCheckReport {
         let allocator = Allocator::default();
         let parser_source = LegacyExtendSource::new(content, self.arkts_language_version);
+        let path = Path::new(source_id);
+        let source_language_version = ArktsSourceLanguageDetector::new(parser_source.as_str())
+            .version_for_path(self.arkts_language_version, path);
+        let static_directive_source = source_language_version
+            .is_static()
+            .then(|| StaticDirectiveSource::new(parser_source.as_str()));
+        let parser_content = static_directive_source
+            .as_ref()
+            .map_or_else(|| parser_source.as_str(), StaticDirectiveSource::as_str);
         let source_type =
-            CompileArktsSourceType::from_id_with_version(source_id, self.arkts_language_version);
-        let parsed =
-            self.component_metadata
-                .parse_ets(&allocator, parser_source.as_str(), source_type);
+            CompileArktsSourceType::from_id_with_version(source_id, source_language_version);
+        let mut parsed = self
+            .component_metadata
+            .parse_ets(&allocator, parser_content, source_type);
         if !parsed.diagnostics.is_empty() {
             let mut report = EtsCheckReport::default();
             report.extend([EtsTransformError::Fatal {
@@ -129,10 +140,14 @@ impl ArktsSourceChecker {
             }]);
             return report;
         }
+        if let Some(static_directive_source) = &static_directive_source {
+            static_directive_source.restore(&mut parsed.program, &allocator);
+        }
 
-        // ArkTS 1.2 is selected explicitly and is owned by the static OXC
-        // frontend. Dynamic ArkTS 1.1 UI diagnostics must never leak into it.
-        if self.arkts_language_version.is_static() {
+        // Static source files are owned by the static OXC/frontend path.
+        // Dynamic files in the same 1.2 product still require the normal
+        // ArkUI checks and lowering diagnostics.
+        if source_language_version.is_static() {
             return EtsCheckReport::default();
         }
 

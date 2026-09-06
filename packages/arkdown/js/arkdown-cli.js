@@ -278,8 +278,8 @@ Options:
   --build-version <value>
                       Override buildVersion for this invocation.
   --arkts-version <version>
-                      Compile as ArkTS 1.1 or 1.2. 1.2 must be explicit;
-                      the default is 1.1.
+                      Override the selected product's arkTSVersion with 1.1 or
+                      1.2. Products without arkTSVersion default to 1.1.
   --watch             Rebuild on changes.
   --preview           Preview resource rebuild mode.
   --check-entry       Require exactly one @Entry on the previewed page.

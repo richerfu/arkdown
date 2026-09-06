@@ -186,7 +186,21 @@ fn sdk_config_from_root_with_selection(sdk_root: &Path, selection: &SdkSelection
         .target_api_version
         .unwrap_or(sdk_component_api_version);
 
-    let ets_loader_path = ohos_base.join("ets").join("build-tools").join("ets-loader");
+    // `build/ohos/sdk/parse_description.py` preserves the split
+    // `ets/dynamic` + `ets/static` layout when `sdk_build_arkts=true`, while
+    // legacy SDKs flatten `ets/dynamic` back into `ets`. Prefer the source-
+    // defined dynamic component when it is installed and retain the flattened
+    // layout for existing SDK distributions.
+    let ets_root = ohos_base.join("ets");
+    let split_ets_loader_path = ets_root
+        .join("dynamic")
+        .join("build-tools")
+        .join("ets-loader");
+    let ets_loader_path = if split_ets_loader_path.is_dir() {
+        split_ets_loader_path
+    } else {
+        ets_root.join("build-tools").join("ets-loader")
+    };
     let tool_resolver = SdkToolResolver::new(&ets_loader_path);
     let es2abc_path = tool_resolver.es2abc_path();
     let restool_path = tool_resolver.toolchains_executable(&ohos_base, "restool");
@@ -352,7 +366,17 @@ fn default_compile_sdk_version() -> String {
 
 fn discover_sdk_release_type_from_ets_loader(ets_loader_path: &Path) -> Option<String> {
     let ets_component = ets_loader_path.parent()?.parent()?;
-    read_json_string_field(&ets_component.join("oh-uni-package.json"), "releaseType")
+    read_json_string_field(&ets_component.join("oh-uni-package.json"), "releaseType").or_else(
+        || {
+            if ets_component.file_name() != Some(std::ffi::OsStr::new("dynamic")) {
+                return None;
+            }
+            read_json_string_field(
+                &ets_component.parent()?.join("oh-uni-package.json"),
+                "releaseType",
+            )
+        },
+    )
 }
 
 fn discover_ark_vm_version_from_es2abc(
@@ -628,6 +652,38 @@ mod tests {
         assert!(cfg
             .ets_loader_path
             .starts_with(root.join("default").join("openharmony")));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn test_sdk_config_from_root_prefers_split_dynamic_ets_component() {
+        let root = temp_root("split-arkts-sdk");
+        let ohos = root.join("default").join("openharmony");
+        let ets = ohos.join("ets");
+        let dynamic_loader = ets.join("dynamic").join("build-tools").join("ets-loader");
+        fs::create_dir_all(&dynamic_loader).expect("create split dynamic ETS loader");
+        fs::create_dir_all(ets.join("static")).expect("create static ETS component");
+        fs::write(
+            ets.join("oh-uni-package.json"),
+            r#"{"apiVersion":"26","version":"7.0.0.1","releaseType":"Release"}"#,
+        )
+        .expect("write split SDK metadata");
+
+        let cfg = sdk_config_from_root(&root, None);
+
+        assert_eq!(cfg.ets_loader_path, dynamic_loader);
+        assert_eq!(cfg.compile_api_version, 26);
+        assert_eq!(
+            cfg.static_arkts_layout().expect("static layout").root,
+            ets.join("static")
+        );
+        assert_eq!(
+            cfg.static_arkts_layout()
+                .expect("static layout")
+                .dynamic_interop,
+            ets.join("dynamic/build-tools/interop")
+        );
 
         let _ = fs::remove_dir_all(root);
     }

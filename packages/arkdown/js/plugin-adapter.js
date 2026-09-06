@@ -982,6 +982,7 @@ class PluginAdapter {
     const nativeConfig = { ...config }
     delete nativeConfig.hvigorPluginFile
     delete nativeConfig.compilePluginPath
+    nativeConfig.nodeExecutable = process.execPath
     return {
       config: nativeConfig,
       plugins: [...compilePlugins, ...normalizePluginList(explicitPlugins, this.binding)],

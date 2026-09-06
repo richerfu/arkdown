@@ -109,6 +109,93 @@ impl CompileArktsSourceType {
     }
 }
 
+/// Selects the language of one source inside an ArkTS 1.2 module graph.
+///
+/// `bindings/src/common/utils.ts::getFileLanguageVersion` checks the first
+/// effective source line after comments for both the main module and its
+/// source dependencies. Product ArkTS 1.2 enables the mixed pipeline; it does
+/// not by itself turn every main-module `.ets` file into static ArkTS.
+pub struct ArktsSourceLanguageDetector<'a> {
+    source: &'a str,
+}
+
+impl<'a> ArktsSourceLanguageDetector<'a> {
+    pub fn new(source: &'a str) -> Self {
+        Self { source }
+    }
+
+    pub fn version_for_path(
+        &self,
+        product_version: ArktsLanguageVersion,
+        path: &Path,
+    ) -> ArktsLanguageVersion {
+        if product_version.is_static()
+            && SourceClassifier::classify_path(path) == SourceFileKind::Ets
+            && self.is_static()
+        {
+            ArktsLanguageVersion::V1_2
+        } else {
+            ArktsLanguageVersion::V1_1
+        }
+    }
+
+    /// Exact comment skipping and first-effective-line test from
+    /// `getFileLanguageVersion`; it deliberately checks `contains` because
+    /// that is the current upstream behavior.
+    pub fn is_static(&self) -> bool {
+        let mut in_multi_line_comment = false;
+        // JavaScript `String.prototype.trim()` treats a UTF-8 BOM decoded as
+        // U+FEFF as whitespace. Rust `str::trim()` does not, so remove it once
+        // to preserve the upstream first-effective-line result.
+        let source = self.source.strip_prefix('\u{feff}').unwrap_or(self.source);
+        for original_line in source.split('\n') {
+            let mut line = original_line;
+            let owned_line;
+            if in_multi_line_comment {
+                let Some(end_index) = line.find("*/") else {
+                    continue;
+                };
+                line = &line[end_index + 2..];
+                in_multi_line_comment = false;
+            }
+            if let Some(single_line_index) = line.find("//") {
+                line = &line[..single_line_index];
+            }
+            if let Some(multi_line_start) = line.find("/*") {
+                if let Some(relative_end) = line[multi_line_start + 2..].find("*/") {
+                    let multi_line_end = multi_line_start + 2 + relative_end;
+                    let mut value = String::with_capacity(line.len());
+                    value.push_str(&line[..multi_line_start]);
+                    value.push_str(&line[multi_line_end + 2..]);
+                    owned_line = value;
+                    line = &owned_line;
+                } else {
+                    line = &line[..multi_line_start];
+                    in_multi_line_comment = true;
+                }
+            }
+            let effective_line = line.trim();
+            if !effective_line.is_empty() {
+                return effective_line.contains("use static");
+            }
+        }
+        false
+    }
+
+    /// Production driver rule from
+    /// `driver/build_system/src/plugins/FileManager.ts::isFirstLineUseStatic`.
+    /// Unlike module-level language discovery, a hybrid dependency compile
+    /// file is static only when its trimmed physical first line is exactly the
+    /// single-quoted directive.
+    pub fn is_static_dependency_compile_file(&self) -> bool {
+        self.source
+            .lines()
+            .next()
+            .map(|line| line.strip_prefix('\u{feff}').unwrap_or(line).trim())
+            == Some("'use static'")
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct TransformSourceSnapshot {
     files: Arc<FxHashMap<PathBuf, Arc<str>>>,
@@ -807,6 +894,45 @@ mod tests {
         assert_eq!(
             SourceClassifier::classify("bar.d.ets"),
             SourceFileKind::Declaration
+        );
+    }
+
+    #[test]
+    fn source_language_matches_current_hybrid_module_detection() {
+        let static_source = ArktsSourceLanguageDetector::new(
+            "\u{feff}// heading\n/* block\n * comment\n */ 'use static'\nexport class A {}",
+        );
+        assert!(static_source.is_static());
+        assert_eq!(
+            static_source.version_for_path(ArktsLanguageVersion::V1_2, Path::new("Index.ets")),
+            ArktsLanguageVersion::V1_2
+        );
+
+        let generated_static_source =
+            ArktsSourceLanguageDetector::new("'use static'\nexport class A {}");
+        assert!(generated_static_source.is_static_dependency_compile_file());
+        assert_eq!(
+            generated_static_source
+                .version_for_path(ArktsLanguageVersion::V1_2, Path::new("Index.ets")),
+            ArktsLanguageVersion::V1_2
+        );
+        assert_eq!(
+            generated_static_source
+                .version_for_path(ArktsLanguageVersion::V1_2, Path::new("Index.ts")),
+            ArktsLanguageVersion::V1_1
+        );
+
+        let dynamic_source = ArktsSourceLanguageDetector::new(
+            "/* heading */\nimport('./static/Init');\n'use static'",
+        );
+        assert!(!dynamic_source.is_static());
+        assert_eq!(
+            dynamic_source.version_for_path(ArktsLanguageVersion::V1_2, Path::new("Index.ets")),
+            ArktsLanguageVersion::V1_1
+        );
+        assert_eq!(
+            dynamic_source.version_for_path(ArktsLanguageVersion::V1_2, Path::new("Index.ets")),
+            ArktsLanguageVersion::V1_1
         );
     }
 

@@ -52,6 +52,7 @@ impl CheckApplication {
         );
         let session = Arc::new(
             BuildSessionBuilder::new(config.clone())
+                .with_arkts_language_version(config.product.arkts_version)
                 .build()
                 .map_err(|error| anyhow::anyhow!("check session: {error}"))?,
         );
@@ -169,10 +170,18 @@ impl<'a> CheckModuleRunner<'a> {
         let mut sdk_declaration_roots = self
             .config
             .sdk_config
-            .ets_api_dirs()
+            .ets_api_dirs_for(self.session.arkts_language_version)
             .into_iter()
-            .chain(self.config.sdk_config.ets_kits_dirs())
-            .chain(self.config.sdk_config.ets_arkts_dirs())
+            .chain(
+                self.config
+                    .sdk_config
+                    .ets_kits_dirs_for(self.session.arkts_language_version),
+            )
+            .chain(
+                self.config
+                    .sdk_config
+                    .ets_arkts_dirs_for(self.session.arkts_language_version),
+            )
             .collect::<Vec<_>>();
         for root in self.session.sdk.global_module_paths.iter() {
             if !sdk_declaration_roots.contains(root) {
@@ -225,6 +234,7 @@ impl<'a> CheckModuleRunner<'a> {
                 system_api.with_system_capabilities(capabilities.intersection, capabilities.union);
         }
         let checker = ArktsSourceChecker::new(component_metadata)
+            .with_arkts_language_version(self.session.arkts_language_version)
             .with_project_sources(project_sources.clone(), module_roots)
             .with_api_available_context(
                 &self.config.product.compatible_sdk_version,

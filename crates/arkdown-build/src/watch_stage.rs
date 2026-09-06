@@ -348,7 +348,7 @@ impl WatchStage {
                     target: target.clone(),
                     mode: mode.clone(),
                     analyze,
-                    arkts_version,
+                    arkts_version: Some(arkts_version),
                     module: module_filter.clone(),
                     product: product_filter.clone(),
                     project: Some(project_root.clone()),

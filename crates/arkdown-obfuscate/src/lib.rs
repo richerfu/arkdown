@@ -193,6 +193,15 @@ impl Obfuscator {
         }
     }
 
+    /// Attach frontend-specific SDK metadata after rule parsing selected the
+    /// execution mode. This avoids building the dynamic ets-loader inventory
+    /// for ArkTS 1.2, whose bytecode configuration is owned by the static SDK
+    /// driver instead.
+    pub fn with_arkguard(mut self, arkguard: ArkguardAdapterOptions) -> Self {
+        self.options.arkguard = Some(arkguard);
+        self
+    }
+
     /// Obfuscate all CompileArkTS sources for one module while sharing the
     /// ordered name generators and global caches used by ArkGuard.
     pub fn obfuscate_module(

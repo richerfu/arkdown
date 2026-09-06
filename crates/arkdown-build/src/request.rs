@@ -202,9 +202,9 @@ pub struct BuildRequest {
     /// Hook performance analysis level. Only `verbose` and `trace` enable
     /// Hvigor's compile-event factory.
     pub analyze: AnalyzeModeChoice,
-    /// ArkTS compiler language. ArkTS 1.2 is opt-in; omitted builds retain the
-    /// existing ArkTS 1.1 parser and transform pipeline.
-    pub arkts_version: ArktsLanguageVersion,
+    /// Explicit ArkTS compiler language override. Omitted builds use the
+    /// selected product's `arkTSVersion`, whose schema default is ArkTS 1.1.
+    pub arkts_version: Option<ArktsLanguageVersion>,
     /// Scope to a specific module
     pub module: Option<String>,
     /// Product name

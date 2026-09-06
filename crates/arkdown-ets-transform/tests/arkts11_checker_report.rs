@@ -1,5 +1,6 @@
 use std::{path::PathBuf, sync::Arc};
 
+use arkdown_core::ArktsLanguageVersion;
 use arkdown_ets_transform::{
     error::{DiagnosticSeverity, EtsTransformError},
     transform::component_meta::ComponentMetadata,
@@ -8,6 +9,22 @@ use arkdown_ets_transform::{
 use oxc_allocator::Allocator;
 use oxc_parser::Parser;
 use oxc_span::SourceType;
+
+#[test]
+fn arkts12_checker_accepts_source_owned_use_static_before_imports() {
+    let report = ArktsSourceChecker::new(Arc::new(ComponentMetadata::default()))
+        .with_arkts_language_version(ArktsLanguageVersion::V1_2)
+        .check(
+            "StaticEntry.ets",
+            "'use static';\nimport UIAbility from '@ohos.app.ability.UIAbility';\nclass EntryAbility extends UIAbility {}\n",
+        );
+
+    assert!(
+        report.diagnostics().is_empty(),
+        "static source must parse without import-order diagnostics: {:?}",
+        report.diagnostics()
+    );
+}
 
 #[test]
 fn arkts11_checker_report_preserves_all_source_order_diagnostics() {

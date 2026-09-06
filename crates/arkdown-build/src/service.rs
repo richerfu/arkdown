@@ -83,10 +83,13 @@ impl BuildService {
         if let Some(build_version) = request.build_version.as_ref() {
             config.product.build_version = Some(build_version.clone());
         }
+        let arkts_version = request
+            .arkts_version
+            .unwrap_or(config.product.arkts_version);
         let config = Arc::new(config);
 
-        let mut session_builder = BuildSessionBuilder::new(config.clone())
-            .with_arkts_language_version(request.arkts_version);
+        let mut session_builder =
+            BuildSessionBuilder::new(config.clone()).with_arkts_language_version(arkts_version);
         if let Some(parameter_file_override) = request.parameter_file_override.clone() {
             session_builder = session_builder.with_parameter_file_override(parameter_file_override);
         }

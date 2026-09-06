@@ -20,6 +20,7 @@ mod local_builder;
 mod navigation;
 pub mod source_emit;
 mod source_text;
+pub(crate) mod static_directive;
 mod static_graph;
 mod syntax;
 pub(crate) mod system_api;
@@ -52,7 +53,7 @@ use oxc_parser::Parser;
 use oxc_span::{GetSpan, SPAN};
 
 use crate::error::EtsTransformError;
-use crate::source::{CompileArktsSourceType, TransformSourceSnapshot};
+use crate::source::{ArktsSourceLanguageDetector, CompileArktsSourceType, TransformSourceSnapshot};
 use crate::transform::api_available::{ApiAvailableLowerer, ApiAvailableTransformOptions};
 use crate::transform::build_fn::{
     BuildBodyInfo, BuildBodyPlan, BuildBodySharedInputs, ExtendBodyPlan, StylesMethodInfo,
@@ -94,6 +95,7 @@ use crate::transform::insight_intent::{
 use crate::transform::navigation::NavigationBuilderRegistrationBlock;
 use crate::transform::source_emit::HvigorTypescriptPrinter;
 use crate::transform::source_text::ViewpuOutputText;
+use crate::transform::static_directive::StaticDirectiveSource;
 use crate::transform::static_graph::StaticArktsGraphProjection;
 use crate::transform::system_api::Arkts11SystemApiValidator;
 pub use crate::transform::system_api::SystemApiCheckOptions;
@@ -235,6 +237,14 @@ impl TransformOptions {
     pub fn supports_partial_update(&self) -> bool {
         self.partial_update
     }
+
+    fn source_language_version(&self, source_id: &str, source: &str) -> ArktsLanguageVersion {
+        if !self.arkts_language_version.is_static() {
+            return self.arkts_language_version;
+        }
+        let path = Path::new(source_id);
+        ArktsSourceLanguageDetector::new(source).version_for_path(self.arkts_language_version, path)
+    }
 }
 
 pub struct ArkuiComponentNameCollector<'a> {
@@ -370,13 +380,18 @@ impl<'a> ArktsTransformer<'a> {
             source.content.as_str(),
             options.arkts_language_version,
         );
-        let content = parser_source.as_str();
+        let source_language_version =
+            options.source_language_version(&source.id.id, parser_source.as_str());
+        let static_directive_source = source_language_version
+            .is_static()
+            .then(|| StaticDirectiveSource::new(parser_source.as_str()));
+        let content = static_directive_source
+            .as_ref()
+            .map_or_else(|| parser_source.as_str(), StaticDirectiveSource::as_str);
 
         let allocator = Allocator::default();
-        let source_type = CompileArktsSourceType::from_id_with_version(
-            &source.id.id,
-            options.arkts_language_version,
-        );
+        let source_type =
+            CompileArktsSourceType::from_id_with_version(&source.id.id, source_language_version);
         let mut parsed = options
             .component_metadata
             .parse_ets(&allocator, content, source_type);
@@ -386,8 +401,11 @@ impl<'a> ArktsTransformer<'a> {
                 message: format!("ArkUI parse failed: {:?}", parsed.diagnostics),
             });
         }
+        if let Some(static_directive_source) = &static_directive_source {
+            static_directive_source.restore(&mut parsed.program, &allocator);
+        }
 
-        if options.arkts_language_version.is_static() {
+        if source_language_version.is_static() {
             return self.transform_static(&allocator, &mut parsed.program);
         }
 

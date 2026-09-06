@@ -206,6 +206,7 @@ impl BuildCoordinator {
             let module_har_dedup_plan = har_dedup_project_plan.module(&module.name);
             let resources_index = module_layout.res_resources_index();
             let modules_abc = package_out.modules_abc_path.clone();
+            let additional_abc_paths = package_out.additional_abc_paths.clone();
             let ext = match &module_config.output_target {
                 OutputTarget::Hsp => "hsp",
                 OutputTarget::Har => "har",
@@ -589,6 +590,13 @@ impl BuildCoordinator {
                             )
                             .with_arkts_language_version(self.session.arkts_language_version)
                             .with_dependency_declaration_packages(declaration_packages)
+                            .with_module_entry_source(
+                                module_context
+                                    .module
+                                    .package
+                                    .as_deref()
+                                    .and_then(|package| package.package_json.main.as_deref()),
+                            )
                             .with_package_bundled_declarations(
                                 module_build_option
                                     .ark_options
@@ -970,6 +978,7 @@ impl BuildCoordinator {
                                         module_name: module.name.clone(),
                                         target_name: artifact_target_label.clone(),
                                         abc_path: modules_abc.clone(),
+                                        additional_abc_paths: additional_abc_paths.clone(),
                                         resources_index: resources_index.clone(),
                                         module_json: module_json.clone(),
                                         pack_info_module_json: Some(

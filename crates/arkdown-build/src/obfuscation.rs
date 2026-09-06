@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use arkdown_config::build_profile::parse_api_version;
 use arkdown_core::{
     ArkdownConfig, BuildMode, HarArtifactType, ModuleConfig, ObfuscationConfig, OutputTarget,
@@ -22,6 +22,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::bundle_plan::BundleStageOutput;
 use crate::layout::{ModuleBuildLayout, ModuleSourceLayout};
+use crate::static_arkts::StaticArktsObfuscationPlan;
 
 pub struct ModuleObfuscationContext {
     pub config: Option<ObfuscationConfig>,
@@ -483,25 +484,70 @@ impl<'a> ModuleArkguardPlanBuilder<'a> {
 }
 
 pub struct PendingBytecodeObfuscation {
-    obfuscator: Obfuscator,
+    dynamic: Option<PendingDynamicBytecodeObfuscation>,
+    static_driver: Option<StaticArktsObfuscationPlan>,
+}
+
+struct PendingDynamicBytecodeObfuscation {
+    obfuscator: Box<Obfuscator>,
     input: BytecodeObfuscationInput,
 }
 
 impl PendingBytecodeObfuscation {
-    pub fn new(obfuscator: Obfuscator, input: BytecodeObfuscationInput) -> Self {
-        Self { obfuscator, input }
+    pub fn dynamic(obfuscator: Obfuscator, input: BytecodeObfuscationInput) -> Self {
+        Self {
+            dynamic: Some(PendingDynamicBytecodeObfuscation {
+                obfuscator: Box::new(obfuscator),
+                input,
+            }),
+            static_driver: None,
+        }
     }
 
-    pub fn run(self, module_name: &str) -> Result<()> {
-        self.obfuscator
-            .obfuscate_bytecode(self.input)
-            .map_err(|error| {
-                anyhow::anyhow!(
-                    "Bytecode obfuscation failed for module '{}': {}",
-                    module_name,
-                    error
+    pub fn static_driver(plan: StaticArktsObfuscationPlan) -> Self {
+        Self {
+            dynamic: None,
+            static_driver: Some(plan),
+        }
+    }
+
+    pub fn with_dynamic(mut self, obfuscator: Obfuscator, input: BytecodeObfuscationInput) -> Self {
+        self.dynamic = Some(PendingDynamicBytecodeObfuscation {
+            obfuscator: Box::new(obfuscator),
+            input,
+        });
+        self
+    }
+
+    pub fn static_driver_plan(&self) -> Option<&StaticArktsObfuscationPlan> {
+        self.static_driver.as_ref()
+    }
+
+    pub fn run_static(&mut self, module_name: &str, modules_abc: &Path) -> Result<()> {
+        if let Some(plan) = self.static_driver.take() {
+            plan.execute(modules_abc).with_context(|| {
+                format!(
+                    "ArkTS 1.2 bytecode obfuscation failed for module '{}'",
+                    module_name
                 )
             })?;
+        }
+        Ok(())
+    }
+
+    pub fn run_dynamic(mut self, module_name: &str) -> Result<()> {
+        if let Some(pending) = self.dynamic.take() {
+            pending
+                .obfuscator
+                .obfuscate_bytecode(pending.input)
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "Bytecode obfuscation failed for module '{}': {}",
+                        module_name,
+                        error
+                    )
+                })?;
+        }
         Ok(())
     }
 }

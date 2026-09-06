@@ -11,7 +11,7 @@ use oxc_ast::builder::AstBuilder;
 use oxc_codegen::Codegen;
 use oxc_parser::Parser;
 
-use crate::source::CompileArktsSourceType;
+use crate::source::{CompileArktsSourceType, SourceClassifier};
 
 /// Adapts hvigor's `import lazy` TypeScript to the standard import syntax
 /// understood by the current Rolldown scanner. The CompileArkTS module source
@@ -37,8 +37,15 @@ impl<'a> LazyImportRolldownAdapter<'a> {
 
     pub(crate) fn lower(&self) -> Cow<'a, str> {
         let allocator = Allocator::default();
-        let source_type =
-            CompileArktsSourceType::from_id_with_version(self.id, self.arkts_language_version);
+        // Current ace_ets2bundle accepts `import lazy` in JavaScript through
+        // `processJsCodeLazyImport(..., ScriptKind.JS)`. OXC exposes the same
+        // extension through its ArkTS parser, while plain `SourceType::js()`
+        // rejects it before this parser-only Rolldown adaptation can run.
+        let source_type = if SourceClassifier::classify(self.id).is_javascript_runtime() {
+            oxc_span::SourceType::ets()
+        } else {
+            CompileArktsSourceType::from_id_with_version(self.id, self.arkts_language_version)
+        };
         let mut parsed = Parser::new(&allocator, self.source, source_type).parse();
         if !parsed.diagnostics.is_empty() {
             return Cow::Borrowed(self.source);

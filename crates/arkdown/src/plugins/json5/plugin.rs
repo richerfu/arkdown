@@ -100,6 +100,11 @@ impl<'a> JsonModuleLoader<'a> {
         let code = JsonModuleEmitter::new(&value).emit();
         Ok(Some(HookLoadOutput {
             code: code.into(),
+            // The loader has replaced JSON/JSON5 with an ESM JavaScript
+            // module. Rollup's JSON plugin returns executable module code;
+            // Rolldown must not select its JSON parser again from the original
+            // file extension.
+            module_type: Some(rolldown_common::ModuleType::Js),
             ..Default::default()
         }))
     }
@@ -252,6 +257,7 @@ mod tests {
 
         let result = JsonModuleLoader::new(&path, &sources).load().unwrap();
         let out = result.unwrap();
+        assert_eq!(out.module_type, Some(rolldown_common::ModuleType::Js));
         assert!(JsonModuleAssertion::new(&out.code).has_named_var_export("hello"));
     }
 

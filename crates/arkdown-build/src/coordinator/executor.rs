@@ -1987,58 +1987,85 @@ impl BuildCoordinator {
                     .validate()
                     .map_err(|e| anyhow::anyhow!("Obfuscation config invalid: {}", e))?;
                 let rule_files = obfuscation_plan.all_rule_files();
-                let arkguard_plan = ModuleArkguardPlanBuilder::new(
-                    config.as_ref(),
-                    session,
-                    module,
-                    loader_json,
-                    bundle_out,
-                );
-                let (arkguard, module_input) = arkguard_plan.build()?;
-                let obfuscator = Obfuscator::new(ObfuscationOptions {
-                    enable_obfuscation: obfuscation_plan.should_obfuscate(),
-                    rule_files,
-                    dependency_rule_files: dependency_rule_files.clone(),
-                    cache_dir: obf_cache_dir,
-                    export_rule_path: None,
-                    arkguard: Some(arkguard),
-                })
-                .map_err(|e| anyhow::anyhow!("Obfuscation config invalid: {}", e))?;
-                match obfuscator.mode() {
-                    ObfuscationMode::Bytecode => {
-                        if session.arkts_language_version.is_static() {
-                            anyhow::bail!(
-                                "ARKDOWN_ARKTS12_BYTECODE_OBFUSCATION_PENDING: the static frontend requires the source-defined ark_guard config and modules_static.abc lifecycle"
+                let mut pending = None;
+                let has_dynamic_partition = if session.arkts_language_version.is_static() {
+                    let sdk = config.sdk_config.static_arkts_layout().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "ARKDOWN_ARKTS12_SDK_LAYOUT: cannot derive static SDK for obfuscation"
+                        )
+                    })?;
+                    pending = crate::static_arkts::StaticArktsObfuscationPlan::new(
+                        &sdk,
+                        &rule_files,
+                        &obf_config.consumer_rule_files,
+                        &dependency_rule_files,
+                        obf_cache_dir.clone(),
+                    )?
+                    .map(PendingBytecodeObfuscation::static_driver);
+                    ModuleBuildLayout::for_output_target_product(
+                        &config.output_target,
+                        &module.src_path,
+                        &config.product.name,
+                        _module_target_name,
+                    )
+                    .arkts_interop_dir()
+                    .join("declgen-v2-request.json")
+                    .is_file()
+                } else {
+                    true
+                };
+                if has_dynamic_partition {
+                    let obfuscator = Obfuscator::new(ObfuscationOptions {
+                        enable_obfuscation: obfuscation_plan.should_obfuscate(),
+                        rule_files: rule_files.clone(),
+                        dependency_rule_files: dependency_rule_files.clone(),
+                        cache_dir: obf_cache_dir.clone(),
+                        export_rule_path: None,
+                        arkguard: None,
+                    })
+                    .map_err(|e| anyhow::anyhow!("Obfuscation config invalid: {}", e))?;
+                    match obfuscator.mode() {
+                        ObfuscationMode::Bytecode => {
+                            let arkguard_plan = ModuleArkguardPlanBuilder::new(
+                                config.as_ref(),
+                                session,
+                                module,
+                                loader_json,
+                                bundle_out,
                             );
+                            let (arkguard, module_input) = arkguard_plan.build()?;
+                            let obfuscator = obfuscator.with_arkguard(arkguard);
+                            let input = arkguard_plan.bytecode_input(module_input)?;
+                            pending = Some(match pending {
+                                Some(pending) => pending.with_dynamic(obfuscator, input),
+                                None => PendingBytecodeObfuscation::dynamic(obfuscator, input),
+                            });
                         }
-                        pending_bytecode_obfuscations[bundle_index] =
-                            Some(PendingBytecodeObfuscation::new(
-                                obfuscator,
-                                arkguard_plan.bytecode_input(module_input)?,
-                            ));
-                    }
-                    ObfuscationMode::Source => {
-                        if session.arkts_language_version.is_static() {
-                            // Static frontend
-                            // `initObfuscationConfig`/`genObfuscationConfig`
-                            // only schedules native bytecode obfuscation when
-                            // `-enable-bytecode-obfuscation` is present. It
-                            // never rewrites the Rolldown projection sources.
-                            continue;
+                        ObfuscationMode::Source => {
+                            let arkguard_plan = ModuleArkguardPlanBuilder::new(
+                                config.as_ref(),
+                                session,
+                                module,
+                                loader_json,
+                                bundle_out,
+                            );
+                            let (arkguard, module_input) = arkguard_plan.build()?;
+                            let output = obfuscator
+                                .with_arkguard(arkguard)
+                                .obfuscate_module(module_input)
+                                .map_err(|e| anyhow::anyhow!("Obfuscation failed: {}", e))?;
+                            output
+                                .apply_to_module_sources(
+                                    &mut bundle_out.bundle_output.module_source_files,
+                                )
+                                .map_err(|e| {
+                                    anyhow::anyhow!("Obfuscation output handoff failed: {}", e)
+                                })?;
                         }
-                        let output = obfuscator
-                            .obfuscate_module(module_input)
-                            .map_err(|e| anyhow::anyhow!("Obfuscation failed: {}", e))?;
-                        output
-                            .apply_to_module_sources(
-                                &mut bundle_out.bundle_output.module_source_files,
-                            )
-                            .map_err(|e| {
-                                anyhow::anyhow!("Obfuscation output handoff failed: {}", e)
-                            })?;
+                        ObfuscationMode::Disabled => {}
                     }
-                    ObfuscationMode::Disabled => {}
                 }
+                pending_bytecode_obfuscations[bundle_index] = pending;
             }
 
             tracing::debug!(module = %module.name, "module obfuscation stage completed");

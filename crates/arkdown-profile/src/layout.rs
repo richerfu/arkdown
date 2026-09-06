@@ -131,6 +131,10 @@ impl<'a> ProfileModuleLayout<'a> {
         self.module_root.join("ets").join("modules.abc")
     }
 
+    pub(crate) fn ets_modules_static_abc(&self) -> PathBuf {
+        self.module_root.join("ets").join("modules_static.abc")
+    }
+
     pub(crate) fn meta_inf_preload_json(&self) -> PathBuf {
         self.module_root.join("META-INF").join("preload.json")
     }

@@ -4,7 +4,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result};
 use indexmap::IndexMap;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Serialize;
 
 use arkdown_config::build_profile::parse_api_version;
@@ -35,6 +35,218 @@ pub struct StaticArktsCompileInput<'a> {
     pub is_crossplatform: bool,
     pub ui_transform_optimization: bool,
     pub bundle_type: &'a str,
+    pub obfuscation: Option<&'a StaticArktsObfuscationPlan>,
+}
+
+/// Static-driver obfuscation handoff observed in
+/// `obfuscation_config.ts::genObfuscationConfig` and
+/// `obfuscation_bytecode_executor_invoke.ts::executeObfuscator`.
+#[derive(Debug, Clone)]
+pub struct StaticArktsObfuscationPlan {
+    driver_options: StaticArktsDriverObfuscationOptions,
+    cache_dir: PathBuf,
+    ark_guard: PathBuf,
+    panda_lib: PathBuf,
+    debugging: bool,
+}
+
+impl StaticArktsObfuscationPlan {
+    pub fn new(
+        sdk: &StaticArktsSdkLayout,
+        rule_files: &[PathBuf],
+        consumer_rule_files: &[PathBuf],
+        dependency_rule_files: &[PathBuf],
+        cache_dir: PathBuf,
+    ) -> Result<Option<Self>> {
+        let selection = StaticArktsObfuscationRuleSelection::from_rule_files(rule_files)?;
+        if !selection.enable_bytecode || selection.disable_obfuscation {
+            return Ok(None);
+        }
+        let paths = |values: &[PathBuf]| {
+            values
+                .iter()
+                .map(|path| ArtifactPathSerializer::path_to_slash_string(path))
+                .collect::<std::result::Result<Vec<_>, _>>()
+        };
+        Ok(Some(Self {
+            driver_options: StaticArktsDriverObfuscationOptions {
+                self_config: StaticArktsDriverSelfObfuscation {
+                    rule_options: StaticArktsDriverRuleOptions {
+                        enable: true,
+                        rules: paths(rule_files)?,
+                    },
+                    consumer_rules: paths(consumer_rule_files)?,
+                    lib_dir: String::new(),
+                },
+                sdk_apis: paths(&[sdk.kits.clone(), sdk.api.clone(), sdk.arkts.clone()])?,
+                obfuscation_cache_dir: ArtifactPathSerializer::path_to_slash_string(&cache_dir)?,
+                export_rule_path: String::new(),
+                dependencies: StaticArktsDriverObfuscationDependencies {
+                    libraries: Vec::new(),
+                    hsp_libraries: Vec::new(),
+                    // `ObConfigResolver::getDependencyConfigs` merges the HAR
+                    // and HSP file lists with identical semantics. Arkdown's
+                    // resolved dependency graph intentionally exposes the
+                    // flattened rule inventory, so pass it once here.
+                    hars: paths(dependency_rule_files)?,
+                    hsps: Vec::new(),
+                },
+            },
+            cache_dir,
+            ark_guard: sdk.ark_guard.clone(),
+            panda_lib: sdk.panda_sdk.join("lib"),
+            debugging: selection.debugging,
+        }))
+    }
+
+    fn driver_options(&self) -> &StaticArktsDriverObfuscationOptions {
+        &self.driver_options
+    }
+
+    pub fn execute(&self, modules_abc: &Path) -> Result<()> {
+        if !self.ark_guard.is_file() {
+            anyhow::bail!(
+                "ARKDOWN_ARKTS12_ARK_GUARD_MISSING: static bytecode obfuscation requires {}",
+                self.ark_guard.display()
+            );
+        }
+        if !modules_abc.is_file() {
+            anyhow::bail!(
+                "ARKDOWN_ARKTS12_OBFUSCATION_INPUT_MISSING: {}",
+                modules_abc.display()
+            );
+        }
+        let config_path = self.cache_dir.join("config.json");
+        let generated: StaticArktsGeneratedObfuscationConfig =
+            serde_json::from_slice(&fs_err::read(&config_path).with_context(|| {
+                format!(
+                    "ARKDOWN_ARKTS12_OBFUSCATION_CONFIG_MISSING: {}",
+                    config_path.display()
+                )
+            })?)?;
+        let configured_abc = PathBuf::from(&generated.abc_path);
+        if configured_abc != modules_abc {
+            anyhow::bail!(
+                "ARKDOWN_ARKTS12_OBFUSCATION_ABC_MISMATCH: driver configured {}, build produced {}",
+                configured_abc.display(),
+                modules_abc.display()
+            );
+        }
+
+        let mut command = Command::new(&self.ark_guard);
+        if self.debugging {
+            command
+                .arg("--debug")
+                .arg("--debug-file")
+                .arg(self.cache_dir.join("debug.txt"));
+        }
+        command.arg(&config_path);
+        self.prepend_native_library_path(&mut command);
+        let output = command
+            .output()
+            .with_context(|| format!("launch ArkTS 1.2 ark_guard {}", self.ark_guard.display()))?;
+        if !output.status.success() || !output.stderr.is_empty() {
+            anyhow::bail!(
+                "ARKDOWN_ARKTS12_OBFUSCATION_FAILED: ark_guard exited with {}; stdout: {}; stderr: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout).trim(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        let obfuscated_abc = PathBuf::from(&generated.obf_abc_path);
+        if !obfuscated_abc.is_file() {
+            anyhow::bail!(
+                "ARKDOWN_ARKTS12_OBFUSCATION_OUTPUT_MISSING: {}",
+                obfuscated_abc.display()
+            );
+        }
+        let origin_dir = obfuscated_abc
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| anyhow::anyhow!("invalid ark_guard output path"))?
+            .join("origin");
+        fs_err::create_dir_all(&origin_dir)?;
+        let origin_abc = origin_dir.join(
+            obfuscated_abc
+                .file_name()
+                .ok_or_else(|| anyhow::anyhow!("ark_guard output has no file name"))?,
+        );
+        fs_err::copy(modules_abc, &origin_abc)?;
+        fs_err::copy(&obfuscated_abc, modules_abc)?;
+        Ok(())
+    }
+
+    fn prepend_native_library_path(&self, command: &mut Command) {
+        let variable = if cfg!(target_os = "macos") {
+            "DYLD_LIBRARY_PATH"
+        } else if cfg!(windows) {
+            "PATH"
+        } else {
+            "LD_LIBRARY_PATH"
+        };
+        let mut paths = vec![self.panda_lib.clone()];
+        if let Some(existing) = std::env::var_os(variable) {
+            paths.extend(std::env::split_paths(&existing));
+        }
+        if let Ok(joined) = std::env::join_paths(paths) {
+            command.env(variable, joined);
+        }
+    }
+}
+
+/// Execution switches owned by the module's rule files. The static SDK
+/// `ObConfigResolver::getMergedConfigs` only merges keep options from
+/// dependencies, so dependency consumer rules must never select or disable
+/// bytecode mode for the current module.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct StaticArktsObfuscationRuleSelection {
+    enable_bytecode: bool,
+    disable_obfuscation: bool,
+    debugging: bool,
+}
+
+impl StaticArktsObfuscationRuleSelection {
+    fn from_rule_files(rule_files: &[PathBuf]) -> Result<Self> {
+        let mut selection = Self::default();
+        for path in rule_files {
+            let source = fs_err::read_to_string(path).with_context(|| {
+                format!("ARKDOWN_ARKTS12_OBFUSCATION_RULE_READ: {}", path.display())
+            })?;
+            selection.merge_source(&source);
+        }
+        Ok(selection)
+    }
+
+    fn merge_source(&mut self, source: &str) {
+        let mut uncommented = String::with_capacity(source.len());
+        let mut in_comment = false;
+        for character in source.chars() {
+            if in_comment {
+                if character == '\n' {
+                    in_comment = false;
+                    uncommented.push(character);
+                }
+            } else if character == '#' {
+                in_comment = true;
+            } else {
+                uncommented.push(character);
+            }
+        }
+
+        for directive in uncommented.lines().filter_map(|line| {
+            let line = line.trim();
+            line.starts_with('-')
+                .then(|| line.split_whitespace().next())
+                .flatten()
+        }) {
+            match directive {
+                "-enable-bytecode-obfuscation" => self.enable_bytecode = true,
+                "-disable-obfuscation" => self.disable_obfuscation = true,
+                "-enable-bytecode-obfuscation-debugging" => self.debugging = true,
+                _ => {}
+            }
+        }
+    }
 }
 
 /// ArkTS 1.2 SDK frontend adapter.
@@ -45,6 +257,42 @@ pub struct StaticArktsCompileInput<'a> {
 pub struct StaticArktsCompiler<'a> {
     input: StaticArktsCompileInput<'a>,
     sdk: StaticArktsSdkLayout,
+}
+
+/// Generated handoff that lets the dynamic Rolldown/es2abc half of a mixed
+/// ArkTS 1.2 build consume SDK-produced bridge sources.
+pub struct StaticArktsInteropOutput {
+    pub bridge_root: PathBuf,
+    pub source_redirects: FxHashMap<PathBuf, PathBuf>,
+    pub requires_dynamic_abc: bool,
+}
+
+impl StaticArktsInteropOutput {
+    pub fn redirect_entries(&self, module_root: &Path, entries: &mut [String]) -> Result<()> {
+        for entry in entries {
+            let (specifier, query) = entry
+                .split_once('?')
+                .map_or((entry.as_str(), None), |(path, query)| (path, Some(query)));
+            let path = Path::new(specifier);
+            let absolute = if path.has_root() {
+                lexical_normalize(path)
+            } else {
+                lexical_normalize(
+                    &module_root.join(specifier.strip_prefix("./").unwrap_or(specifier)),
+                )
+            };
+            let Some(bridge) = self.source_redirects.get(&absolute) else {
+                continue;
+            };
+            let mut redirected = ArtifactPathSerializer::path_to_slash_string(bridge)?;
+            if let Some(query) = query {
+                redirected.push('?');
+                redirected.push_str(query);
+            }
+            *entry = redirected;
+        }
+        Ok(())
+    }
 }
 
 impl<'a> StaticArktsCompiler<'a> {
@@ -64,7 +312,7 @@ impl<'a> StaticArktsCompiler<'a> {
         Ok(compiler)
     }
 
-    pub fn compile(&self) -> Result<PathBuf> {
+    pub fn compile(&self) -> Result<Option<PathBuf>> {
         let build_config = StaticArktsDriverConfigBuilder::new(&self.input, &self.sdk).build()?;
         let config_path = PathBuf::from(&self.input.loader_json.cache_path)
             .join("arkts12")
@@ -77,6 +325,18 @@ impl<'a> StaticArktsCompiler<'a> {
         fs_err::write(&config_path, serde_json::to_vec_pretty(&build_config)?)
             .with_context(|| format!("write ArkTS 1.2 config {}", config_path.display()))?;
         let output_abc = self.output_abc()?;
+        if !build_config.has_static_output_inputs() {
+            // `BaseMode::mergeAbcFiles` returns without creating
+            // `modules_static.abc` when there are neither static entries nor
+            // linkable ArkTS 1.2 ByteCode HAR inputs. This is the normal shape
+            // of an ArkTS 1.2 product whose module contains only dynamic code.
+            if output_abc.is_file() {
+                fs_err::remove_file(&output_abc).with_context(|| {
+                    format!("remove stale ArkTS 1.2 output {}", output_abc.display())
+                })?;
+            }
+            return Ok(None);
+        }
         let output_dir = output_abc
             .parent()
             .expect("the static ABC path is always below loaderOutPath");
@@ -100,11 +360,287 @@ impl<'a> StaticArktsCompiler<'a> {
         }
         if !output_abc.is_file() {
             anyhow::bail!(
-                "ARKDOWN_ARKTS12_OUTPUT_MISSING: static compiler completed without writing {}",
-                output_abc.display()
+                "ARKDOWN_ARKTS12_OUTPUT_MISSING: static compiler completed without writing {}; stdout: {}; stderr: {}",
+                output_abc.display(),
+                String::from_utf8_lossy(&output.stdout).trim(),
+                String::from_utf8_lossy(&output.stderr).trim()
             );
         }
-        Ok(output_abc)
+        Ok(Some(output_abc))
+    }
+
+    pub fn requires_dynamic_abc(&self) -> Result<bool> {
+        let builder = StaticArktsDriverConfigBuilder::new(&self.input, &self.sdk);
+        Ok(!builder.main_module()?.dynamic_files.is_empty()
+            || builder
+                .build_declgen()?
+                .dependency_module_list
+                .iter()
+                .any(|module| !module.byte_code_har && !module.dynamic_files.is_empty()))
+    }
+
+    /// Run the current SDK's two declaration producers before Rolldown scans a
+    /// mixed 1.1/1.2 graph. This follows
+    /// `interop_manager.ts` + `run_declgen_standalone.ts`; generated files are
+    /// build intermediates and never mutate project sources.
+    pub fn prepare_interop(&self) -> Result<StaticArktsInteropOutput> {
+        let builder = StaticArktsDriverConfigBuilder::new(&self.input, &self.sdk);
+        let build_config = builder.build_declgen()?;
+        let mut modules = build_config
+            .dependency_module_list
+            .iter()
+            .filter(|module| !module.byte_code_har)
+            .cloned()
+            .collect::<Vec<_>>();
+        let main_module = builder.main_module()?;
+        if !modules
+            .iter()
+            .any(|module| module.package_name == main_module.package_name)
+        {
+            modules.insert(0, main_module);
+        }
+        let requires_dynamic_abc = modules
+            .iter()
+            .any(|module| !module.dynamic_files.is_empty());
+        let bridge_root = self.input.module_layout.arkts_declgen_bridge_dir();
+        if !requires_dynamic_abc {
+            let request_path = self.dynamic_declgen_request_path();
+            if request_path.is_file() {
+                fs_err::remove_file(request_path)?;
+            }
+            return Ok(StaticArktsInteropOutput {
+                bridge_root,
+                source_redirects: FxHashMap::default(),
+                requires_dynamic_abc: false,
+            });
+        }
+
+        let interop_plugin =
+            Self::existing_javascript_entry(&self.sdk.interop_plugin).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "ARKDOWN_ARKTS12_INTEROP_PLUGIN_MISSING: {}[.js]",
+                    self.sdk.interop_plugin.display()
+                )
+            })?;
+        let dynamic_loader = self.input.config.sdk_config.ets_loader_path.join("main.js");
+        if !dynamic_loader.is_file() {
+            anyhow::bail!(
+                "ARKDOWN_ARKTS12_DYNAMIC_DECLGEN_MISSING: {}",
+                dynamic_loader.display()
+            );
+        }
+
+        let mut declgen_config = build_config;
+        declgen_config.plugins = IndexMap::from([(
+            "interop_plugin".to_string(),
+            ArtifactPathSerializer::path_to_slash_string(&interop_plugin)?,
+        )]);
+        let config_path = PathBuf::from(&self.input.loader_json.cache_path)
+            .join("arkts12")
+            .join("declgen_build_config.json");
+        self.write_driver_config(&config_path, &declgen_config)?;
+        if !declgen_config.compile_files.is_empty() {
+            let output = self.command(&config_path).output().with_context(|| {
+                format!(
+                    "launch ArkTS 1.2 declaration driver {}",
+                    self.sdk.driver_entry.display()
+                )
+            })?;
+            if !output.status.success() {
+                anyhow::bail!(
+                    "ARKDOWN_ARKTS12_DECLGEN_V1_FAILED: driver exited with {}; stdout: {}; stderr: {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stdout).trim(),
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+            }
+        }
+
+        self.run_dynamic_declgen(&dynamic_loader, &modules)?;
+        self.write_decl_file_indexes(&modules)?;
+        let source_redirects = self.verify_interop_outputs(&modules)?;
+        Ok(StaticArktsInteropOutput {
+            bridge_root,
+            source_redirects,
+            requires_dynamic_abc,
+        })
+    }
+
+    fn existing_javascript_entry(path: &Path) -> Option<PathBuf> {
+        if path.is_file() {
+            return Some(path.to_path_buf());
+        }
+        let javascript = path.with_extension("js");
+        javascript.is_file().then_some(javascript)
+    }
+
+    fn write_driver_config(&self, path: &Path, config: &StaticArktsDriverConfig) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            fs_err::create_dir_all(parent)?;
+        }
+        fs_err::write(path, serde_json::to_vec_pretty(config)?)
+            .with_context(|| format!("write ArkTS 1.2 config {}", path.display()))
+    }
+
+    fn run_dynamic_declgen(
+        &self,
+        dynamic_loader: &Path,
+        modules: &[StaticArktsDependentModule],
+    ) -> Result<()> {
+        let request_path = self.dynamic_declgen_request_path();
+        if let Some(parent) = request_path.parent() {
+            fs_err::create_dir_all(parent)?;
+        }
+        let request = StaticArktsDynamicDeclgenRequest {
+            modules,
+            cache_path: &self.input.loader_json.cache_path,
+            bundle_name: &self.input.config.product.bundle_name,
+            main_module_name: &self.input.loader_json.module_name,
+            project_root_path: &self.input.config.project_root,
+        };
+        fs_err::write(&request_path, serde_json::to_vec_pretty(&request)?)?;
+        let adapter = r#"const fs=require('fs');const loader=require(process.argv[1]);const r=JSON.parse(fs.readFileSync(process.argv[2],'utf8'));const modules=new Map(r.modules.map(m=>[m.packageName,m]));Promise.resolve(loader.runDeclgenTs2Ets({dependentModuleMap:modules,projectConfig:{cachePath:r.cachePath,bundleName:r.bundleName,mainModuleName:r.mainModuleName,projectRootPath:r.projectRootPath,sdkAliasMap:new Map()}})).catch(e=>{console.error(e&&e.stack||e);process.exitCode=1;});"#;
+        let output = Command::new(&self.input.node_executable)
+            .arg("-e")
+            .arg(adapter)
+            .arg(dynamic_loader)
+            .arg(&request_path)
+            .output()
+            .with_context(|| {
+                format!(
+                    "launch ArkTS 1.1 declaration generator {}",
+                    dynamic_loader.display()
+                )
+            })?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "ARKDOWN_ARKTS12_DECLGEN_V2_FAILED: loader exited with {}; stdout: {}; stderr: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout).trim(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(())
+    }
+
+    fn dynamic_declgen_request_path(&self) -> PathBuf {
+        self.input
+            .module_layout
+            .arkts_interop_dir()
+            .join("declgen-v2-request.json")
+    }
+
+    fn write_decl_file_indexes(&self, modules: &[StaticArktsDependentModule]) -> Result<()> {
+        for module in modules
+            .iter()
+            .filter(|module| !module.dynamic_files.is_empty())
+        {
+            let index_path = module.decl_files_path.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "ARKDOWN_ARKTS12_DECL_FILE_INFO_PATH_MISSING: {}",
+                    module.package_name
+                )
+            })?;
+            let module_root = Path::new(&module.module_path);
+            let declgen_v2 = Path::new(module.declgen_v2_out_path.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "ARKDOWN_ARKTS12_DECLGEN_V2_PATH_MISSING: {}",
+                    module.package_name
+                )
+            })?);
+            let mut files = BTreeMap::new();
+            for source in &module.dynamic_files {
+                let source = Path::new(source);
+                let relative = source.strip_prefix(module_root).map_err(|_| {
+                    anyhow::anyhow!(
+                        "ARKDOWN_ARKTS12_INTEROP_SOURCE_ESCAPE: {} is outside {}",
+                        source.display(),
+                        module_root.display()
+                    )
+                })?;
+                let key = StaticArktsInteropPath::without_source_extension(relative)?;
+                let decl_path = declgen_v2.join(format!("{key}.d.ets"));
+                files.insert(
+                    key.clone(),
+                    StaticArktsDeclFileRecord {
+                        decl_path: ArtifactPathSerializer::path_to_slash_string(&decl_path)?,
+                        file_path: ArtifactPathSerializer::path_to_slash_string(source)?,
+                        ohm_url: format!("@normalized:N&&&{}/{}&", module.package_name, key),
+                    },
+                );
+            }
+            let index = StaticArktsDeclFileIndex {
+                package_name: &module.package_name,
+                files,
+            };
+            let index_path = Path::new(index_path);
+            if let Some(parent) = index_path.parent() {
+                fs_err::create_dir_all(parent)?;
+            }
+            fs_err::write(index_path, serde_json::to_vec_pretty(&index)?)?;
+        }
+        Ok(())
+    }
+
+    fn verify_interop_outputs(
+        &self,
+        modules: &[StaticArktsDependentModule],
+    ) -> Result<FxHashMap<PathBuf, PathBuf>> {
+        let mut redirects = FxHashMap::default();
+        for module in modules {
+            let module_root = Path::new(&module.module_path);
+            for source in &module.static_files {
+                let source = Path::new(source);
+                let relative = source.strip_prefix(module_root).map_err(|_| {
+                    anyhow::anyhow!(
+                        "ARKDOWN_ARKTS12_INTEROP_SOURCE_ESCAPE: {} is outside {}",
+                        source.display(),
+                        module_root.display()
+                    )
+                })?;
+                let key = StaticArktsInteropPath::without_source_extension(relative)?;
+                let declaration =
+                    Path::new(module.declgen_v1_out_path.as_deref().ok_or_else(|| {
+                        anyhow::anyhow!("missing declgen V1 path for {}", module.package_name)
+                    })?)
+                    .join(&module.package_name)
+                    .join(format!("{key}.d.ets"));
+                let bridge =
+                    Path::new(module.declgen_bridge_code_path.as_deref().ok_or_else(|| {
+                        anyhow::anyhow!("missing bridge path for {}", module.package_name)
+                    })?)
+                    .join(&module.package_name)
+                    .join(format!("{key}.ts"));
+                for (kind, output) in [("V1 declaration", &declaration), ("bridge", &bridge)] {
+                    if !output.is_file() {
+                        anyhow::bail!(
+                            "ARKDOWN_ARKTS12_INTEROP_OUTPUT_MISSING: {kind} for {} was not generated at {}",
+                            source.display(),
+                            output.display()
+                        );
+                    }
+                }
+                redirects.insert(lexical_normalize(source), lexical_normalize(&bridge));
+            }
+            for source in &module.dynamic_files {
+                let source = Path::new(source);
+                let relative = source.strip_prefix(module_root)?;
+                let key = StaticArktsInteropPath::without_source_extension(relative)?;
+                let declaration =
+                    Path::new(module.declgen_v2_out_path.as_deref().ok_or_else(|| {
+                        anyhow::anyhow!("missing declgen V2 path for {}", module.package_name)
+                    })?)
+                    .join(format!("{key}.d.ets"));
+                if !declaration.is_file() {
+                    anyhow::bail!(
+                        "ARKDOWN_ARKTS12_INTEROP_OUTPUT_MISSING: V2 declaration for {} was not generated at {}",
+                        source.display(),
+                        declaration.display()
+                    );
+                }
+            }
+        }
+        Ok(redirects)
     }
 
     /// `driver/build_system/src/pre_define.ts::MERGED_ABC_FILE` and
@@ -145,9 +681,10 @@ impl<'a> StaticArktsCompiler<'a> {
     fn validate_sdk(&self) -> Result<()> {
         for (name, path) in [
             ("driver", &self.sdk.driver_entry),
-            ("es2panda", &self.sdk.es2panda),
+            ("libarkts", &self.sdk.libarkts_entry),
             ("ark_link", &self.sdk.abc_linker),
             ("dependency_analyzer", &self.sdk.dependency_analyzer),
+            ("etsstdlib.abc", &self.sdk.etsstdlib_abc),
         ] {
             if !path.is_file() {
                 anyhow::bail!(
@@ -156,7 +693,25 @@ impl<'a> StaticArktsCompiler<'a> {
                 );
             }
         }
+        if !self
+            .sdk
+            .es2panda_addon_candidates
+            .iter()
+            .any(|path| path.is_file())
+        {
+            let candidates = self
+                .sdk
+                .es2panda_addon_candidates
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            anyhow::bail!(
+                "ARKDOWN_ARKTS12_SDK_ADDON_MISSING: libarkts cannot load es2panda.node; checked {candidates}"
+            );
+        }
         for (name, path) in [
+            ("stdlib", &self.sdk.stdlib),
             ("api", &self.sdk.api),
             ("kits", &self.sdk.kits),
             ("arkts", &self.sdk.arkts),
@@ -195,10 +750,33 @@ impl<'a> StaticArktsDriverConfigBuilder<'a> {
     }
 
     fn build(&self) -> Result<StaticArktsDriverConfig> {
+        self.build_for(false)
+    }
+
+    fn build_declgen(&self) -> Result<StaticArktsDriverConfig> {
+        self.build_for(true)
+    }
+
+    fn build_for(&self, enable_declgen_ets2_ts: bool) -> Result<StaticArktsDriverConfig> {
+        let identity = self.main_module_identity();
+        StaticArktsByteCodeHarEntryContract::validate(
+            &self.input.module.module_type,
+            self.input.loader_json.byte_code_har.unwrap_or(false),
+            self.input
+                .module_context
+                .module
+                .package
+                .as_ref()
+                .and_then(|package| package.package_json.main.as_deref()),
+            identity.package_name(),
+        )?;
         let mut dependent_module_list = self.dependent_modules()?;
-        if let Some(main_module) = self.main_module()? {
-            dependent_module_list.insert(0, main_module);
-        }
+        let main_module = self.main_module()?;
+        // `BaseMode::getMainModuleInfo` takes the current module's language,
+        // declaration paths, and dependency aliases from its package record.
+        // Omitting a hybrid main module makes the driver fall back to 1.2 and
+        // consequently treats every main-module `.ets` file as static.
+        dependent_module_list.insert(0, main_module);
         let compile_files = self.compile_files(&dependent_module_list)?;
         let module_files = self.module_files(&dependent_module_list)?;
         let source_roots = if self.input.module_context.module.source_roots.is_empty() {
@@ -236,6 +814,19 @@ impl<'a> StaticArktsDriverConfigBuilder<'a> {
             .parent()
             .ok_or_else(|| anyhow::anyhow!("ArkTS 1.2 ABC output has no parent directory"))?;
         let dependent_module_list_copy = dependent_module_list.clone();
+        let output_contract = StaticArktsModuleOutputContract::new(
+            &self.input.module.module_type,
+            self.input.module_layout,
+            &self.input.module.name,
+        );
+        let interop_api_paths = self
+            .sdk
+            .dynamic_interop
+            .is_dir()
+            .then(|| self.path(&self.sdk.dynamic_interop))
+            .transpose()?
+            .into_iter()
+            .collect();
 
         Ok(StaticArktsDriverConfig {
             plugins,
@@ -258,11 +849,11 @@ impl<'a> StaticArktsDriverConfigBuilder<'a> {
             bundle_name: self.input.config.product.bundle_name.clone(),
             use_normalized_ohm_url: self.input.loader_json.use_normalized_ohm_url,
             build_type: "build".to_string(),
-            package_name: self.input.loader_json.module_name.clone(),
+            package_name: identity.package_name().to_string(),
             build_sdk_path: self.path(&self.sdk.root)?,
             source_roots,
             module_type: self.input.module.module_type.to_string(),
-            module_name: self.input.loader_json.module_name.clone(),
+            module_name: identity.module_name().to_string(),
             dependent_module_list,
             dependency_module_list: dependent_module_list_copy,
             has_main_module: self
@@ -282,16 +873,33 @@ impl<'a> StaticArktsDriverConfigBuilder<'a> {
                 .and_then(|options| options.integrated_hsp)
                 .unwrap_or(false),
             allow_empty_bundle_name: false,
-            enable_declgen_ets2_ts: false,
-            declgen_v2_out_path: String::new(),
+            enable_declgen_ets2_ts,
+            declgen_v1_out_path: Some(self.path(&self.input.module_layout.arkts_declgen_v1_dir())?),
+            declgen_v2_out_path: if enable_declgen_ets2_ts {
+                self.path(
+                    &self
+                        .input
+                        .module_layout
+                        .arkts_declgen_v2_dir()
+                        .join(identity.package_name()),
+                )?
+            } else {
+                output_contract
+                    .declarations_root
+                    .as_deref()
+                    .map(|path| self.path(path))
+                    .transpose()?
+                    .unwrap_or_default()
+            },
+            declgen_bridge_code_path: Some(
+                self.path(&self.input.module_layout.arkts_declgen_bridge_dir())?,
+            ),
             external_api_paths,
-            interop_api_paths: Vec::new(),
+            interop_api_paths,
             device_types: self.input.manifest.device_types.clone(),
-            permissions: BTreeMap::new(),
             byte_code_har: self.input.loader_json.byte_code_har.unwrap_or(false),
             ui_transform_optimization: self.input.ui_transform_optimization,
             runtime_os: self.input.config.product.runtime_os.clone(),
-            sdk_config_paths: Vec::new(),
             is_preview: self.input.preview_mode,
             check_entry: self.input.check_entry,
             code_root_path: self.path(&project_path)?,
@@ -305,10 +913,8 @@ impl<'a> StaticArktsDriverConfigBuilder<'a> {
             api_path: self.path(&self.sdk.api)?,
             kits_path: self.path(&self.sdk.kits)?,
             dep_analyzer_path: self.path(&self.sdk.dependency_analyzer)?,
-            alias_config: BTreeMap::new(),
             sdk_alias_map: BTreeMap::new(),
-            interop_sdk_paths: BTreeMap::new(),
-            es2panda_mode: "simultaneous".to_string(),
+            es2panda_mode: output_contract.es2panda_mode.to_string(),
             app_resource: self.path(&self.input.module_layout.resource_table_txt())?,
             raw_file_resource: self
                 .path(&self.input.module_layout.res_resources_dir().join("rawfile"))?,
@@ -328,6 +934,15 @@ impl<'a> StaticArktsDriverConfigBuilder<'a> {
                 .and_then(|options| options.integrated_hsp)
                 .unwrap_or(false),
             ignore_error: false,
+            ark_guard_path: self
+                .input
+                .obfuscation
+                .map(|_| self.path(&self.sdk.ark_guard))
+                .transpose()?,
+            obfuscation_options: self
+                .input
+                .obfuscation
+                .map(|plan| plan.driver_options().clone()),
         })
     }
 
@@ -335,43 +950,15 @@ impl<'a> StaticArktsDriverConfigBuilder<'a> {
         &self,
         dependent_modules: &[StaticArktsDependentModule],
     ) -> Result<Vec<String>> {
-        // `bindings/src/lsp/generateBuildConfig.ts::getEtsFiles` contributes
-        // every ArkTS file in the active module source inventory. Rolldown's
-        // reachable graph is an additional source of generated/build-owned
-        // entries, not a replacement for this complete input set.
-        let inventory_roots = if self.input.module_context.module.source_roots.is_empty() {
-            std::slice::from_ref(&self.input.module_context.module.src_main)
-        } else {
-            self.input.module_context.module.source_roots.as_slice()
-        };
-        let mut module_inventory = inventory_roots
+        // `FileManager::getLanguageVersionByFilePath` makes membership in
+        // `compileFiles` authoritative: every listed file is ArkTS 1.2. The
+        // complete source inventory therefore belongs in module metadata,
+        // while this list contains only the source-classified static subset.
+        StaticArktsCompileEntryPlan::new(dependent_modules)
+            .resolve()?
             .iter()
-            .flat_map(|root| {
-                self.input
-                    .module_context
-                    .session
-                    .source_store
-                    .text_sources_under(root)
-            })
-            .filter(|(path, _)| {
-                path.extension().and_then(|extension| extension.to_str()) == Some("ets")
-            })
-            .map(|(path, _)| path.to_path_buf())
-            .collect::<Vec<_>>();
-        module_inventory.sort();
-        module_inventory.dedup();
-        StaticArktsCompileEntryPlan::new(
-            Path::new(&self.input.loader_json.module_root_path),
-            &self.input.loader_json.hvigor_compile_entry,
-            &self.input.loader_json.compile_entry,
-            &module_inventory,
-            self.input.module_source_files,
-            dependent_modules,
-        )
-        .resolve()?
-        .iter()
-        .map(|path| self.path(path))
-        .collect()
+            .map(|path| self.path(path))
+            .collect()
     }
 
     fn dependent_modules(&self) -> Result<Vec<StaticArktsDependentModule>> {
@@ -428,7 +1015,10 @@ impl<'a> StaticArktsDriverConfigBuilder<'a> {
                 .get(&node.package_name)
                 .or_else(|| self.input.loader_json.byte_code_har_info.get(&node.alias));
             let language = language_detector.detect(node, bytecode.map(|entry| &entry.abc_path))?;
+            let (static_files, dynamic_files) =
+                self.dependency_source_languages(node, &language)?;
             let (dependencies, original_package_name_map) = self.dependency_edges(root);
+            let source_interop = !matches!(node.node_type, DependencyNodeType::BytecodeHar);
             modules.push(StaticArktsDependentModule {
                 package_name: node.package_name.clone(),
                 module_name: node
@@ -459,7 +1049,35 @@ impl<'a> StaticArktsDriverConfigBuilder<'a> {
                 // dynamic declgen output contract. Package source inventory
                 // does not own that artifact, so it must not be guessed by
                 // scanning for a matching filename.
-                decl_files_path: None,
+                decl_files_path: (source_interop && !dynamic_files.is_empty())
+                    .then(|| {
+                        self.path(
+                            &self
+                                .input
+                                .module_layout
+                                .arkts_decl_file_info(&node.package_name),
+                        )
+                    })
+                    .transpose()?,
+                declgen_v1_out_path: source_interop
+                    .then(|| self.path(&self.input.module_layout.arkts_declgen_v1_dir()))
+                    .transpose()?,
+                declgen_v2_out_path: source_interop
+                    .then(|| {
+                        self.path(
+                            &self
+                                .input
+                                .module_layout
+                                .arkts_declgen_v2_dir()
+                                .join(&node.package_name),
+                        )
+                    })
+                    .transpose()?,
+                declgen_bridge_code_path: source_interop
+                    .then(|| self.path(&self.input.module_layout.arkts_declgen_bridge_dir()))
+                    .transpose()?,
+                dynamic_files,
+                static_files,
                 dependencies,
                 original_package_name_map,
                 abc_path: bytecode
@@ -493,18 +1111,10 @@ impl<'a> StaticArktsDriverConfigBuilder<'a> {
     /// `BaseMode::getMainModuleInfo` reads the current package's dependency
     /// aliases and `originalPackageNameMap` from the main package record when
     /// it is present in `dependencyModuleList`.
-    fn main_module(&self) -> Result<Option<StaticArktsDependentModule>> {
+    fn main_module(&self) -> Result<StaticArktsDependentModule> {
         let (dependencies, original_package_name_map) =
             self.dependency_edges(&self.input.module_context.deps.host_root);
-        if original_package_name_map.is_none() {
-            return Ok(None);
-        }
         let entry_file = self.main_entry_file()?;
-        if entry_file.is_empty() {
-            anyhow::bail!(
-                "ARKDOWN_ARKTS12_MAIN_ENTRY_MISSING: aliased dependencies require the main package entryFile"
-            );
-        }
         let source_roots = if self.input.module_context.module.source_roots.is_empty() {
             vec![self.path(&self.input.module_context.module.src_main)?]
         } else {
@@ -517,15 +1127,53 @@ impl<'a> StaticArktsDriverConfigBuilder<'a> {
                 .collect::<Result<Vec<_>>>()?
         };
         let package = self.input.module_context.module.package.as_ref();
-        Ok(Some(StaticArktsDependentModule {
-            package_name: self.input.loader_json.module_name.clone(),
-            module_name: self.input.loader_json.module_name.clone(),
+        let identity = self.main_module_identity();
+        let (static_files, dynamic_files) = self.main_source_languages()?;
+        Ok(StaticArktsDependentModule {
+            package_name: identity.package_name().to_string(),
+            module_name: identity.module_name().to_string(),
             module_type: self.input.module.module_type.to_string(),
             module_path: self.path(&self.input.module.src_path)?,
             source_roots,
-            entry_file,
-            language: "1.2".to_string(),
-            decl_files_path: None,
+            // The driver validates every dependency-list record before it
+            // notices that this package is already the main module. Its
+            // `demo_mix_compile2` config uses the module root as this marker;
+            // the actual main entry remains the top-level `entryFile`.
+            entry_file: if entry_file.is_empty() {
+                self.path(&self.input.module.src_path)?
+            } else {
+                entry_file
+            },
+            language: if dynamic_files.is_empty() {
+                "1.2".to_string()
+            } else {
+                "hybrid".to_string()
+            },
+            decl_files_path: (!dynamic_files.is_empty())
+                .then(|| {
+                    self.path(
+                        &self
+                            .input
+                            .module_layout
+                            .arkts_decl_file_info(identity.package_name()),
+                    )
+                })
+                .transpose()?,
+            declgen_v1_out_path: Some(self.path(&self.input.module_layout.arkts_declgen_v1_dir())?),
+            declgen_v2_out_path: Some(
+                self.path(
+                    &self
+                        .input
+                        .module_layout
+                        .arkts_declgen_v2_dir()
+                        .join(identity.package_name()),
+                )?,
+            ),
+            declgen_bridge_code_path: Some(
+                self.path(&self.input.module_layout.arkts_declgen_bridge_dir())?,
+            ),
+            dynamic_files,
+            static_files,
             dependencies,
             original_package_name_map,
             abc_path: None,
@@ -535,8 +1183,135 @@ impl<'a> StaticArktsDriverConfigBuilder<'a> {
             package_version: package
                 .filter(|package| !package.version.is_empty())
                 .map(|package| package.version.clone()),
-            compile_sources: false,
-        }))
+            compile_sources: true,
+        })
+    }
+
+    fn dependency_source_languages(
+        &self,
+        node: &DependencyNodeSnapshot,
+        language: &str,
+    ) -> Result<(Vec<String>, Vec<String>)> {
+        let mut static_files = Vec::new();
+        let mut dynamic_files = Vec::new();
+        let mut paths = node
+            .compile_inputs
+            .other_compile_source_files
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        if let Some(entry) = node
+            .compile_inputs
+            .dynamic_import_entry_file
+            .as_ref()
+            .or(node.compile_inputs.other_compile_entry_file.as_ref())
+        {
+            paths.push(entry.clone());
+        }
+        paths.sort();
+        paths.dedup();
+        for path in paths {
+            self.classify_source_file(&path, language, &mut static_files, &mut dynamic_files)?;
+        }
+        static_files.sort();
+        static_files.dedup();
+        dynamic_files.sort();
+        dynamic_files.dedup();
+        Ok((static_files, dynamic_files))
+    }
+
+    fn main_source_languages(&self) -> Result<(Vec<String>, Vec<String>)> {
+        let roots = if self.input.module_context.module.source_roots.is_empty() {
+            std::slice::from_ref(&self.input.module_context.module.src_main)
+        } else {
+            self.input.module_context.module.source_roots.as_slice()
+        };
+        let mut paths = roots
+            .iter()
+            .flat_map(|root| {
+                self.input
+                    .module_context
+                    .session
+                    .source_store
+                    .text_sources_under(root)
+            })
+            .map(|(path, _)| path.to_path_buf())
+            .collect::<Vec<_>>();
+        if let Some(entry_file) = self
+            .input
+            .module_context
+            .module
+            .package
+            .as_ref()
+            .and_then(|package| package.package_json.main.as_deref())
+        {
+            let entry_file = Path::new(entry_file);
+            paths.push(if entry_file.has_root() {
+                lexical_normalize(entry_file)
+            } else {
+                lexical_normalize(&self.input.module.src_path.join(entry_file))
+            });
+        }
+        paths.sort();
+        paths.dedup();
+        let mut static_files = Vec::new();
+        let mut dynamic_files = Vec::new();
+        for path in paths {
+            self.classify_source_file(&path, "hybrid", &mut static_files, &mut dynamic_files)?;
+        }
+        static_files.sort();
+        static_files.dedup();
+        dynamic_files.sort();
+        dynamic_files.dedup();
+        Ok((static_files, dynamic_files))
+    }
+
+    fn classify_source_file(
+        &self,
+        path: &Path,
+        language: &str,
+        static_files: &mut Vec<String>,
+        dynamic_files: &mut Vec<String>,
+    ) -> Result<()> {
+        if arkdown_path::SourceFileName::new(path).is_declaration() {
+            return Ok(());
+        }
+        let extension = path.extension().and_then(|extension| extension.to_str());
+        if extension == Some("ets") {
+            let is_static = if language == "1.2" {
+                true
+            } else if language == "hybrid" {
+                let source = self
+                    .input
+                    .module_context
+                    .session
+                    .source_store
+                    .read_text(path)?;
+                arkdown_ets_transform::ArktsSourceLanguageDetector::new(&source).is_static()
+            } else {
+                false
+            };
+            if is_static {
+                static_files.push(self.path(path)?);
+            } else {
+                dynamic_files.push(self.path(path)?);
+            }
+        } else if matches!(extension, Some("ts" | "js" | "mjs" | "cjs")) {
+            dynamic_files.push(self.path(path)?);
+        }
+        Ok(())
+    }
+
+    fn main_module_identity(&self) -> StaticArktsMainModuleIdentity<'_> {
+        StaticArktsMainModuleIdentity::new(
+            self.input
+                .module_context
+                .module
+                .package
+                .as_ref()
+                .map(|package| package.name.as_str()),
+            &self.input.loader_json.module_name,
+        )
     }
 
     fn main_entry_file(&self) -> Result<String> {
@@ -675,7 +1450,9 @@ impl<'a> StaticArktsDriverConfigBuilder<'a> {
                         path.display()
                     )
                 })?;
-            if !StaticArktsLanguageDetector::file_is_static(&source) {
+            if !arkdown_ets_transform::ArktsSourceLanguageDetector::new(&source)
+                .is_static_dependency_compile_file()
+            {
                 return Ok(());
             }
         }
@@ -687,6 +1464,106 @@ impl<'a> StaticArktsDriverConfigBuilder<'a> {
         ArtifactPathSerializer::path_to_slash_string(path).map_err(|error| {
             anyhow::anyhow!("serialize ArkTS 1.2 path {}: {error}", path.display())
         })
+    }
+}
+
+/// Package/module identity consumed by `BaseMode::getMainModuleInfo`.
+///
+/// The static frontend uses `packageName` as the ABC record prefix while
+/// `moduleName` remains the OHOS module name. They often both happen to be
+/// `entry`, but library packages may intentionally publish a different name.
+struct StaticArktsMainModuleIdentity<'a> {
+    package_name: &'a str,
+    module_name: &'a str,
+}
+
+impl<'a> StaticArktsMainModuleIdentity<'a> {
+    fn new(package_name: Option<&'a str>, module_name: &'a str) -> Self {
+        Self {
+            package_name: package_name
+                .filter(|name| !name.is_empty())
+                .unwrap_or(module_name),
+            module_name,
+        }
+    }
+
+    fn package_name(&self) -> &str {
+        self.package_name
+    }
+
+    fn module_name(&self) -> &str {
+        self.module_name
+    }
+}
+
+/// Public-entry contract for an ArkTS 1.2 ByteCode HAR.
+///
+/// Current `generate_arktsconfig.ts::addBinaryDependencySection` resolves a
+/// binary HAR import with the fixed `mainFile: 'Index'`. The current ArkTS
+/// static sample consequently publishes a module-root `Index.ets`. Accepting a
+/// nested or differently named entry would produce an ABC successfully but
+/// make the package impossible for the same driver to consume.
+struct StaticArktsByteCodeHarEntryContract;
+
+impl StaticArktsByteCodeHarEntryContract {
+    fn validate(
+        module_type: &arkdown_core::OhosModuleType,
+        byte_code_har: bool,
+        main: Option<&str>,
+        package_name: &str,
+    ) -> Result<()> {
+        if !byte_code_har || !matches!(module_type, arkdown_core::OhosModuleType::Har) {
+            return Ok(());
+        }
+
+        let Some(main) = main else {
+            anyhow::bail!(
+                "ARKDOWN_ARKTS12_BYTECODE_HAR_ENTRY_UNSUPPORTED: package '{}' must set oh-package.json5 main to module-root Index.ets; the current static driver resolves binary HAR imports as '<package>.Index'",
+                package_name
+            );
+        };
+        let normalized = lexical_normalize(Path::new(main));
+        if normalized != Path::new("Index.ets") {
+            anyhow::bail!(
+                "ARKDOWN_ARKTS12_BYTECODE_HAR_ENTRY_UNSUPPORTED: package '{}' uses main '{}'; the current static driver resolves binary HAR imports as '<package>.Index', so ArkTS 1.2 ByteCode HAR requires module-root Index.ets",
+                package_name,
+                main
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Output behavior selected by the current static driver's build modes.
+struct StaticArktsModuleOutputContract {
+    es2panda_mode: &'static str,
+    declarations_root: Option<PathBuf>,
+}
+
+impl StaticArktsModuleOutputContract {
+    fn new(
+        module_type: &arkdown_core::OhosModuleType,
+        layout: &ModuleBuildLayout<'_>,
+        module_name: &str,
+    ) -> Self {
+        // `DepAnalyzer::createDependencyGraph` adds `CompileJobType.DECL` only
+        // for HAR/HSP work submitted through the parallel mode. The
+        // simultaneous path hard-codes an ABC-only job, so using it for a
+        // library would silently leave declaration generation to an unrelated
+        // producer.
+        if matches!(
+            module_type,
+            arkdown_core::OhosModuleType::Shared | arkdown_core::OhosModuleType::Har
+        ) {
+            return Self {
+                es2panda_mode: "parallel",
+                declarations_root: Some(layout.declarations_dir().join(module_name)),
+            };
+        }
+        Self {
+            es2panda_mode: "simultaneous",
+            declarations_root: None,
+        }
     }
 }
 
@@ -739,7 +1616,7 @@ impl<'a> StaticArktsLanguageDetector<'a> {
                     path.display()
                 )
             })?;
-            if Self::file_is_static(&source) {
+            if arkdown_ets_transform::ArktsSourceLanguageDetector::new(&source).is_static() {
                 found_static = true;
             } else {
                 found_dynamic = true;
@@ -750,137 +1627,35 @@ impl<'a> StaticArktsLanguageDetector<'a> {
         }
         Ok(if found_static { "1.2" } else { "1.1" }.to_string())
     }
-
-    /// Exact comment skipping and first-effective-line test from
-    /// `getFileLanguageVersion`; it deliberately checks `contains` rather than
-    /// accepting only a normalized directive token.
-    fn file_is_static(source: &str) -> bool {
-        let mut in_multi_line_comment = false;
-        for original_line in source.split('\n') {
-            let mut line = original_line;
-            let owned_line;
-            if in_multi_line_comment {
-                let Some(end_index) = line.find("*/") else {
-                    continue;
-                };
-                line = &line[end_index + 2..];
-                in_multi_line_comment = false;
-            }
-            if let Some(single_line_index) = line.find("//") {
-                line = &line[..single_line_index];
-            }
-            if let Some(multi_line_start) = line.find("/*") {
-                if let Some(relative_end) = line[multi_line_start + 2..].find("*/") {
-                    let multi_line_end = multi_line_start + 2 + relative_end;
-                    let mut value = String::with_capacity(line.len());
-                    value.push_str(&line[..multi_line_start]);
-                    value.push_str(&line[multi_line_end + 2..]);
-                    owned_line = value;
-                    line = &owned_line;
-                } else {
-                    line = &line[..multi_line_start];
-                    in_multi_line_comment = true;
-                }
-            }
-            let effective_line = line.trim();
-            if !effective_line.is_empty() {
-                return effective_line.contains("use static");
-            }
-        }
-        false
-    }
 }
 
 struct StaticArktsCompileEntryPlan<'a> {
-    root: &'a Path,
-    serialized_entries: &'a [String],
-    internal_entries: &'a [String],
-    module_inventory: &'a [PathBuf],
-    module_sources: &'a [HvigorModuleSourceFile],
     dependent_modules: &'a [StaticArktsDependentModule],
 }
 
 impl<'a> StaticArktsCompileEntryPlan<'a> {
-    fn new(
-        root: &'a Path,
-        serialized_entries: &'a [String],
-        internal_entries: &'a [String],
-        module_inventory: &'a [PathBuf],
-        module_sources: &'a [HvigorModuleSourceFile],
-        dependent_modules: &'a [StaticArktsDependentModule],
-    ) -> Self {
-        Self {
-            root,
-            serialized_entries,
-            internal_entries,
-            module_inventory,
-            module_sources,
-            dependent_modules,
-        }
+    fn new(dependent_modules: &'a [StaticArktsDependentModule]) -> Self {
+        Self { dependent_modules }
     }
 
     fn resolve(&self) -> Result<Vec<PathBuf>> {
         let mut files = Vec::new();
         let mut seen = FxHashSet::default();
-        for entry in self
-            .serialized_entries
-            .iter()
-            .chain(self.internal_entries.iter())
-        {
-            let entry = entry.strip_suffix("?entry").unwrap_or(entry);
-            let path = Path::new(entry);
-            let path = if path.has_root() {
-                lexical_normalize(path)
-            } else {
-                lexical_normalize(&self.root.join(entry.strip_prefix("./").unwrap_or(entry)))
-            };
-            if !path.is_file() {
-                anyhow::bail!("ARKDOWN_ARKTS12_COMPILE_ENTRY_MISSING: {}", path.display());
-            }
-            if seen.insert(path.clone()) {
-                files.push(path);
-            }
-        }
-        for path in self.module_inventory {
-            let path = lexical_normalize(path);
-            if seen.insert(path.clone()) {
-                files.push(path);
-            }
-        }
-        for source in self.module_sources {
-            let path = lexical_normalize(Path::new(&source.module_id));
-            if !path.has_root()
-                || path.extension().and_then(|extension| extension.to_str()) != Some("ets")
-                || !self.belongs_to_static_source_module(&path)
-            {
+        for module in self.dependent_modules {
+            if !module.compile_sources {
                 continue;
             }
-            if !path.is_file() {
-                anyhow::bail!("ARKDOWN_ARKTS12_COMPILE_ENTRY_MISSING: {}", path.display());
+            for static_file in &module.static_files {
+                let path = lexical_normalize(Path::new(static_file));
+                if !path.is_file() {
+                    anyhow::bail!("ARKDOWN_ARKTS12_COMPILE_ENTRY_MISSING: {}", path.display());
+                }
+                if seen.insert(path.clone()) {
+                    files.push(path);
+                }
             }
-            if seen.insert(path.clone()) {
-                files.push(path);
-            }
-        }
-        if files.is_empty() {
-            anyhow::bail!("ARKDOWN_ARKTS12_COMPILE_ENTRY_EMPTY: no static compiler roots");
         }
         Ok(files)
-    }
-
-    /// `BaseMode::processEntryFiles` accepts only files below the main module
-    /// or a `dependencyModuleList` entry. Dynamic 1.1 and separately built HSP
-    /// dependencies remain dependency metadata; their sources are not merged
-    /// into the current static ABC.
-    fn belongs_to_static_source_module(&self, path: &Path) -> bool {
-        if path.starts_with(self.root) {
-            return true;
-        }
-        self.dependent_modules.iter().any(|module| {
-            matches!(module.language.as_str(), "1.2" | "hybrid")
-                && module.compile_sources
-                && path.starts_with(Path::new(&module.module_path))
-        })
     }
 }
 
@@ -916,6 +1691,14 @@ struct StaticArktsDependentModule {
     language: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     decl_files_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    declgen_v1_out_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    declgen_v2_out_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    declgen_bridge_code_path: Option<String>,
+    dynamic_files: Vec<String>,
+    static_files: Vec<String>,
     dependencies: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     original_package_name_map: Option<BTreeMap<String, String>>,
@@ -930,6 +1713,48 @@ struct StaticArktsDependentModule {
     package_version: Option<String>,
     #[serde(skip)]
     compile_sources: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StaticArktsDynamicDeclgenRequest<'a> {
+    modules: &'a [StaticArktsDependentModule],
+    cache_path: &'a str,
+    bundle_name: &'a str,
+    main_module_name: &'a str,
+    project_root_path: &'a Path,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StaticArktsDeclFileIndex<'a> {
+    package_name: &'a str,
+    files: BTreeMap<String, StaticArktsDeclFileRecord>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StaticArktsDeclFileRecord {
+    decl_path: String,
+    file_path: String,
+    ohm_url: String,
+}
+
+struct StaticArktsInteropPath;
+
+impl StaticArktsInteropPath {
+    fn without_source_extension(path: &Path) -> Result<String> {
+        let serialized = ArtifactPathSerializer::rel_to_slash(path);
+        for suffix in [".d.ets", ".d.ts", ".ets", ".ts", ".mjs", ".cjs", ".js"] {
+            if let Some(value) = serialized.strip_suffix(suffix) {
+                return Ok(value.to_string());
+            }
+        }
+        anyhow::bail!(
+            "ARKDOWN_ARKTS12_INTEROP_SOURCE_EXTENSION: unsupported source {}",
+            path.display()
+        )
+    }
 }
 
 #[derive(Serialize)]
@@ -964,16 +1789,18 @@ struct StaticArktsDriverConfig {
     integrated_hsp: bool,
     allow_empty_bundle_name: bool,
     enable_declgen_ets2_ts: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    declgen_v1_out_path: Option<String>,
     declgen_v2_out_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    declgen_bridge_code_path: Option<String>,
     external_api_paths: Vec<String>,
     interop_api_paths: Vec<String>,
     device_types: Vec<String>,
-    permissions: BTreeMap<String, serde_json::Value>,
     byte_code_har: bool,
     ui_transform_optimization: bool,
     #[serde(rename = "runtimeOS")]
     runtime_os: String,
-    sdk_config_paths: Vec<String>,
     is_preview: bool,
     check_entry: bool,
     code_root_path: String,
@@ -987,9 +1814,7 @@ struct StaticArktsDriverConfig {
     api_path: String,
     kits_path: String,
     dep_analyzer_path: String,
-    alias_config: BTreeMap<String, serde_json::Value>,
     sdk_alias_map: BTreeMap<String, serde_json::Value>,
-    interop_sdk_paths: BTreeMap<String, serde_json::Value>,
     es2panda_mode: String,
     app_resource: String,
     raw_file_resource: String,
@@ -998,6 +1823,67 @@ struct StaticArktsDriverConfig {
     compile_har: bool,
     reset_bundle_name: bool,
     ignore_error: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ark_guard_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    obfuscation_options: Option<StaticArktsDriverObfuscationOptions>,
+}
+
+impl StaticArktsDriverConfig {
+    fn has_static_output_inputs(&self) -> bool {
+        !self.compile_files.is_empty()
+            || self.dependency_module_list.iter().any(|module| {
+                module.byte_code_har && module.language != "1.1" && module.abc_path.is_some()
+            })
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StaticArktsDriverObfuscationOptions {
+    self_config: StaticArktsDriverSelfObfuscation,
+    sdk_apis: Vec<String>,
+    obfuscation_cache_dir: String,
+    export_rule_path: String,
+    dependencies: StaticArktsDriverObfuscationDependencies,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StaticArktsDriverSelfObfuscation {
+    rule_options: StaticArktsDriverRuleOptions,
+    consumer_rules: Vec<String>,
+    lib_dir: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StaticArktsDriverRuleOptions {
+    enable: bool,
+    rules: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StaticArktsDriverObfuscationDependencies {
+    libraries: Vec<StaticArktsDriverDependencyObfuscation>,
+    hsp_libraries: Vec<StaticArktsDriverDependencyObfuscation>,
+    hars: Vec<String>,
+    hsps: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StaticArktsDriverDependencyObfuscation {
+    consumer_rules: Vec<String>,
+    lib_dir: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StaticArktsGeneratedObfuscationConfig {
+    abc_path: String,
+    obf_abc_path: String,
 }
 
 #[derive(Serialize)]
@@ -1027,23 +1913,159 @@ impl Default for StaticArktsLogLevel {
 
 #[cfg(test)]
 mod tests {
-    use super::{StaticArktsCompileEntryPlan, StaticArktsLanguageDetector};
+    use arkdown_core::OhosModuleType;
 
-    #[test]
-    fn language_directive_matches_the_frontend_first_effective_line_algorithm() {
-        assert!(StaticArktsLanguageDetector::file_is_static(
-            "// heading\n/* block\n * comment\n */ 'use static'\nexport class A {}"
-        ));
-        assert!(StaticArktsLanguageDetector::file_is_static(
-            "/* before */ 'use static' // after"
-        ));
-        assert!(!StaticArktsLanguageDetector::file_is_static(
-            "export const value = 1;\n'use static'"
-        ));
+    use super::{
+        ModuleBuildLayout, StaticArktsByteCodeHarEntryContract, StaticArktsCompileEntryPlan,
+        StaticArktsDependentModule, StaticArktsInteropOutput, StaticArktsInteropPath,
+        StaticArktsMainModuleIdentity, StaticArktsModuleOutputContract, StaticArktsObfuscationPlan,
+    };
+
+    fn compile_module(
+        root: &std::path::Path,
+        static_files: Vec<String>,
+        dynamic_files: Vec<String>,
+    ) -> StaticArktsDependentModule {
+        StaticArktsDependentModule {
+            package_name: "entry".to_string(),
+            module_name: "entry".to_string(),
+            module_type: "entry".to_string(),
+            module_path: root.display().to_string(),
+            source_roots: vec![root.display().to_string()],
+            entry_file: root.display().to_string(),
+            language: if dynamic_files.is_empty() {
+                "1.2".to_string()
+            } else {
+                "hybrid".to_string()
+            },
+            decl_files_path: None,
+            declgen_v1_out_path: None,
+            declgen_v2_out_path: None,
+            declgen_bridge_code_path: None,
+            dynamic_files,
+            static_files,
+            dependencies: Vec::new(),
+            original_package_name_map: None,
+            abc_path: None,
+            byte_code_har: false,
+            bundle_type: None,
+            bundle_name: None,
+            package_version: None,
+            compile_sources: true,
+        }
+    }
+
+    fn static_sdk(root: &std::path::Path) -> arkdown_core::StaticArktsSdkLayout {
+        let ets = root.join("ets");
+        let dynamic_loader = ets.join("dynamic/build-tools/ets-loader");
+        std::fs::create_dir_all(&dynamic_loader).expect("dynamic SDK loader");
+        arkdown_config::sdk::sdk_config_from_root(root, Some(26))
+            .static_arkts_layout()
+            .expect("static SDK layout")
     }
 
     #[test]
-    fn compile_entries_preserve_source_order_strip_query_and_deduplicate() {
+    fn language_directive_matches_the_frontend_first_effective_line_algorithm() {
+        assert!(arkdown_ets_transform::ArktsSourceLanguageDetector::new(
+            "// heading\n/* block\n * comment\n */ 'use static'\nexport class A {}"
+        )
+        .is_static());
+        assert!(arkdown_ets_transform::ArktsSourceLanguageDetector::new(
+            "/* before */ 'use static' // after"
+        )
+        .is_static());
+        assert!(!arkdown_ets_transform::ArktsSourceLanguageDetector::new(
+            "export const value = 1;\n'use static'"
+        )
+        .is_static());
+    }
+
+    #[test]
+    fn interop_paths_follow_the_sdk_declgen_output_contract() {
+        assert_eq!(
+            StaticArktsInteropPath::without_source_extension(std::path::Path::new(
+                "src/main/ets/model/Index.ets"
+            ))
+            .expect("source path"),
+            "src/main/ets/model/Index"
+        );
+        assert_eq!(
+            StaticArktsInteropPath::without_source_extension(std::path::Path::new(
+                "src/main/ets/model/Types.d.ts"
+            ))
+            .expect("declaration path"),
+            "src/main/ets/model/Types"
+        );
+    }
+
+    #[test]
+    fn interop_entry_redirect_preserves_the_entry_query() {
+        let root = std::path::PathBuf::from("/project/entry");
+        let source = root.join("src/main/ets/pages/Index.ets");
+        let bridge = std::path::PathBuf::from(
+            "/project/entry/build/default/intermediates/declgen/default/declgenBridgeCode/entry/src/main/ets/pages/Index.ts",
+        );
+        let output = StaticArktsInteropOutput {
+            bridge_root: bridge.parent().expect("bridge parent").to_path_buf(),
+            source_redirects: [(source, bridge.clone())].into_iter().collect(),
+            requires_dynamic_abc: true,
+        };
+        let mut entries = vec!["./src/main/ets/pages/Index.ets?entry".to_string()];
+
+        output
+            .redirect_entries(&root, &mut entries)
+            .expect("redirect entry");
+
+        assert_eq!(entries, vec![format!("{}?entry", bridge.display())]);
+    }
+
+    #[test]
+    fn static_abc_identity_uses_package_name_not_ohos_module_name() {
+        let identity = StaticArktsMainModuleIdentity::new(Some("bytecode-har"), "entry");
+
+        assert_eq!(identity.package_name(), "bytecode-har");
+        assert_eq!(identity.module_name(), "entry");
+        assert_eq!(
+            StaticArktsMainModuleIdentity::new(None, "entry").package_name(),
+            "entry"
+        );
+    }
+
+    #[test]
+    fn static_bytecode_har_requires_the_driver_binary_index_contract() {
+        StaticArktsByteCodeHarEntryContract::validate(
+            &OhosModuleType::Har,
+            true,
+            Some("./Index.ets"),
+            "library",
+        )
+        .expect("module-root Index.ets is consumable as library.Index");
+
+        let error = StaticArktsByteCodeHarEntryContract::validate(
+            &OhosModuleType::Har,
+            true,
+            Some("src/main/ets/Index.ets"),
+            "library",
+        )
+        .expect_err("nested main cannot satisfy the current binary HAR mainFile contract");
+        assert!(
+            error
+                .to_string()
+                .contains("ARKDOWN_ARKTS12_BYTECODE_HAR_ENTRY_UNSUPPORTED"),
+            "{error}"
+        );
+
+        StaticArktsByteCodeHarEntryContract::validate(
+            &OhosModuleType::Har,
+            false,
+            Some("src/main/ets/Index.ets"),
+            "source-library",
+        )
+        .expect("source HARs retain explicit nested entry mapping");
+    }
+
+    #[test]
+    fn compile_entries_contain_only_the_classified_static_subset_and_deduplicate() {
         let temp = tempfile::tempdir().expect("tempdir");
         let root = temp.path().join("src/main");
         std::fs::create_dir_all(root.join("ets/pages")).expect("source directory");
@@ -1051,25 +2073,90 @@ mod tests {
         let ability = root.join("ets/EntryAbility.ets");
         std::fs::write(&page, "").expect("page source");
         std::fs::write(&ability, "").expect("ability source");
-        let serialized = vec![format!("{}?entry", ability.display())];
-        let internal = vec![
-            "./ets/pages/Index.ets?entry".to_string(),
-            ability.display().to_string(),
-        ];
+        let modules = [compile_module(
+            &root,
+            vec![
+                ability.display().to_string(),
+                page.display().to_string(),
+                ability.display().to_string(),
+            ],
+            Vec::new(),
+        )];
 
-        let resolved =
-            StaticArktsCompileEntryPlan::new(&root, &serialized, &internal, &[], &[], &[])
-                .resolve()
-                .expect("static compile entry plan");
+        let resolved = StaticArktsCompileEntryPlan::new(&modules)
+            .resolve()
+            .expect("static compile entry plan");
 
         assert_eq!(resolved, [ability, page]);
     }
 
     #[test]
+    fn compile_entries_exclude_dynamic_ets_and_support_sources() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("src/main");
+        let generated = temp.path().join("build/generated/profile/default");
+        std::fs::create_dir_all(root.join("ets")).expect("source directory");
+        std::fs::create_dir_all(&generated).expect("generated directory");
+        let static_index = root.join("ets/StaticIndex.ets");
+        let dynamic_index = root.join("ets/DynamicIndex.ets");
+        let module_info = generated.join("ModuleInfo.ts");
+        std::fs::write(&static_index, "'use static';\nexport const value = 1;\n")
+            .expect("static source");
+        std::fs::write(&dynamic_index, "export const value = 1;\n").expect("dynamic source");
+        std::fs::write(
+            &module_info,
+            "export const __MODULE_NAME__ = __getCurrentModuleName__();\n",
+        )
+        .expect("dynamic support source");
+        let modules = [compile_module(
+            &root,
+            vec![static_index.display().to_string()],
+            vec![
+                dynamic_index.display().to_string(),
+                module_info.display().to_string(),
+            ],
+        )];
+
+        let resolved = StaticArktsCompileEntryPlan::new(&modules)
+            .resolve()
+            .expect("static compile entry plan");
+
+        assert_eq!(resolved, [static_index]);
+    }
+
+    #[test]
+    fn compile_entries_allow_an_arkts12_product_with_only_dynamic_sources() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dynamic_index = temp.path().join("ets/DynamicIndex.ets");
+        std::fs::create_dir_all(dynamic_index.parent().expect("source parent"))
+            .expect("source directory");
+        std::fs::write(&dynamic_index, "export const value = 1;\n").expect("dynamic source");
+        let modules = [compile_module(
+            temp.path(),
+            Vec::new(),
+            vec![dynamic_index.display().to_string()],
+        )];
+
+        let resolved = StaticArktsCompileEntryPlan::new(&modules)
+            .resolve()
+            .expect("an empty static partition is valid");
+
+        assert!(resolved.is_empty());
+    }
+
+    #[test]
     fn missing_static_compile_entry_is_a_typed_boundary_error() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let internal = vec!["./ets/pages/Missing.ets".to_string()];
-        let error = StaticArktsCompileEntryPlan::new(temp.path(), &[], &internal, &[], &[], &[])
+        let modules = [compile_module(
+            temp.path(),
+            vec![temp
+                .path()
+                .join("ets/pages/Missing.ets")
+                .display()
+                .to_string()],
+            Vec::new(),
+        )];
+        let error = StaticArktsCompileEntryPlan::new(&modules)
             .resolve()
             .expect_err("missing static root must be rejected before launching Node");
 
@@ -1079,5 +2166,196 @@ mod tests {
                 .contains("ARKDOWN_ARKTS12_COMPILE_ENTRY_MISSING"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn hsp_and_har_use_parallel_declgen_contract() {
+        let module_root = std::path::Path::new("/project/library");
+        let layout = ModuleBuildLayout::new(module_root);
+        for module_type in [OhosModuleType::Shared, OhosModuleType::Har] {
+            let contract = StaticArktsModuleOutputContract::new(&module_type, &layout, "library");
+            assert_eq!(contract.es2panda_mode, "parallel");
+            assert_eq!(
+                contract.declarations_root,
+                Some(
+                    module_root
+                        .join("build/default/intermediates/loader_out/default/etsFortgz/library")
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn hap_uses_simultaneous_abc_without_declgen_output() {
+        let layout = ModuleBuildLayout::new(std::path::Path::new("/project/entry"));
+        let contract =
+            StaticArktsModuleOutputContract::new(&OhosModuleType::Entry, &layout, "entry");
+        assert_eq!(contract.es2panda_mode, "simultaneous");
+        assert_eq!(contract.declarations_root, None);
+    }
+
+    #[test]
+    fn static_obfuscation_handoff_matches_driver_option_shape() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sdk = static_sdk(temp.path());
+        let rule = temp.path().join("rules.txt");
+        let consumer = temp.path().join("consumer.txt");
+        let dependency = temp.path().join("dependency.txt");
+        std::fs::write(
+            &rule,
+            "-enable-bytecode-obfuscation\n-enable-bytecode-obfuscation-debugging\n",
+        )
+        .expect("rule file");
+        std::fs::write(&consumer, "-keep class Public {*;}\n").expect("consumer rule");
+        std::fs::write(&dependency, "-keep class Dependency {*;}\n").expect("dependency rule");
+        let cache = temp.path().join("cache/obfuscation");
+
+        let plan = StaticArktsObfuscationPlan::new(
+            &sdk,
+            std::slice::from_ref(&rule),
+            std::slice::from_ref(&consumer),
+            std::slice::from_ref(&dependency),
+            cache.clone(),
+        )
+        .expect("static obfuscation selection")
+        .expect("static obfuscation plan");
+        let value = serde_json::to_value(plan.driver_options()).expect("serialize options");
+
+        assert_eq!(value["selfConfig"]["ruleOptions"]["enable"], true);
+        assert_eq!(
+            value["selfConfig"]["ruleOptions"]["rules"][0],
+            rule.to_string_lossy().as_ref()
+        );
+        assert_eq!(
+            value["selfConfig"]["consumerRules"][0],
+            consumer.to_string_lossy().as_ref()
+        );
+        assert_eq!(
+            value["dependencies"]["hars"][0],
+            dependency.to_string_lossy().as_ref()
+        );
+        assert_eq!(
+            value["obfuscationCacheDir"],
+            cache.to_string_lossy().as_ref()
+        );
+        assert_eq!(
+            value["sdkApis"],
+            serde_json::json!([
+                sdk.kits.to_string_lossy(),
+                sdk.api.to_string_lossy(),
+                sdk.arkts.to_string_lossy()
+            ])
+        );
+        assert!(plan.debugging);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn static_obfuscation_executes_sdk_guard_and_replaces_modules_static_abc() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sdk = static_sdk(temp.path());
+        std::fs::create_dir_all(sdk.ark_guard.parent().expect("guard parent"))
+            .expect("guard directory");
+        let cache = temp.path().join("cache/obfuscation");
+        let obfuscated = cache.join("obf/modules_static.abc");
+        std::fs::create_dir_all(obfuscated.parent().expect("obfuscated parent"))
+            .expect("obfuscated directory");
+        let modules_abc = temp.path().join("loader/modules_static.abc");
+        std::fs::create_dir_all(modules_abc.parent().expect("abc parent")).expect("abc directory");
+        std::fs::write(&modules_abc, b"original-static-abc").expect("input ABC");
+        let script = format!(
+            "#!/bin/sh\nprintf obfuscated-static-abc > '{}'\n",
+            obfuscated.display()
+        );
+        std::fs::write(&sdk.ark_guard, script).expect("fake ark_guard");
+        let mut permissions = std::fs::metadata(&sdk.ark_guard)
+            .expect("guard metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&sdk.ark_guard, permissions).expect("executable guard");
+        std::fs::create_dir_all(&cache).expect("obfuscation cache");
+        std::fs::write(
+            cache.join("config.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "abcPath": modules_abc,
+                "obfAbcPath": obfuscated,
+                "defaultNameCachePath": cache.join("nameCache.json"),
+                "obfuscationRules": {}
+            }))
+            .expect("config JSON"),
+        )
+        .expect("driver-generated config");
+        let rule = temp.path().join("rules.txt");
+        std::fs::write(&rule, "-enable-bytecode-obfuscation\n").expect("rule file");
+        let plan = StaticArktsObfuscationPlan::new(
+            &sdk,
+            std::slice::from_ref(&rule),
+            &[],
+            &[],
+            cache.clone(),
+        )
+        .expect("static obfuscation selection")
+        .expect("static obfuscation plan");
+
+        plan.execute(&modules_abc).expect("execute static guard");
+
+        assert_eq!(
+            std::fs::read(&modules_abc).expect("replaced ABC"),
+            b"obfuscated-static-abc"
+        );
+        assert_eq!(
+            std::fs::read(cache.join("origin/modules_static.abc")).expect("origin ABC"),
+            b"original-static-abc"
+        );
+    }
+
+    #[test]
+    fn dependency_rules_cannot_select_or_disable_static_bytecode_obfuscation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sdk = static_sdk(temp.path());
+        let source_rule = temp.path().join("source-rules.txt");
+        let dependency_rule = temp.path().join("dependency-rules.txt");
+        std::fs::write(&source_rule, "-enable-property-obfuscation\n").expect("source rule");
+        std::fs::write(
+            &dependency_rule,
+            "-enable-bytecode-obfuscation\n-disable-obfuscation\n",
+        )
+        .expect("dependency rule");
+
+        let plan = StaticArktsObfuscationPlan::new(
+            &sdk,
+            std::slice::from_ref(&source_rule),
+            &[],
+            std::slice::from_ref(&dependency_rule),
+            temp.path().join("cache"),
+        )
+        .expect("static obfuscation selection");
+
+        assert!(plan.is_none());
+    }
+
+    #[test]
+    fn self_disable_suppresses_static_bytecode_obfuscation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sdk = static_sdk(temp.path());
+        let rule = temp.path().join("rules.txt");
+        std::fs::write(
+            &rule,
+            "-enable-bytecode-obfuscation\n-disable-obfuscation\n",
+        )
+        .expect("rule file");
+
+        let plan = StaticArktsObfuscationPlan::new(
+            &sdk,
+            std::slice::from_ref(&rule),
+            &[],
+            &[],
+            temp.path().join("cache"),
+        )
+        .expect("static obfuscation selection");
+
+        assert!(plan.is_none());
     }
 }

@@ -209,7 +209,25 @@ impl BuildCoordinator {
             }
             let module_har_dedup_plan = har_dedup_project_plan.module(&module.name);
             let output_dir = PathBuf::from(&loader_json.ace_module_build);
-            let cached_abc = output_dir.join("modules.abc");
+            let static_interop_request = module_layout
+                .arkts_interop_dir()
+                .join("declgen-v2-request.json");
+            let versioned_cached_abc =
+                output_dir.join(session.arkts_language_version.merged_abc_file_name());
+            // `BaseMode::mergeAbcFiles` intentionally emits no
+            // `modules_static.abc` for a 1.2 product containing only dynamic
+            // sources. In that case the dynamic merged ABC is the primary
+            // cache artifact. A static or hybrid module still selects the
+            // versioned static output.
+            let cached_abc = if session.arkts_language_version.is_static()
+                && !versioned_cached_abc.is_file()
+                && static_interop_request.is_file()
+                && output_dir.join("modules.abc").is_file()
+            {
+                output_dir.join("modules.abc")
+            } else {
+                versioned_cached_abc
+            };
             if !BuildPolicy::new(module_config.as_ref())
                 .module_requires_arkts_compilation(module)?
             {
@@ -250,7 +268,15 @@ impl BuildCoordinator {
                 loader_json,
                 &module_context.deps,
             );
-            let widget_compile_plan = widget_pass.plan()?;
+            // Static `BaseMode` builds one dependency graph from the complete
+            // `compileFiles` inventory and links it into `modules_static.abc`.
+            // The separate `widgets.abc` pass belongs to ets2abc's dynamic
+            // frontend and must not run alongside the static SDK driver.
+            let widget_compile_plan = if session.arkts_language_version.is_static() {
+                None
+            } else {
+                widget_pass.plan()?
+            };
             let task_plugin_hash =
                 module_package_plugins
                     .iter()
@@ -329,6 +355,12 @@ impl BuildCoordinator {
                 .is_none_or(|plan| plan.modules_abc_path.exists());
             let declaration_cache_ready = !matches!(module.module_type, OhosModuleType::Shared)
                 || module_layout.declarations_dir().is_dir();
+            let static_dynamic_abc_cache_ready = !session.arkts_language_version.is_static()
+                || !module_layout
+                    .arkts_interop_dir()
+                    .join("declgen-v2-request.json")
+                    .is_file()
+                || output_dir.join("modules.abc").is_file();
             let unit_test_coverage_cache_ready =
                 !matches!(config.output_target, OutputTarget::Test)
                     || !coverage_mode
@@ -350,6 +382,7 @@ impl BuildCoordinator {
                 && cached_abc.exists()
                 && widget_cache_ready
                 && declaration_cache_ready
+                && static_dynamic_abc_cache_ready
                 && unit_test_coverage_cache_ready
                 && aot_cache_ready;
             if cache_hit {
@@ -388,7 +421,15 @@ impl BuildCoordinator {
             if cache_hit {
                 plugin_context_cache.commit().await?;
 
-                bundle_outs.push((BundleStageOutput::from_cache(cached_abc, output_dir),));
+                let additional_abc_paths = (session.arkts_language_version.is_static()
+                    && cached_abc.file_name().and_then(|name| name.to_str())
+                        == Some("modules_static.abc")
+                    && static_interop_request.is_file())
+                .then(|| output_dir.join("modules.abc"))
+                .into_iter()
+                .collect();
+                bundle_outs.push((BundleStageOutput::from_cache(cached_abc, output_dir)
+                    .with_additional_abc_paths(additional_abc_paths),));
                 widget_bundle_outs.push(None);
                 continue;
             }
@@ -575,6 +616,50 @@ impl BuildCoordinator {
                 .entries()?;
             }
 
+            let static_interop = if session.arkts_language_version.is_static() {
+                let loader_json_path = module_layout.loader_json();
+                let compiler = StaticArktsCompiler::new(StaticArktsCompileInput {
+                    config: module_config.as_ref(),
+                    module,
+                    manifest,
+                    loader_json,
+                    module_context: &module_context,
+                    module_layout: &module_layout,
+                    loader_json_path: &loader_json_path,
+                    module_source_files: &[],
+                    node_executable: args.resolved_node_executable(),
+                    output_abc: &cached_abc,
+                    preview_mode: args.preview
+                        || args.preview_transform_mode
+                        || matches!(config.output_target, OutputTarget::Preview),
+                    check_entry: args.check_entry,
+                    is_crossplatform: args.is_crossplatform,
+                    ui_transform_optimization: args.ui_transform_optimization,
+                    bundle_type: &session.project.bundle_type,
+                    obfuscation: None,
+                })?;
+                let interop = compiler.prepare_interop()?;
+                interop.redirect_entries(
+                    &bundle_plan.input.module_root,
+                    &mut bundle_plan.input.entries,
+                )?;
+                interop.redirect_entries(
+                    &bundle_plan.input.module_root,
+                    &mut bundle_plan.input.form_entry_sources,
+                )?;
+                interop.redirect_entries(
+                    &bundle_plan.input.module_root,
+                    &mut bundle_plan.input.runtime_entry_sources,
+                )?;
+                interop.redirect_entries(
+                    &bundle_plan.input.module_root,
+                    &mut bundle_plan.input.page_entry_sources,
+                )?;
+                Some(interop)
+            } else {
+                None
+            };
+
             let package_resolution = package_resolution_plans
                 .get(&module.name)
                 .cloned()
@@ -606,7 +691,7 @@ impl BuildCoordinator {
                 .iter()
                 .map(|m| (m.name.clone(), m.src_path.clone()))
                 .collect();
-            let dependency_source_roots: Vec<PathBuf> = module_context
+            let mut dependency_source_roots: Vec<PathBuf> = module_context
                 .deps
                 .nodes
                 .values()
@@ -620,6 +705,12 @@ impl BuildCoordinator {
                 })
                 .filter_map(|node| node.package_root.clone())
                 .collect();
+            if let Some(interop) = static_interop
+                .as_ref()
+                .filter(|interop| interop.requires_dynamic_abc)
+            {
+                dependency_source_roots.push(interop.bridge_root.clone());
+            }
             let native_declaration_roots: Vec<PathBuf> = module_context
                 .deps
                 .nodes
@@ -748,9 +839,15 @@ impl BuildCoordinator {
             }
             let mut factory_input = PluginFactoryInput {
                 target_name: module_target_name.clone(),
-                sdk_api_dirs: config.sdk_config.ets_api_dirs(),
-                sdk_kits_dirs: config.sdk_config.ets_kits_dirs(),
-                sdk_arkts_dirs: config.sdk_config.ets_arkts_dirs(),
+                sdk_api_dirs: config
+                    .sdk_config
+                    .ets_api_dirs_for(session.arkts_language_version),
+                sdk_kits_dirs: config
+                    .sdk_config
+                    .ets_kits_dirs_for(session.arkts_language_version),
+                sdk_arkts_dirs: config
+                    .sdk_config
+                    .ets_arkts_dirs_for(session.arkts_language_version),
                 // hvigor `arkts-pack.getResolveModules()` searches the active source
                 // root before the generated profile directory. Keep these as typed
                 // paths so the resolver works identically on Windows and POSIX hosts.
@@ -795,6 +892,12 @@ impl BuildCoordinator {
                 navigation_routes: NavigationRouteMap::from_loader_entries(&loader_json.router_map),
                 package_resolution,
                 source_set_overlays: source_set_overlays.clone(),
+                source_redirects: Arc::new(
+                    static_interop
+                        .as_ref()
+                        .map(|interop| interop.source_redirects.clone())
+                        .unwrap_or_default(),
+                ),
                 checker_mode,
                 tsc_target: module_build_option
                     .ark_options
@@ -916,7 +1019,7 @@ impl BuildCoordinator {
                 CrossplatformCollectionWriter::new(project_root, cache_dir.as_path())
                     .write(&bundle_out.bundle_output.crossplatform_collections)?;
             }
-            if args.arkts_version == arkdown_core::ArktsLanguageVersion::V1_1 {
+            if session.arkts_language_version == arkdown_core::ArktsLanguageVersion::V1_1 {
                 let intent_modules = bundle_out
                     .bundle_output
                     .insight_intent_sources
@@ -1075,6 +1178,13 @@ impl BuildCoordinator {
                 )
                 .with_arkts_language_version(self.session.arkts_language_version)
                 .with_dependency_declaration_packages(declaration_packages)
+                .with_module_entry_source(
+                    module_context
+                        .module
+                        .package
+                        .as_deref()
+                        .and_then(|package| package.package_json.main.as_deref()),
+                )
                 .with_package_bundled_declarations(
                     module_build_option
                         .ark_options

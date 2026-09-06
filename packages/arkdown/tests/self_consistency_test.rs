@@ -188,7 +188,7 @@ impl SelfConsistencyOracle {
         target: "hap".to_string(),
         mode: "debug".to_string(),
         analyze: Default::default(),
-        arkts_version: arkdown_core::ArktsLanguageVersion::default(),
+        arkts_version: None,
         module: None,
         product: None,
         project: Some(project_path.to_path_buf()),
