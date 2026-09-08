@@ -7,9 +7,7 @@ use std::{
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     Declaration, ExportDefaultDeclarationKind, Program, Statement, StructElement, StructStatement,
-    TSEnumDeclaration,
 };
-use oxc_ast_visit::Visit;
 use oxc_parser::{
     ArkTsAttributeCallback, ArkTsOptions, EtsStaticArkUiAttributeCallback, EtsStaticArkUiOptions,
     Parser, ParserReturn,
@@ -50,11 +48,8 @@ pub struct ComponentMetadata {
     gesture_attr_names: FxHashSet<String>,
     gesture_type_names: FxHashSet<String>,
     forbidden_state_types: FxHashSet<String>,
-    enum_names: FxHashSet<String>,
     sdk_components: FxHashMap<String, FxHashMap<String, SdkComponentInfo>>,
     sdk_builder_functions: FxHashMap<String, FxHashSet<String>>,
-    sdk_enum_exports: FxHashMap<String, FxHashSet<String>>,
-    sdk_namespace_enum_exports: FxHashMap<String, FxHashMap<String, FxHashSet<String>>>,
     runtime_names: ArkuiRuntimeNames,
 }
 
@@ -89,10 +84,6 @@ impl ComponentMetadata {
         source_type: SourceType,
     ) -> ParserReturn<'a> {
         self.arkts_parser.parse(allocator, source, source_type)
-    }
-
-    pub fn is_known_enum(&self, name: &str) -> bool {
-        self.enum_names.contains(name)
     }
 
     pub(crate) fn is_builtin_component_name(&self, name: &str) -> bool {
@@ -238,22 +229,6 @@ impl ComponentMetadata {
         self.sdk_builder_functions
             .get(specifier)
             .is_some_and(|builders| builders.contains(binding))
-    }
-
-    pub(crate) fn is_sdk_enum_export(&self, specifier: &str, binding: &str) -> bool {
-        self.sdk_enum_exports
-            .get(specifier)
-            .is_some_and(|enums| enums.contains(binding))
-    }
-
-    pub(crate) fn sdk_namespace_enum_exports(
-        &self,
-        specifier: &str,
-        binding: &str,
-    ) -> Option<&FxHashSet<String>> {
-        self.sdk_namespace_enum_exports
-            .get(specifier)
-            .and_then(|bindings| bindings.get(binding))
     }
 }
 
@@ -652,7 +627,6 @@ impl<'a> ComponentMetadataLoader<'a> {
         );
         let component_grammar = self.load_component_grammar()?;
         let semantics = SdkArkUiSemanticSnapshot::bundled();
-        let enum_names = SdkEnumNameLoader::new(self.ets_loader_path).load()?;
         let sdk_declarations =
             SdkComponentLoader::new(self.ets_loader_path, self.external_declaration_roots)
                 .load()?;
@@ -689,11 +663,8 @@ impl<'a> ComponentMetadataLoader<'a> {
             gesture_attr_names: semantics.gesture_attr_names,
             gesture_type_names: semantics.gesture_type_names,
             forbidden_state_types: semantics.forbidden_state_types,
-            enum_names,
             sdk_components: sdk_declarations.components,
             sdk_builder_functions: sdk_declarations.builder_functions,
-            sdk_enum_exports: sdk_declarations.enum_exports,
-            sdk_namespace_enum_exports: sdk_declarations.namespace_enum_exports,
             runtime_names: ArkuiRuntimeNames::default(),
         })
     }
@@ -911,8 +882,6 @@ struct SdkComponentLoader<'a> {
 struct SdkDeclarationMetadata {
     components: FxHashMap<String, FxHashMap<String, SdkComponentInfo>>,
     builder_functions: FxHashMap<String, FxHashSet<String>>,
-    enum_exports: FxHashMap<String, FxHashSet<String>>,
-    namespace_enum_exports: FxHashMap<String, FxHashMap<String, FxHashSet<String>>>,
 }
 
 impl<'a> SdkComponentLoader<'a> {
@@ -993,8 +962,6 @@ impl<'a> SdkComponentLoader<'a> {
 
             let components = SdkComponentDeclarationCollector::new(&parsed.program).collect();
             let builders = SdkBuilderFunctionDeclarationCollector::new(&parsed.program).collect();
-            let enums = SdkModuleEnumDeclarationCollector::new(&parsed.program).collect();
-
             let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
                 continue;
             };
@@ -1008,18 +975,6 @@ impl<'a> SdkComponentLoader<'a> {
                     declarations
                         .builder_functions
                         .insert(specifier.clone(), builders.clone());
-                }
-                if !enums.exports.is_empty() {
-                    declarations
-                        .enum_exports
-                        .insert(specifier.clone(), enums.exports.clone());
-                }
-                if !enums.namespace.is_empty() {
-                    declarations
-                        .namespace_enum_exports
-                        .entry(specifier)
-                        .or_default()
-                        .insert("default".to_string(), enums.namespace.clone());
                 }
             }
         }
@@ -1081,31 +1036,6 @@ impl<'a> SdkComponentLoader<'a> {
                         .entry(kit_specifier.to_string())
                         .or_default()
                         .insert(local_name.clone());
-                }
-                if source_specifiers.iter().any(|specifier| {
-                    declarations
-                        .enum_exports
-                        .get(specifier)
-                        .is_some_and(|enums| enums.contains(binding))
-                }) {
-                    declarations
-                        .enum_exports
-                        .entry(kit_specifier.to_string())
-                        .or_default()
-                        .insert(local_name.clone());
-                }
-                if let Some(enums) = source_specifiers.iter().find_map(|specifier| {
-                    declarations
-                        .namespace_enum_exports
-                        .get(specifier)
-                        .and_then(|bindings| bindings.get(binding))
-                        .cloned()
-                }) {
-                    declarations
-                        .namespace_enum_exports
-                        .entry(kit_specifier.to_string())
-                        .or_default()
-                        .insert(local_name.clone(), enums);
                 }
             }
         }
@@ -1215,54 +1145,6 @@ impl<'a> SdkBuilderFunctionDeclarationCollector<'a> {
     }
 }
 
-#[derive(Default)]
-struct SdkModuleEnumDeclarations {
-    exports: FxHashSet<String>,
-    namespace: FxHashSet<String>,
-}
-
-struct SdkModuleEnumDeclarationCollector<'a> {
-    program: &'a Program<'a>,
-}
-
-impl<'a> SdkModuleEnumDeclarationCollector<'a> {
-    fn new(program: &'a Program<'a>) -> Self {
-        Self { program }
-    }
-
-    fn collect(&self) -> SdkModuleEnumDeclarations {
-        let mut declarations = SdkModuleEnumDeclarations::default();
-        for statement in &self.program.body {
-            match statement {
-                Statement::TSEnumDeclaration(declaration) => {
-                    declarations.exports.insert(declaration.id.name.to_string());
-                }
-                Statement::ExportDeclaration(export) => {
-                    if let Declaration::TSEnumDeclaration(declaration) = &export.declaration {
-                        declarations.exports.insert(declaration.id.name.to_string());
-                    }
-                }
-                _ => {}
-            }
-        }
-        let mut nested = SdkNestedEnumNameCollector::default();
-        nested.visit_program(self.program);
-        declarations.namespace = nested.names;
-        declarations
-    }
-}
-
-#[derive(Default)]
-struct SdkNestedEnumNameCollector {
-    names: FxHashSet<String>,
-}
-
-impl<'a> Visit<'a> for SdkNestedEnumNameCollector {
-    fn visit_ts_enum_declaration(&mut self, declaration: &TSEnumDeclaration<'a>) {
-        self.names.insert(declaration.id.name.to_string());
-    }
-}
-
 struct SdkComponentDeclarationCollector<'a> {
     program: &'a Program<'a>,
 }
@@ -1352,95 +1234,6 @@ impl<'a> SdkComponentDeclarationCollector<'a> {
     }
 }
 
-struct SdkEnumNameLoader<'a> {
-    ets_loader_path: &'a Path,
-}
-
-impl<'a> SdkEnumNameLoader<'a> {
-    fn new(ets_loader_path: &'a Path) -> Self {
-        Self { ets_loader_path }
-    }
-
-    fn load(&self) -> anyhow::Result<FxHashSet<String>> {
-        let roots = [
-            self.ets_loader_path.join("declarations"),
-            self.ets_loader_path.join("..").join("..").join("component"),
-        ];
-        let mut paths = Vec::new();
-        for root in roots {
-            self.collect_declaration_files(&root, &mut paths)?;
-        }
-        paths.sort();
-
-        let mut names = FxHashSet::default();
-        for path in paths {
-            let source = fs::read_to_string(&path)?;
-            let allocator = Allocator::default();
-            let parsed = Parser::new(&allocator, &source, SourceType::ts()).parse();
-            if !parsed.diagnostics.is_empty() {
-                anyhow::bail!(
-                    "failed to parse SDK enum declarations at {}",
-                    path.display()
-                );
-            }
-            names.extend(SdkEnumDeclarationCollector::new(&parsed.program).collect());
-        }
-        Ok(names)
-    }
-
-    fn collect_declaration_files(
-        &self,
-        root: &Path,
-        paths: &mut Vec<PathBuf>,
-    ) -> anyhow::Result<()> {
-        if !root.exists() {
-            return Ok(());
-        }
-        for entry in fs::read_dir(root)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.is_dir() {
-                self.collect_declaration_files(&path, paths)?;
-            } else if matches!(
-                SourceClassifier::classify_path(&path),
-                SourceFileKind::Declaration
-            ) && path.extension().and_then(|ext| ext.to_str()) == Some("ts")
-            {
-                paths.push(path);
-            }
-        }
-        Ok(())
-    }
-}
-
-struct SdkEnumDeclarationCollector<'a> {
-    program: &'a Program<'a>,
-}
-
-impl<'a> SdkEnumDeclarationCollector<'a> {
-    fn new(program: &'a Program<'a>) -> Self {
-        Self { program }
-    }
-
-    fn collect(&self) -> FxHashSet<String> {
-        let mut names = FxHashSet::default();
-        for statement in &self.program.body {
-            match statement {
-                Statement::TSEnumDeclaration(declaration) => {
-                    names.insert(declaration.id.name.to_string());
-                }
-                Statement::ExportDeclaration(export) => {
-                    if let Declaration::TSEnumDeclaration(declaration) = &export.declaration {
-                        names.insert(declaration.id.name.to_string());
-                    }
-                }
-                _ => {}
-            }
-        }
-        names
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1486,8 +1279,6 @@ mod tests {
             "/tests/fixtures/ets-loader"
         )))
         .expect("test ets-loader metadata");
-        assert!(metadata.is_known_enum("FontWeight"));
-        assert!(metadata.is_known_enum("ImageInterpolation"));
         assert!(metadata.needs_pop("Blank"));
         assert!(metadata.needs_pop("Search"));
         assert_eq!(metadata.runtime_names().component_for_each, "ForEach");
@@ -1569,12 +1360,6 @@ mod tests {
         assert!(metadata
             .sdk_component("@ohos:multimedia.avVolumePanel", "AVVolumePanel")
             .is_some());
-        assert!(metadata
-            .sdk_namespace_enum_exports("@ohos.file.photoAccessHelper", "default")
-            .is_some_and(|enums| enums.contains("PhotoViewMIMETypes")));
-        assert!(metadata
-            .sdk_namespace_enum_exports("@kit.MediaLibraryKit", "photoAccessHelper")
-            .is_some_and(|enums| enums.contains("PhotoViewMIMETypes")));
     }
 
     #[test]

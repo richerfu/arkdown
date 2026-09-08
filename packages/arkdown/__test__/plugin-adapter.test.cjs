@@ -14,6 +14,7 @@ const {
   PluginModuleLoader,
   normalizePlugin,
   normalizePluginList,
+  parsePluginAst,
 } = require('../js/plugin-adapter.js')
 
 function fakeBinding() {
@@ -37,6 +38,48 @@ function fakeBinding() {
 function dispatch(plugin, hookName, request = {}) {
   return plugin.__arkdownDispatchPluginHook({ hookName, ...request })
 }
+
+test('plugin parse follows Rollup 4.23 ParseAst options and error shape', () => {
+  let observedOptions
+  const binding = {
+    parsePluginAst(_source, options) {
+      observedOptions = options
+      return {
+        ast: {
+          node: { type: 'Program', start: 0, end: 8, body: [], sourceType: 'module' },
+          fixes: [],
+        },
+      }
+    },
+  }
+  const comments = []
+  const ast = parsePluginAst(
+    'return 1',
+    {
+      allowReturnOutsideFunction: true,
+      sourceType: 'script',
+      ranges: true,
+      locations: true,
+      onComment: comments,
+      onToken: [],
+    },
+    null,
+    binding,
+  )
+  assert.deepEqual(observedOptions, { allowReturnOutsideFunction: true })
+  assert.equal(ast.sourceType, 'module')
+  assert.deepEqual(comments, [])
+
+  assert.throws(
+    () =>
+      parsePluginAst('return 1', {}, null, {
+        parsePluginAst() {
+          throw new Error('PLUGIN_PARSE_ERROR: Return statement is not allowed here (1:0) [pos=0]')
+        },
+      }),
+    (error) => error.name === 'RollupError' && error.code === 'PARSE_ERROR' && error.pos === 0 && !error.loc,
+  )
+})
 
 test('explicit Rolldown plugins preserve the complete Arkdown hook surface', async () => {
   const calls = []

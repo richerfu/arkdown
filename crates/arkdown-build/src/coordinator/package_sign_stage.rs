@@ -567,13 +567,6 @@ impl BuildCoordinator {
                         let is_ohpm_project = package_manifest
                             .file_name()
                             .is_some_and(|name| name == std::ffi::OsStr::new("oh-package.json5"));
-                        if !source_dir.is_dir() {
-                            anyhow::bail!(
-                                "HAR source directory does not exist for module '{}': {}",
-                                module.name,
-                                source_dir.display()
-                            );
-                        }
                         let artifact_type = module_build_option.har_artifact_type;
                         let declarations_dir = module_layout.declarations_dir();
                         if !matches!(artifact_type, HarArtifactType::Original) {

@@ -353,17 +353,6 @@ impl TransformSourceSnapshot {
         files
     }
 
-    /// Whether a source belongs to one of the SDK declaration roots captured
-    /// by the build-session inventory.
-    pub(crate) fn is_sdk_declaration(&self, path: &Path) -> bool {
-        let path = self
-            .indexed_path_or_canonical(path)
-            .unwrap_or_else(|| lexical_normalize(path));
-        self.sdk_declaration_roots
-            .iter()
-            .any(|root| path.starts_with(root))
-    }
-
     pub fn source_text(&self, path: &Path) -> Option<Arc<str>> {
         self.indexed_path(path)
             .and_then(|indexed| self.files.get(indexed))

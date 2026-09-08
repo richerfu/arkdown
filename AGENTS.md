@@ -61,6 +61,14 @@ Minimum implementations are forbidden. Do not land placeholder behavior, stub pa
 
 ## Hvigor Parity Rules
 
+For ArkTS 1.1, OpenHarmony source is authoritative when OXC extensions differ.
+Do not port OXC-only syntax or semantics into the native TypeScript checker.
+TypeScript (the adapted Go backend) is used only for type checking and inference,
+including parsing/binding needed for those queries and declaration diagnostics.
+Keep its service programs in `noEmit` mode. Rust/OXC/Rolldown own transformations,
+JavaScript/declaration generation and runtime annotation metadata; consume typed
+checker facts where needed, never delegate build output to TypeScript emit.
+
 arkdown's behavioral target is hvigor. For any change that affects build output,
 runtime behavior, generated TypeScript/JavaScript, module resolution, bytecode,
 resources, manifests, packaging, signing, cache layout, command construction, or

@@ -415,7 +415,7 @@ impl<'a> CompileProjectConfigBuilder<'a> {
         // project model so both official entry points parse SDK annotations the
         // same way. Upstream: ets-loader/main.js::initProjectConfig().
         extras.insert("allowEtsAnnotations".to_string(), Value::Bool(true));
-        extras.insert("projectArkOption".to_string(), Value::Object(Map::new()));
+        extras.insert("projectArkOption".to_string(), self.project_ark_option());
         extras.insert("sourceMapDir".to_string(), Value::String(String::new()));
         extras.insert(
             "branchElimination".to_string(),
@@ -814,7 +814,7 @@ impl<'a> CompileProjectConfigBuilder<'a> {
             bundle_type: self.input.session.project.bundle_type.clone(),
             api_version: self.input.config.sdk_config.compile_api_version,
             need_complete_sources_map: false,
-            is_fa_mode: false,
+            is_fa_mode: self.input.module_context.module.module_json.is_none(),
             build_dir: self.path(&module_root.join("build"))?,
             device_types: self.device_types(),
             extras,
@@ -881,11 +881,74 @@ impl<'a> CompileProjectConfigBuilder<'a> {
         })
     }
 
-    fn strict_mode(&self) -> Value {
+    /// Fields read through `projectConfig.projectArkOption` by the current
+    /// ets2bundle sources. Keep this distinct from the flattened effective
+    /// checker options above: `ets_checker.ts` reads `tscConfig`, while
+    /// declaration generation reads `bundle.bundledDeclare`.
+    fn project_ark_option(&self) -> Value {
+        let Some(options) = self.input.module_build_option.ark_options.as_ref() else {
+            return Value::Object(Map::new());
+        };
+        let target_es_version = match options.tsc_config.target_es_version {
+            arkdown_core::ArkTscTarget::Es2017 => "ES2017",
+            arkdown_core::ArkTscTarget::Es2021 => "ES2021",
+        };
+        let mut tsc_config = Map::from_iter([(
+            "targetESVersion".to_string(),
+            Value::String(target_es_version.to_string()),
+        )]);
+        if let Some(max_flow_depth) = options.tsc_config.max_flow_depth {
+            if let Some(number) = serde_json::Number::from_f64(max_flow_depth) {
+                tsc_config.insert("maxFlowDepth".to_string(), Value::Number(number));
+            }
+        }
         json!({
-          "caseSensitiveCheck": self.input.module_build_option.strict_mode.case_sensitive_check,
-          "useNormalizedOHMUrl": self.input.module_build_option.strict_mode.use_normalized_ohm_url,
+          "tscConfig": tsc_config,
+          "bundle": {
+            "bundledDeclare": options.bundled_declare,
+          },
         })
+    }
+
+    fn strict_mode(&self) -> Value {
+        let mut strict_mode = Map::from_iter([
+            (
+                "caseSensitiveCheck".to_string(),
+                Value::Bool(
+                    self.input
+                        .module_build_option
+                        .strict_mode
+                        .case_sensitive_check,
+                ),
+            ),
+            (
+                "useNormalizedOHMUrl".to_string(),
+                Value::Bool(
+                    self.input
+                        .module_build_option
+                        .strict_mode
+                        .use_normalized_ohm_url,
+                ),
+            ),
+        ]);
+        if let Some(level) = self
+            .input
+            .module_build_option
+            .strict_mode
+            .api_compatibility_check
+        {
+            strict_mode.insert(
+                "apiCompatibilityCheck".to_string(),
+                Value::String(
+                    match level {
+                        arkdown_core::ApiCompatibilityCheckLevel::Error => "error",
+                        arkdown_core::ApiCompatibilityCheckLevel::Warn => "warning",
+                    }
+                    .to_string(),
+                ),
+            );
+        }
+        Value::Object(strict_mode)
     }
 
     fn oh_package_path_map(&self) -> Result<Value> {

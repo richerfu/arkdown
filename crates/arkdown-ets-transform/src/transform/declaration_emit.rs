@@ -1,7 +1,7 @@
 use oxc_allocator::{Allocator, CloneIn, GetAllocator, Vec as OxcVec};
 use oxc_ast::ast::{
-    AnnotationDeclaration, AnnotationElement, Argument, ArrowFunctionBody, Expression,
-    FormalParameters, IdentifierName, MemberExpression, Statement, TSTypeAnnotation,
+    Argument, ArrowFunctionBody, Expression, FormalParameters, IdentifierName, MemberExpression,
+    Statement, TSTypeAnnotation,
 };
 use oxc_ast::builder::AstBuilder;
 use oxc_span::SPAN;
@@ -9,46 +9,8 @@ use oxc_span::SPAN;
 use crate::transform::build_fn::{BuildBodyInfo, BuildLoweringError};
 use crate::transform::component_meta::ArkuiRuntimeNames;
 use crate::transform::viewpu_emit::{
-    GeneratedViewpuName, ParamsInterfaceAstEmitter, ParamsInterfaceField, ParamsInterfaceFieldType,
-    TopLevelFunctionAstEmitter, ViewpuAstBuilder,
+    GeneratedViewpuName, TopLevelFunctionAstEmitter, ViewpuAstBuilder,
 };
-
-pub(crate) struct ParamsInterfaceEmitter<'a> {
-    annotation: &'a AnnotationDeclaration<'a>,
-}
-
-impl<'a> ParamsInterfaceEmitter<'a> {
-    pub(crate) fn new(annotation: &'a AnnotationDeclaration<'a>) -> Self {
-        Self { annotation }
-    }
-
-    pub(crate) fn statement<'b>(&self, allocator: &'b Allocator, exported: bool) -> Statement<'b> {
-        let fields = self.fields();
-        ParamsInterfaceAstEmitter::new(self.annotation.id.name.as_str(), fields, exported)
-            .statement(&AstBuilder::new(allocator), allocator)
-    }
-
-    fn fields(&self) -> Vec<ParamsInterfaceField<'a>> {
-        let mut fields = Vec::new();
-        for element in &self.annotation.body.body {
-            let AnnotationElement::PropertyDefinition(property) = element;
-            let Some(name) = property.key.static_name() else {
-                continue;
-            };
-            let type_annotation = property
-                .type_annotation
-                .as_ref()
-                .map(|annotation| ParamsInterfaceFieldType::Annotation(annotation.as_ref()))
-                .or(Some(ParamsInterfaceFieldType::Unknown));
-            fields.push(ParamsInterfaceField::new(
-                name,
-                property.optional,
-                type_annotation,
-            ));
-        }
-        fields
-    }
-}
 
 pub(crate) struct TopLevelFunctionEmitter;
 

@@ -136,12 +136,6 @@ impl<'a> HarDeclarationGenerator<'a> {
 
     pub fn generate(&self) -> Result<()> {
         tracing::debug!(source_dir = %self.source_dir.display(), "HSP declaration generation started");
-        if !self.source_dir.is_dir() {
-            anyhow::bail!(
-                "Source HAR declaration root does not exist: {}",
-                self.source_dir.display()
-            );
-        }
         let output_dir = &self.output_dir;
         if output_dir.exists() {
             fs_err::remove_dir_all(output_dir).with_context(|| {
@@ -153,10 +147,18 @@ impl<'a> HarDeclarationGenerator<'a> {
         }
         fs_err::create_dir_all(output_dir)?;
 
-        let mut sources = WalkDir::new(self.source_dir)
-            .min_depth(1)
-            .into_iter()
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+        // `ets_checker.ts::processHarSourceFiles` iterates the compiler's
+        // `rootFileNames` and resolved modules; it never requires a physical
+        // `src/main/ets` directory. A ByteCode HAR may expose only a root-level
+        // `Index.ets`, which is carried in `additional_sources` below.
+        let mut sources = if self.source_dir.is_dir() {
+            WalkDir::new(self.source_dir)
+                .min_depth(1)
+                .into_iter()
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        } else {
+            Vec::new()
+        };
         sources.retain(|entry| {
             entry.file_type().is_file() && Self::is_typescript_source(entry.path())
         });

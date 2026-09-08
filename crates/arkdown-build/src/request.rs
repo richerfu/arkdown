@@ -315,10 +315,6 @@ pub struct BuildRequest {
     /// `shouldInvalidCache`; it is not a user-facing command-line option.
     pub watch_invalidation: Option<WatchInvalidationBatch>,
 
-    /// Custom task input paths declared through Hvigor TaskInput. The Rust
-    /// watcher adds these to its typed watch inventory.
-    pub custom_task_input_paths: Vec<PathBuf>,
-
     /// Numeric SDK compression level mapped from hvigor-config's
     /// `ohos.pack.compressLevel` (`fast`/`standard`/`ultimate`).
     pub pack_compress_level: Option<u32>,
@@ -349,6 +345,12 @@ pub struct BuildRequest {
 
     /// Node executable supplied by the same-process JavaScript runtime.
     pub node_executable: Option<PathBuf>,
+
+    /// Native ArkTS TypeScript service shipped beside the platform N-API
+    /// binding. The JavaScript entry does not discover or execute this binary;
+    /// the N-API service resolves its own package layout and Rust owns the
+    /// compiler process lifecycle.
+    pub typescript_executable: Option<PathBuf>,
 
     /// Project-scoped Hvigor cache directory resolved by `PathUtil` in the JS
     /// runtime. Direct package builds derive `<project>/.hvigor` at the use site.

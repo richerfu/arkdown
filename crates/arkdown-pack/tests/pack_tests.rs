@@ -1460,8 +1460,14 @@ fn test_hsp_interface_har_matches_prepare_shared_har_resource_shape() {
     );
     assert_eq!(
         std::str::from_utf8(&entries["package/src/main/module.json"]).unwrap(),
-        r#"{"app":{"bundleName":"com.example.shared","bundleType":"app","debug":true,"versionCode":1000000,"versionName":"1.0.0","minAPIVersion":50005017,"targetAPIVersion":50005017,"apiReleaseType":"Release","targetMinorAPIVersion":0,"targetPatchAPIVersion":0},"module":{"name":"entry","packageName":"entry","type":"shared","deliveryWithInstall":true,"deviceTypes":["phone"],"dependencies":[]}}
+        r#"{"app":{"bundleName":"com.example.shared","bundleType":"app","debug":true,"versionCode":1000000,"versionName":"1.0.0","minAPIVersion":50005017,"targetAPIVersion":50005017,"apiReleaseType":"Release","targetMinorAPIVersion":0,"targetPatchAPIVersion":0},"module":{"name":"entry","type":"shared","deliveryWithInstall":true,"deviceTypes":["phone"],"dependencies":[]}}
 "#
+    );
+    assert!(
+        serde_json::from_slice::<serde_json::Value>(&entries["package/src/main/module.json"])
+            .unwrap()["module"]
+            .get("packageName")
+            .is_none()
     );
     let package: serde_json::Value =
         serde_json::from_slice(&entries["package/oh-package.json5"]).unwrap();

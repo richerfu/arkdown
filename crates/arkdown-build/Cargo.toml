@@ -31,6 +31,7 @@ globset = { workspace = true }
 indexmap = { workspace = true }
 json5 = { workspace = true }
 jsonschema = { workspace = true }
+oxc_span = { workspace = true }
 rustc-hash = { workspace = true }
 rayon = { workspace = true }
 rolldown_plugin = { workspace = true }

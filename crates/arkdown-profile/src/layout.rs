@@ -258,6 +258,10 @@ impl<'a> ProfileModuleLayout<'a> {
         self.default_intermediate_dir("loader_out")
     }
 
+    pub(crate) fn test_assets_ets_dir(&self) -> PathBuf {
+        self.default_intermediate_dir("assets").join("ets")
+    }
+
     pub(crate) fn aot_loader_output_dir(&self) -> PathBuf {
         self.loader_out_default_dir().join("an").join("arm64-v8a")
     }

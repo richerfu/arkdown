@@ -98,10 +98,7 @@ fn split_dynamic_sdk_still_resolves_the_sibling_static_toolchain() {
     assert_eq!(layout.root, PathBuf::from("/sdk/ets/static"));
     assert_eq!(
         config.ets_api_dirs(),
-        [
-            PathBuf::from("/sdk/ets/dynamic/api"),
-            PathBuf::from("/sdk/js/api"),
-        ]
+        [PathBuf::from("/sdk/ets/dynamic/api")]
     );
     assert_eq!(
         config.ets_kits_dirs(),

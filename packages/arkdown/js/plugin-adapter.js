@@ -152,54 +152,23 @@ function normalizeParseError(cause) {
   const message = cause instanceof Error ? cause.message : String(cause)
   const parsed = /PLUGIN_PARSE_ERROR: (.*) \((\d+):(\d+)\) \[pos=(\d+)\]/.exec(message)
   if (!parsed) return cause
-  const error = new SyntaxError(`${parsed[1]} (${parsed[2]}:${parsed[3]})`)
-  error.code = 'PLUGIN_PARSE_ERROR'
+  const error = new Error(parsed[1])
+  error.name = 'RollupError'
+  error.code = 'PARSE_ERROR'
   error.pos = Number(parsed[4])
-  error.loc = { line: Number(parsed[2]), column: Number(parsed[3]) }
   return error
 }
 
 function parsePluginAst(source, options, context, binding) {
   const parseOptions = options || {}
   const nativeOptions = {
-    sourceType: parseOptions.sourceType || 'module',
-    ranges: parseOptions.ranges === true,
-    locations: parseOptions.locations === true,
-    sourceFile: parseOptions.sourceFile,
-    directSourceFile: parseOptions.directSourceFile,
     allowReturnOutsideFunction: parseOptions.allowReturnOutsideFunction === true,
-    preserveParens: parseOptions.preserveParens === true,
-    captureComments: parseOptions.onComment !== undefined && parseOptions.onComment !== null,
-    ecmaVersion: parseOptions.ecmaVersion ?? 'latest',
-    allowAwaitOutsideFunction: parseOptions.allowAwaitOutsideFunction === true,
-    allowSuperOutsideMethod: parseOptions.allowSuperOutsideMethod === true,
-    allowHashBang: parseOptions.allowHashBang,
-    hasOnToken: parseOptions.onToken !== undefined && parseOptions.onToken !== null,
-    hasProgram: parseOptions.program !== undefined && parseOptions.program !== null,
   }
   let result
   try {
     result = context ? context.parse(source, nativeOptions) : binding.parsePluginAst(source, nativeOptions)
   } catch (cause) {
     throw normalizeParseError(cause)
-  }
-  const comments = result.comments || []
-  if (Array.isArray(parseOptions.onComment)) {
-    parseOptions.onComment.push(...comments)
-  } else if (typeof parseOptions.onComment === 'function') {
-    for (const comment of comments) {
-      parseOptions.onComment.call(
-        parseOptions,
-        comment.type === 'Block',
-        comment.value,
-        comment.start,
-        comment.end,
-        comment.loc?.start,
-        comment.loc?.end,
-      )
-    }
-  } else if (parseOptions.onComment !== undefined && parseOptions.onComment !== null) {
-    throw new TypeError('onComment must be a function or an array')
   }
   return reviveOxcAst(result.ast)
 }

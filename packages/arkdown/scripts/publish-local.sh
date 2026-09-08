@@ -46,6 +46,10 @@ fi
 if [[ $DRY_RUN -eq 1 && -z "${NODE_AUTH_TOKEN:-}" ]]; then
   export NODE_AUTH_TOKEN="arkdown-dry-run"
 fi
+if [[ -z "${ARKDOWN_TYPESCRIPT_DIST:-}" ]]; then
+  echo "ARKDOWN_TYPESCRIPT_DIST must point to a clean native ArkTS TypeScript distribution." >&2
+  exit 1
+fi
 
 TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/arkdown-publish.XXXXXX")"
 PACKAGE_JSON_BACKUP="$TEMP_DIR/package.json"
@@ -167,6 +171,9 @@ fi
 
 cd "$PACKAGE_DIR"
 pnpm exec napi pre-publish --no-gh-release -t npm --skip-optional-publish
+node "$PACKAGE_DIR/scripts/attach-typescript-dist.mjs" \
+  "$ARKDOWN_TYPESCRIPT_DIST" \
+  "$PACKAGE_DIR/npm"
 
 VERSION="$(node -p "require('./package.json').version")"
 if [[ "$VERSION" == *-* ]]; then

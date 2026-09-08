@@ -27,6 +27,7 @@ static ALLOC: mimalloc_safe::MiMalloc = mimalloc_safe::MiMalloc;
 
 mod hvigor_plugin_plan;
 mod js_callback;
+mod package_layout;
 mod plugin_module;
 mod runtime_observe;
 
@@ -41,6 +42,7 @@ use napi_derive::napi;
 use rustc_hash::FxHashMap;
 
 use js_callback::{MaybeAsyncJsCallback, MaybeAsyncJsCallbackExt, MaybeAsyncJsReturn};
+use package_layout::NapiPackageLayout;
 
 use rolldown_common::{
   side_effects::HookSideEffects, EmittedAsset, EmittedChunk, LogWithoutPlugin, ModuleDefFormat,
@@ -94,19 +96,32 @@ pub async fn clean(config: CleanConfig) -> napi::Result<()> {
 }
 
 /// Run the native ArkTS source checker without entering the build pipeline.
-#[napi]
-pub async fn check(config: CheckConfig) -> napi::Result<()> {
+#[napi(ts_return_type = "Promise<void>")]
+pub fn check<'a>(env: Env, config: CheckConfig) -> napi::Result<Object<'a>> {
+  let typescript_executable =
+    NapiPackageLayout::from_env(&env)?.packaged_typescript_executable()?;
   let args = arkdown_build::check::CheckRequest {
     target: config.target.unwrap_or_else(|| "hap".to_string()),
     module: config.module,
     project: config.project.map(PathBuf::from),
     is_crossplatform: config.is_crossplatform.unwrap_or(false),
     ignore_crossplatform_check: config.ignore_crossplatform_check.unwrap_or(false),
+    typescript_executable,
   };
-  tokio::task::spawn_blocking(move || arkdown_build::check::CheckApplication::new(args).execute())
-    .await
-    .map_err(|error| napi::Error::from_reason(format!("Arkdown check task failed: {error}")))?
-    .map_err(|error| napi::Error::from_reason(format!("{error:#}")))
+  let raw_promise = napi::bindgen_prelude::execute_tokio_future(
+    env.raw(),
+    async move {
+      tokio::task::spawn_blocking(move || {
+        arkdown_build::check::CheckApplication::new(args).execute()
+      })
+      .await
+      .map_err(|error| napi::Error::from_reason(format!("Arkdown check task failed: {error}")))?
+      .map_err(|error| napi::Error::from_reason(format!("{error:#}")))?;
+      Ok::<_, napi::Error>(())
+    },
+    |env_raw, result| unsafe { napi::bindgen_prelude::ToNapiValue::to_napi_value(env_raw, result) },
+  )?;
+  unsafe { Object::from_napi_value(env.raw(), raw_promise) }
 }
 
 /// Compile one user-authored TypeScript plugin module through OXC and Rolldown.
@@ -505,40 +520,13 @@ impl JsEmittedFile {
 
 #[napi(object)]
 pub struct JsPluginAstParseOptions {
-  pub source_type: Option<String>,
-  pub ranges: Option<bool>,
-  pub locations: Option<bool>,
-  pub source_file: Option<String>,
-  pub direct_source_file: Option<String>,
   pub allow_return_outside_function: Option<bool>,
-  pub preserve_parens: Option<bool>,
-  pub capture_comments: Option<bool>,
-  #[napi(ts_type = "string | number")]
-  pub ecma_version: Option<serde_json::Value>,
-  pub allow_await_outside_function: Option<bool>,
-  pub allow_super_outside_method: Option<bool>,
-  pub allow_hash_bang: Option<bool>,
-  pub has_on_token: Option<bool>,
-  pub has_program: Option<bool>,
 }
 
 impl From<JsPluginAstParseOptions> for arkdown::PluginAstParseOptions {
   fn from(options: JsPluginAstParseOptions) -> Self {
     Self {
-      source_type: options.source_type,
-      ranges: options.ranges.unwrap_or(false),
-      locations: options.locations.unwrap_or(false),
-      source_file: options.source_file,
-      direct_source_file: options.direct_source_file,
       allow_return_outside_function: options.allow_return_outside_function.unwrap_or(false),
-      preserve_parens: options.preserve_parens.unwrap_or(false),
-      capture_comments: options.capture_comments.unwrap_or(false),
-      ecma_version: options.ecma_version,
-      allow_await_outside_function: options.allow_await_outside_function.unwrap_or(false),
-      allow_super_outside_method: options.allow_super_outside_method.unwrap_or(false),
-      allow_hash_bang: options.allow_hash_bang,
-      has_on_token: options.has_on_token.unwrap_or(false),
-      has_program: options.has_program.unwrap_or(false),
     }
   }
 }
@@ -580,7 +568,7 @@ impl ArkdownPluginAstBridge {
   ) -> napi::Result<serde_json::Value> {
     arkdown::PluginAstParser::new(source, options.map(Into::into).unwrap_or_default())
       .parse()
-      .and_then(arkdown::PluginAstParseResult::into_bridge_value)
+      .map(arkdown::PluginAstParseResult::into_bridge_value)
       .map_err(|error| napi::Error::from_reason(error.to_string()))
   }
 }
@@ -2290,6 +2278,8 @@ pub fn build<'a>(
 ) -> napi::Result<Object<'a>> {
   runtime_observe::RuntimeObservability::install_build_safety_net(&config)
     .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+  let typescript_executable =
+    NapiPackageLayout::from_env(&env)?.packaged_typescript_executable()?;
 
   // 1. Wrap JS plugins synchronously (Env + Array are not Send).
   let mut js_plugins: Vec<PackagePlugin> = Vec::new();
@@ -2407,6 +2397,7 @@ pub fn build<'a>(
     ignore_crossplatform_check: ignore_crossplatform_check.unwrap_or(false),
     cache: cache.unwrap_or(true),
     node_executable: node_executable.map(std::path::PathBuf::from),
+    typescript_executable,
   };
 
   // 2. Spawn the async build and return a JS Promise.
@@ -2475,6 +2466,7 @@ struct PackageBuildArgs {
   ignore_crossplatform_check: bool,
   cache: bool,
   node_executable: Option<std::path::PathBuf>,
+  typescript_executable: Option<std::path::PathBuf>,
 }
 
 async fn run_build(
@@ -2529,7 +2521,6 @@ async fn run_build(
     skip_resource: false,
     skip_profile: false,
     watch_invalidation: None,
-    custom_task_input_paths: Vec::new(),
     pack_compress_level: None,
     align_device_types: Vec::new(),
     collect_debug_symbol: None,
@@ -2540,6 +2531,7 @@ async fn run_build(
     hvigor_properties: Default::default(),
     parameter_file_override: None,
     node_executable: package_args.node_executable,
+    typescript_executable: package_args.typescript_executable,
     hvigor_cache_dir: Some(project_path.join(".hvigor")),
   };
 

@@ -117,7 +117,7 @@ impl HvigorTypescriptPrinter {
             numeric_literals.raw_literals,
             string_literals.literals,
             source_layouts,
-            source_comments,
+            &source_comments,
         )
         .format();
         let source_map = generated.map.map(|source_map| {
@@ -127,6 +127,7 @@ impl HvigorTypescriptPrinter {
                         source_text,
                         &layout.code,
                         original_boundaries.boundaries.as_slice(),
+                        &source_comments,
                         source_tree_kind,
                     )
                     .mappings()
@@ -913,6 +914,7 @@ struct TypeScriptSourceBoundaryMapper<'a> {
     source: &'a str,
     generated: &'a str,
     original: &'a [TypeScriptSourceBoundary],
+    source_comments: &'a TypeScriptSourceCommentSnapshot,
     source_tree_kind: TypeScriptSourceTreeKind,
 }
 
@@ -921,12 +923,14 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
         source: &'a str,
         generated: &'a str,
         original: &'a [TypeScriptSourceBoundary],
+        source_comments: &'a TypeScriptSourceCommentSnapshot,
         source_tree_kind: TypeScriptSourceTreeKind,
     ) -> Self {
         Self {
             source,
             generated,
             original,
+            source_comments,
             source_tree_kind,
         }
     }
@@ -960,6 +964,7 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
                 .push_back(boundary);
         }
         let mut entries = Vec::new();
+        self.map_comment_boundaries(&parsed.program.comments, &mut entries);
         for original in self.original {
             let generated_boundary = match &original.kind {
                 // Component closures close in pop order (LIFO).
@@ -1097,6 +1102,19 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
                         self.generated,
                         position,
                     ));
+                    if !original.span.is_empty() && !generated_span.is_empty() {
+                        // emitter.ts wraps every object literal in the generic
+                        // source-map pipeline. `emitObjectLiteralExpression`
+                        // writes the closing brace through `emitList`, then
+                        // `emitSourceMapsAfterNode` records the range end at
+                        // the writer position immediately after that brace.
+                        entries.push(TypeScriptSourceMapEntry::from_offsets(
+                            self.generated,
+                            generated_span.end,
+                            self.source,
+                            original.span.end,
+                        ));
+                    }
                     let (source_start_line, _) =
                         crate::source_map::offset_to_line_col(self.source, original.span.start);
                     let (source_end_line, _) =
@@ -1261,6 +1279,54 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
         }
     }
 
+    fn map_comment_boundaries(
+        &self,
+        generated_comments: &[Comment],
+        entries: &mut Vec<TypeScriptSourceMapEntry>,
+    ) {
+        // TypeScript emitter.ts emits `emitPos(commentPos)`, writes the raw
+        // comment range, then emits `emitPos(commentEnd)` for both leading and
+        // trailing comments. Match comments by the same spelling identity used
+        // by the layout pass, because transformed nodes may move a retained
+        // source comment to a different generated position.
+        let mut source_by_fingerprint =
+            FxHashMap::<String, VecDeque<&HvigorSourceComment>>::with_capacity_and_hasher(
+                self.source_comments.comments.len(),
+                Default::default(),
+            );
+        for comment in &self.source_comments.comments {
+            source_by_fingerprint
+                .entry(comment.fingerprint.clone())
+                .or_default()
+                .push_back(comment);
+        }
+        for generated_comment in generated_comments {
+            let Some(raw) =
+                TypeScriptSourceCommentSnapshot::raw_comment(self.generated, generated_comment)
+            else {
+                continue;
+            };
+            let fingerprint = TypeScriptSourceCommentSnapshot::fingerprint(raw);
+            let Some(source_comment) = source_by_fingerprint
+                .get_mut(&fingerprint)
+                .and_then(VecDeque::pop_front)
+            else {
+                continue;
+            };
+            for (generated_offset, source_offset) in [
+                (generated_comment.span.start, source_comment.span.start),
+                (generated_comment.span.end, source_comment.span.end),
+            ] {
+                entries.push(TypeScriptSourceMapEntry::from_offsets(
+                    self.generated,
+                    generated_offset,
+                    self.source,
+                    source_offset,
+                ));
+            }
+        }
+    }
+
     fn map_arrow_boundaries(
         &self,
         original: &TypeScriptSourceBoundary,
@@ -1314,6 +1380,17 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
             suppressed.insert(crate::source_map::offset_to_line_col(
                 self.generated,
                 generated_body,
+            ));
+        }
+        if !original.span.is_empty() && !generated.span.is_empty() {
+            // `emitArrowFunction` is also surrounded by the generic source-map
+            // pipeline. A block body writes `}` before
+            // `emitSourceMapsAfterNode` records the ArrowFunction range end.
+            entries.push(TypeScriptSourceMapEntry::from_offsets(
+                self.generated,
+                generated.span.end,
+                self.source,
+                original.span.end,
             ));
         }
         if !source_prefix.contains('(') && !generated_prefix.contains('(') {
@@ -1891,6 +1968,7 @@ struct HvigorSourceComment {
     fingerprint: String,
     raw: String,
     source_indent: usize,
+    span: Span,
 }
 
 impl TypeScriptSourceCommentSnapshot {
@@ -1904,6 +1982,7 @@ impl TypeScriptSourceCommentSnapshot {
                 fingerprint: Self::fingerprint(raw),
                 raw: raw.to_string(),
                 source_indent: Self::line_indent_width(program.source_text, comment.span.start),
+                span: comment.span,
             });
         }
         Self { comments }
@@ -1998,6 +2077,7 @@ struct TypeScriptSourceLayoutInventory<'a> {
     member_line_breaks: FxHashMap<String, VecDeque<bool>>,
     logical_line_breaks: FxHashMap<String, VecDeque<bool>>,
     single_arrow_parenthesized: VecDeque<bool>,
+    empty_arrow_body_multiline: VecDeque<bool>,
     collection_depth: usize,
     collect_collections: bool,
 }
@@ -2011,6 +2091,7 @@ impl<'a> TypeScriptSourceLayoutInventory<'a> {
             member_line_breaks: FxHashMap::default(),
             logical_line_breaks: FxHashMap::default(),
             single_arrow_parenthesized: VecDeque::new(),
+            empty_arrow_body_multiline: VecDeque::new(),
             collection_depth: 0,
             collect_collections: true,
         }
@@ -2032,6 +2113,7 @@ impl<'a> TypeScriptSourceLayoutInventory<'a> {
         inventory.member_line_breaks.clear();
         inventory.logical_line_breaks.clear();
         inventory.single_arrow_parenthesized.clear();
+        inventory.empty_arrow_body_multiline.clear();
         inventory.collect_collections = false;
         inventory.visit_program(program);
         inventory.into_snapshot()
@@ -2132,6 +2214,7 @@ impl<'a> TypeScriptSourceLayoutInventory<'a> {
             member_line_breaks: self.member_line_breaks,
             logical_line_breaks: self.logical_line_breaks,
             single_arrow_parenthesized: self.single_arrow_parenthesized,
+            empty_arrow_body_multiline: self.empty_arrow_body_multiline,
             synthetic_type_import_aliases: FxHashMap::default(),
         }
     }
@@ -2196,6 +2279,16 @@ impl<'a> Visit<'a> for TypeScriptSourceLayoutInventory<'a> {
                     .and_then(|prefix| prefix.split_once("=>").map(|(params, _)| params.trim()))
                     .is_none_or(|params| params.starts_with('('));
             self.single_arrow_parenthesized.push_back(parenthesized);
+        }
+        if let oxc_ast::ast::ArrowFunctionBody::FunctionBody(body) = &arrow.body {
+            if body.directives.is_empty() && body.statements.is_empty() {
+                // TypeScript emitter.ts::shouldEmitBlockFunctionBodyOnSingleLine
+                // keeps a non-synthesized function body multiline when its
+                // retained source range crosses a line boundary.
+                self.empty_arrow_body_multiline.push_back(
+                    !body.span.is_empty() && self.has_line_break(body.span.start, body.span.end),
+                );
+            }
         }
         walk::walk_arrow_function_expression(self, arrow);
     }
@@ -2268,6 +2361,7 @@ struct HvigorSourceLayoutSnapshot {
     member_line_breaks: FxHashMap<String, VecDeque<bool>>,
     logical_line_breaks: FxHashMap<String, VecDeque<bool>>,
     single_arrow_parenthesized: VecDeque<bool>,
+    empty_arrow_body_multiline: VecDeque<bool>,
     synthetic_type_import_aliases: FxHashMap<String, VecDeque<Vec<String>>>,
 }
 
@@ -2306,21 +2400,21 @@ impl HvigorSourceLayoutSnapshot {
     }
 }
 
-struct HvigorTypescriptLayout {
+struct HvigorTypescriptLayout<'a> {
     code: String,
     raw_numeric_literals: Vec<HvigorRawNumericLiteral>,
     source_string_literals: Vec<HvigorSourceStringLiteral>,
     source_layouts: HvigorSourceLayoutSnapshot,
-    source_comments: TypeScriptSourceCommentSnapshot,
+    source_comments: &'a TypeScriptSourceCommentSnapshot,
 }
 
-impl HvigorTypescriptLayout {
+impl<'a> HvigorTypescriptLayout<'a> {
     fn new(
         code: String,
         raw_numeric_literals: Vec<HvigorRawNumericLiteral>,
         source_string_literals: Vec<HvigorSourceStringLiteral>,
         source_layouts: HvigorSourceLayoutSnapshot,
-        source_comments: TypeScriptSourceCommentSnapshot,
+        source_comments: &'a TypeScriptSourceCommentSnapshot,
     ) -> Self {
         Self {
             code,
@@ -2343,7 +2437,7 @@ impl HvigorTypescriptLayout {
 
         let mut layout = HvigorLayoutInventory::new(&self.code, self.source_layouts);
         layout.visit_program(&parsed.program);
-        layout.add_source_comment_spelling_edits(&self.source_comments, &parsed.program.comments);
+        layout.add_source_comment_spelling_edits(self.source_comments, &parsed.program.comments);
         layout.add_numeric_literal_edits(&self.raw_numeric_literals);
         layout.add_string_literal_edits(&self.source_string_literals);
         layout.apply()
@@ -2483,6 +2577,7 @@ struct HvigorLayoutInventory<'a> {
     member_line_breaks: FxHashMap<String, VecDeque<bool>>,
     logical_line_breaks: FxHashMap<String, VecDeque<bool>>,
     single_arrow_parenthesized: VecDeque<bool>,
+    empty_arrow_body_multiline: VecDeque<bool>,
     synthetic_type_import_aliases: FxHashMap<String, VecDeque<Vec<String>>>,
 }
 
@@ -2498,6 +2593,7 @@ impl<'a> HvigorLayoutInventory<'a> {
             member_line_breaks: source_layouts.member_line_breaks,
             logical_line_breaks: source_layouts.logical_line_breaks,
             single_arrow_parenthesized: source_layouts.single_arrow_parenthesized,
+            empty_arrow_body_multiline: source_layouts.empty_arrow_body_multiline,
             synthetic_type_import_aliases: source_layouts.synthetic_type_import_aliases,
         }
     }
@@ -2858,9 +2954,16 @@ impl<'a> Visit<'a> for HvigorLayoutInventory<'_> {
         // directives/statements renders as `{ }`.
         if let oxc_ast::ast::ArrowFunctionBody::FunctionBody(body) = &arrow.body {
             if body.directives.is_empty() && body.statements.is_empty() {
+                let multiline = self.empty_arrow_body_multiline.pop_front().unwrap_or(false);
+                let replacement = if multiline {
+                    let indent = self.line_indent_at(arrow.span.start as usize);
+                    format!("{{\n{indent}}}")
+                } else {
+                    "{ }".to_string()
+                };
                 self.edits.push(HvigorTextEdit {
                     span: body.span,
-                    replacement: "{ }".to_string(),
+                    replacement,
                     kind: HvigorTextEditKind::Other,
                 });
             }

@@ -9,6 +9,7 @@ use oxc_codegen::{CodegenOptions, IndentChar};
 use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
 use oxc_span::SourceType;
+use rolldown_sourcemap::SourceMapBuilder;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::api_transform;
@@ -63,6 +64,7 @@ pub struct RolldownEtsTransformPlan {
     resource_context: ResourceTransformContext,
     pub component_metadata: Arc<transform::component_meta::ComponentMetadata>,
     pub sources: TransformSourceSnapshot,
+    type_facts: transform::ArktsTypeFactsSnapshot,
     const_enum_exports: Arc<ConstEnumExportCache>,
     pub(crate) module_exports: ModuleExportIndex,
     form_entry_source_ids: Arc<FxHashSet<String>>,
@@ -128,6 +130,7 @@ impl RolldownEtsTransformPlan {
             resource_context: ResourceTransformContext::default(),
             component_metadata: Arc::new(component_metadata),
             sources,
+            type_facts: transform::ArktsTypeFactsSnapshot::default(),
             const_enum_exports,
             module_exports,
             form_entry_source_ids: Arc::default(),
@@ -188,6 +191,11 @@ impl RolldownEtsTransformPlan {
         self
     }
 
+    pub fn with_type_facts(mut self, type_facts: transform::ArktsTypeFactsSnapshot) -> Self {
+        self.type_facts = type_facts;
+        self
+    }
+
     /// Select the explicitly requested ArkTS compiler language and rebuild the
     /// cross-file export index with the matching OXC parser mode.
     pub fn with_arkts_language_version(mut self, version: ArktsLanguageVersion) -> Self {
@@ -211,11 +219,6 @@ impl RolldownEtsTransformPlan {
     ) -> Self {
         self.api_available =
             ApiAvailableTransformOptions::from_build_context(compatible_sdk_version, runtime_os);
-        self.system_api = self
-            .system_api
-            .clone()
-            .with_compatible_sdk_version(compatible_sdk_version)
-            .with_runtime_os(runtime_os);
         self
     }
 
@@ -293,8 +296,9 @@ impl RolldownEtsTransformPlan {
         let form_entry = self.is_form_entry(id);
         TransformOptions {
             arkts_language_version: self.arkts_language_version,
+            api_version: self.api_version,
             api_available: self.api_available,
-            system_api: self.system_api.clone().with_form_source(form_entry),
+            system_api: self.system_api.clone(),
             bundle_name: Some(self.bundle_name.clone()),
             module_name: Some(self.module_name.clone()),
             project_root: Some(self.project_root.clone()),
@@ -302,6 +306,7 @@ impl RolldownEtsTransformPlan {
             module_roots: self.module_roots.clone(),
             component_metadata: Arc::clone(&self.component_metadata),
             sources: self.sources.clone(),
+            type_facts: self.type_facts.clone(),
             module_exports: self.module_exports.clone(),
             navigation_routes: self.navigation_routes.clone(),
             form_entry,
@@ -362,6 +367,13 @@ pub struct RolldownEtsTransformOutput {
     pub module_source_code: Option<Arc<str>>,
     pub source_map: Option<String>,
     pub record_module_source_code: bool,
+    /// Whether the source retained for `ModuleSourceFile` is JavaScript.
+    /// This is distinct from [`Self::emits_javascript`]: when
+    /// `projectConfig.shouldEmitJs` is true, Rolldown receives emitted JS but
+    /// `processKitImport` still records the transformed TypeScript AST for
+    /// genAbc. Only JS inputs and the SDK's ts-noCheck/ts-ignore path retain
+    /// JavaScript as the bytecode source.
+    pub module_source_emits_javascript: bool,
     pub emits_javascript: bool,
     /// The SDK TypeScript emitter gives a `//@ts-noCheck` source containing
     /// only comments the syntactic map `"mappings":";"`. Rolldown's map
@@ -431,6 +443,7 @@ impl RolldownEtsTransformer {
                         module_source_code: None,
                         source_map: javascript_source_map,
                         record_module_source_code: false,
+                        module_source_emits_javascript: source_kind.is_javascript_runtime(),
                         emits_javascript: false,
                         is_comment_only_javascript: false,
                         is_shared_module: false,
@@ -446,6 +459,7 @@ impl RolldownEtsTransformer {
                     module_source_code: None,
                     source_map: javascript_source_map,
                     record_module_source_code: false,
+                    module_source_emits_javascript: source_kind.is_javascript_runtime(),
                     emits_javascript: false,
                     is_comment_only_javascript: false,
                     is_shared_module: false,
@@ -460,6 +474,7 @@ impl RolldownEtsTransformer {
                     module_source_code: None,
                     source_map: Some(source_map),
                     record_module_source_code: false,
+                    module_source_emits_javascript: source_kind.is_javascript_runtime(),
                     emits_javascript: false,
                     is_comment_only_javascript: false,
                     is_shared_module: false,
@@ -474,6 +489,7 @@ impl RolldownEtsTransformer {
                     module_source_code: None,
                     source_map: None,
                     record_module_source_code: false,
+                    module_source_emits_javascript: source_kind.is_javascript_runtime(),
                     emits_javascript: false,
                     is_comment_only_javascript: false,
                     is_shared_module: false,
@@ -524,6 +540,8 @@ impl RolldownEtsTransformer {
                 id,
                 &self.plan.transform_options_for(id),
             );
+            let module_source_code = (!directive_flags.should_emit_javascript())
+                .then(|| Arc::<str>::from(final_code.as_ref()));
             let emitted =
                 self.emit_javascript_if_required(final_code.as_ref(), id, directive_flags)?;
             let source_map = if is_comment_only_javascript {
@@ -542,9 +560,10 @@ impl RolldownEtsTransformer {
             return Ok(Some(RolldownEtsTransformOutput {
                 code: emitted.code,
                 warnings: finalization.warnings,
-                module_source_code: None,
+                module_source_code,
                 source_map,
                 record_module_source_code: false,
+                module_source_emits_javascript: directive_flags.should_emit_javascript(),
                 emits_javascript,
                 is_comment_only_javascript,
                 is_shared_module,
@@ -577,6 +596,7 @@ impl RolldownEtsTransformer {
                 module_source_code: Some(Arc::from(transformed.code)),
                 source_map: None,
                 record_module_source_code: false,
+                module_source_emits_javascript: false,
                 emits_javascript: false,
                 is_comment_only_javascript: false,
                 is_shared_module,
@@ -623,23 +643,26 @@ impl RolldownEtsTransformer {
             // TypeScript printer emits both text and mappings. Preserve that
             // source-node boundary while the original spans are still
             // available; reparsing later in the cache writer loses them.
-            let module_source_print = (!emits_javascript && finalization_source_map.is_none())
-                .then(|| {
-                    ModuleSourceFilePrinter::new(
+            let module_source_print = (!directive_flags.should_emit_javascript()
+                && finalization_source_map.is_none())
+            .then(|| {
+                ModuleSourceFilePrinter::new(
+                    id,
+                    final_source,
+                    CompileArktsSourceType::from_id_with_version(
                         id,
-                        final_source,
-                        CompileArktsSourceType::from_id_with_version(
-                            id,
-                            self.plan.arkts_language_version,
-                        ),
-                    )
-                    .print()
-                })
-                .flatten();
+                        self.plan.arkts_language_version,
+                    ),
+                )
+                .print()
+            })
+            .flatten();
             let (formatted_source, module_source_map) = match module_source_print {
                 Some(printed) => (printed.code, printed.source_map),
                 None => (pipeline.format_source(final_source), None),
             };
+            let module_source_code = (!directive_flags.should_emit_javascript())
+                .then(|| Arc::<str>::from(formatted_source.as_str()));
             let emitted =
                 self.emit_javascript_if_required(formatted_source.as_str(), id, directive_flags)?;
             let TypeScriptJavascriptEmitOutput {
@@ -668,9 +691,10 @@ impl RolldownEtsTransformer {
             return Ok(Some(RolldownEtsTransformOutput {
                 code: emitted_code,
                 warnings,
-                module_source_code: None,
+                module_source_code,
                 source_map,
                 record_module_source_code: false,
+                module_source_emits_javascript: directive_flags.should_emit_javascript(),
                 emits_javascript,
                 is_comment_only_javascript,
                 is_shared_module,
@@ -679,6 +703,8 @@ impl RolldownEtsTransformer {
             }));
         }
 
+        let module_source_code =
+            (!directive_flags.should_emit_javascript()).then(|| Arc::<str>::from(final_source));
         let emitted = self.emit_javascript_if_required(final_source, id, directive_flags)?;
         let transformed_source_map = match (
             visual_source
@@ -693,9 +719,9 @@ impl RolldownEtsTransformer {
             (Some(visual_map), None) => Some(visual_map.to_string()),
         };
         let transformed_source_map = match (transformed_source_map, finalization_source_map) {
-            (Some(transform_map), Some(finalization_map)) => {
-                Some(self.collapse_source_maps(id, &transform_map, &finalization_map)?)
-            }
+            (Some(transform_map), Some(finalization_map)) => Some(
+                self.collapse_module_source_reprint_map(id, &transform_map, &finalization_map)?,
+            ),
             (Some(transform_map), None) => Some(transform_map),
             (None, Some(finalization_map)) => Some(finalization_map),
             (None, None) => None,
@@ -721,9 +747,10 @@ impl RolldownEtsTransformer {
         Ok(Some(RolldownEtsTransformOutput {
             code: emitted.code,
             warnings,
-            module_source_code: None,
+            module_source_code,
             source_map,
             record_module_source_code: false,
+            module_source_emits_javascript: directive_flags.should_emit_javascript(),
             emits_javascript,
             is_comment_only_javascript,
             is_shared_module,
@@ -759,29 +786,9 @@ impl RolldownEtsTransformer {
         } else {
             transform::CrossplatformSourceCollection::default()
         };
-        let validator = transform::system_api::Arkts11SystemApiValidator::new(
-            id,
-            code,
-            options.api_available,
-            &options.system_api,
-            &options.module_exports,
-            &options.sources,
-            &options.module_roots,
-        );
-        if validator.is_required() {
-            let validation = validator.validate(&parsed.program);
-            collection.merge(&validation.crossplatform_dependencies);
-            if matches!(options.checker_mode, transform::CheckerMode::Oxc) {
-                for diagnostic in &validation.diagnostics {
-                    tracing::debug!(file = id, diagnostic = ?diagnostic, "system API diagnostic");
-                }
-                if let Some(error) = validation
-                    .diagnostics
-                    .iter()
-                    .find(|diagnostic| diagnostic.is_error())
-                {
-                    return Err(error.clone());
-                }
+        if options.system_api.collects_crossplatform() {
+            if let Some(facts) = options.type_facts.file_facts(id) {
+                collection.merge(&facts.crossplatform_dependencies);
             }
         }
         Ok(collection)
@@ -836,6 +843,78 @@ impl RolldownEtsTransformer {
         .to_json_string())
     }
 
+    /// Compose a Rust reprint with the preceding ArkUI transform without
+    /// assigning source ownership to generated nodes.
+    ///
+    /// ets2bundle's `ModuleSourceFile::processTransformedTsModuleRequest`
+    /// updates the same transformed `ts.SourceFile` later written by
+    /// `process_module_files.ts::genContentAndSourceMapInfo`. Factory-created
+    /// class/constructor/ArkUI nodes therefore keep synthesized positions and
+    /// never gain mappings during module-request or type-import processing.
+    /// Rust must reparse between those owning stages, so the reprint map is
+    /// restricted to source positions that the first transform actually
+    /// exposed. An approximate sourcemap lookup would otherwise project new
+    /// mappings onto the closest retained identifier.
+    fn collapse_module_source_reprint_map(
+        &self,
+        id: &str,
+        transform_map: &str,
+        reprint_map: &str,
+    ) -> Result<String, EtsTransformError> {
+        let transform = rolldown_sourcemap::OwnedSourceMap::from_json_string(transform_map)
+            .map_err(|error| EtsTransformError::Fatal {
+                file: id.to_string(),
+                message: format!("failed to decode ArkTS transform source map: {error}"),
+            })?;
+        let reprint =
+            rolldown_sourcemap::OwnedSourceMap::from_json_string(reprint_map).map_err(|error| {
+                EtsTransformError::Fatal {
+                    file: id.to_string(),
+                    message: format!("failed to decode module-source reprint map: {error}"),
+                }
+            })?;
+        let mapped_intermediate_positions = transform
+            .get_tokens()
+            .map(|token| (token.get_dst_line(), token.get_dst_col()))
+            .collect::<FxHashSet<_>>();
+
+        let mut builder = SourceMapBuilder::default();
+        if let Some(file) = reprint.get_file() {
+            builder.set_file(file);
+        }
+        for name in reprint.get_names() {
+            builder.add_name(name);
+        }
+        for source in reprint.get_sources() {
+            builder.set_source_and_content(source, "");
+        }
+        for token in reprint.get_tokens() {
+            let Some(source_id) = token.get_source_id() else {
+                continue;
+            };
+            if !mapped_intermediate_positions.contains(&(token.get_src_line(), token.get_src_col()))
+            {
+                continue;
+            }
+            builder.add_token(
+                token.get_dst_line(),
+                token.get_dst_col(),
+                token.get_src_line(),
+                token.get_src_col(),
+                Some(source_id),
+                token.get_name_id(),
+            );
+        }
+        let filtered_reprint = builder.into_sourcemap();
+        Ok(
+            rolldown_sourcemap::collapse_sourcemaps(&[
+                transform.as_source_map(),
+                &filtered_reprint,
+            ])
+            .to_json_string(),
+        )
+    }
+
     pub fn compile_transform(
         &self,
         code: &str,
@@ -845,7 +924,7 @@ impl RolldownEtsTransformer {
             return Ok(None);
         };
         output.record_module_source_code = SourceClassifier::classify(id).is_ets_transform_input();
-        if output.record_module_source_code && output.module_source_code.is_none() {
+        if output.record_module_source_code {
             let rolldown_source =
                 LazyImportRolldownAdapter::new(&output.code, id, self.plan.arkts_language_version)
                     .lower();
@@ -857,11 +936,17 @@ impl RolldownEtsTransformer {
             // source snapshot for every ETS/TS input; for `import lazy`, pass
             // the lowered copy to Rolldown while retaining the ArkTS form for
             // the ModuleMode writer.
-            let module_source_code = match rolldown_source {
-                Cow::Owned(rolldown_source) => std::mem::replace(&mut output.code, rolldown_source),
-                Cow::Borrowed(_) => output.code.clone(),
-            };
-            output.module_source_code = Some(Arc::from(module_source_code));
+            // A transform may already have retained its source-facing text
+            // (for example the non-emit TypeScript path). That snapshot does
+            // not remove the separate Rolldown scanner adaptation: current
+            // ets2bundle keeps `ModuleSourceFile`'s ArkTS AST while Rollup
+            // receives a scanner-compatible standard import.
+            if output.module_source_code.is_none() {
+                output.module_source_code = Some(Arc::from(output.code.clone()));
+            }
+            if let Cow::Owned(rolldown_source) = rolldown_source {
+                output.code = rolldown_source;
+            }
         }
         // Hvigor normally writes transformed TypeScript for es2abc, but its
         // `hasTsNoCheckOrTsIgnoreFiles` path writes JavaScript instead. Both
@@ -1633,7 +1718,6 @@ export { emitter };"#;
         )
         .with_system_api_context(
             SystemApiCheckOptions::default()
-                .with_crossplatform(true, false)
                 .with_crossplatform_collection(true)
                 .with_module_prefixes(["ohos", "system", "kit", "arkts", "arkui-x"]),
         );
@@ -2388,6 +2472,8 @@ export namespace Zip {
         );
         assert!(!output.code.contains("namespace Zip"), "{}", output.code);
         assert!(output.emits_javascript);
+        assert!(output.module_source_emits_javascript);
+        assert_eq!(output.module_source_code.as_deref(), Some(&*output.code));
     }
 
     #[test]
@@ -2418,6 +2504,11 @@ export namespace Zip {
             "export const value = \"arkdown\";\r\n//# sourceMappingURL=Value.js.map"
         );
         assert!(output.emits_javascript);
+        assert!(!output.module_source_emits_javascript);
+        assert_eq!(
+            output.module_source_code.as_deref(),
+            Some("export const value: string = 'arkdown';\n")
+        );
         assert!(output.source_map.is_some());
     }
 
@@ -2982,5 +3073,71 @@ class Service {
 
         assert!(!output.code.contains("MockSetup"), "{}", output.code);
         assert_eq!(output.code.matches("@Keep").count(), 2, "{}", output.code);
+    }
+
+    #[test]
+    fn module_source_reprint_preserves_synthetic_arkui_source_map_ownership() {
+        // ets2bundle ModuleSourceFile keeps the transformed ts.SourceFile when
+        // getTypeExportImportAndConstEnumTransformer removes this type-only
+        // import. The later printer must not give the synthetic class shell or
+        // generated ArkUI statement terminators a source range.
+        let plan = RolldownEtsTransformPlan::new(
+            "com.example",
+            "entry",
+            PathBuf::from("/tmp/project"),
+            PathBuf::from("/tmp/project/entry/src/main/ets"),
+            Vec::new(),
+            12,
+            FxHashMap::default(),
+            transform::component_meta::ComponentMetadata::default(),
+            TransformSourceSnapshot::default(),
+        )
+        .with_checker_mode(CheckerMode::Off);
+        let output = RolldownEtsTransformer::new(Arc::new(plan))
+            .transform(
+                "import unused from '@ohos.hilog';\n@Component\nstruct Page {\n  build() {\n    Row() {}.height('100%')\n  }\n}\n",
+                "/tmp/project/entry/src/main/ets/pages/Page.ets",
+            )
+            .expect("module source transform")
+            .expect("ArkUI source output");
+        assert!(!output.code.contains("import unused"), "{}", output.code);
+
+        let source_map = rolldown_sourcemap::OwnedSourceMap::from_json_string(
+            output.source_map.as_deref().expect("ArkUI source map"),
+        )
+        .expect("valid ArkUI source map");
+        let positions = source_map
+            .get_tokens()
+            .map(|token| (token.get_dst_line(), token.get_dst_col()))
+            .collect::<FxHashSet<_>>();
+
+        let class_start = output.code.find("class Page").expect("generated class") as u32;
+        let class_keyword = crate::source_map::offset_to_line_col(&output.code, class_start);
+        let class_name = crate::source_map::offset_to_line_col(&output.code, class_start + 6);
+        assert!(!positions.contains(&class_keyword), "{}", output.code);
+        assert!(positions.contains(&class_name), "{}", output.code);
+
+        for statement in ["Row.create();", "Row.height('100%');"] {
+            let start = output
+                .code
+                .find(statement)
+                .expect("generated ArkUI statement") as u32;
+            let semicolon = crate::source_map::offset_to_line_col(
+                &output.code,
+                start + statement.len() as u32 - 1,
+            );
+            let statement_end =
+                crate::source_map::offset_to_line_col(&output.code, start + statement.len() as u32);
+            assert!(
+                !positions.contains(&semicolon),
+                "{statement}:\n{}",
+                output.code
+            );
+            assert!(
+                !positions.contains(&statement_end),
+                "{statement}:\n{}",
+                output.code
+            );
+        }
     }
 }

@@ -8,8 +8,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
-use arkdown_path::{classify::is_inside_oh_modules, ArtifactPathSerializer, HostPlatform};
-use rustc_hash::FxHashSet;
+use arkdown_path::classify::is_inside_oh_modules;
 
 use crate::watcher::WatchEvent;
 
@@ -221,45 +220,6 @@ impl WatchInvalidationBatch {
         }
     }
 
-    /// Classify a watcher batch while treating declared custom-task inputs as
-    /// actionable regardless of extension.
-    ///
-    /// Hvigor's `TaskInput.file/files` accepts arbitrary files and directories;
-    /// a `.txt`, generated schema, or extensionless input must therefore wake
-    /// the task graph even though it is not a normal ArkTS build input.
-    pub fn from_watch_events_with_custom_inputs(
-        events: &[WatchEvent],
-        fingerprint_baseline: &HashMap<PathBuf, u64>,
-        custom_input_files: &[PathBuf],
-        custom_input_dirs: &[PathBuf],
-    ) -> Self {
-        let matcher = CustomTaskInputMatcher::new(custom_input_files, custom_input_dirs);
-        let mut invalidations = Vec::new();
-        let mut raw_events = Vec::new();
-        let mut changed_files = BTreeSet::new();
-        for event in events {
-            let invalidation = if matcher.matches(&event.path) {
-                Some(InvalidationEvent {
-                    reason: InvalidationReason::DependencyChanged,
-                    affected_stages: vec![AffectedStage::All],
-                    affected_modules_set: AffectedModuleSet::global(),
-                })
-            } else {
-                InvalidationEvent::from_watch_event(event, fingerprint_baseline)
-            };
-            if let Some(invalidation) = invalidation {
-                changed_files.insert(event.path.clone());
-                raw_events.push(event.clone());
-                invalidations.push(invalidation);
-            }
-        }
-        Self {
-            events: invalidations,
-            raw_events,
-            changed_files: changed_files.into_iter().collect(),
-        }
-    }
-
     /// Return whether the batch contains no actionable changes.
     pub fn is_empty(&self) -> bool {
         self.events.is_empty()
@@ -277,55 +237,6 @@ impl WatchInvalidationBatch {
         } else {
             WatchChangeKind::Cold
         }
-    }
-}
-
-struct CustomTaskInputMatcher {
-    files: FxHashSet<String>,
-    dirs: Vec<String>,
-    platform: HostPlatform,
-}
-
-impl CustomTaskInputMatcher {
-    fn new(files: &[PathBuf], dirs: &[PathBuf]) -> Self {
-        Self::with_platform(files, dirs, HostPlatform::CURRENT)
-    }
-
-    fn with_platform(files: &[PathBuf], dirs: &[PathBuf], platform: HostPlatform) -> Self {
-        Self {
-            files: files
-                .iter()
-                .map(|path| Self::path_key(path, platform))
-                .collect(),
-            dirs: dirs
-                .iter()
-                .map(|path| Self::path_key(path, platform))
-                .collect(),
-            platform,
-        }
-    }
-
-    fn matches(&self, event_path: &Path) -> bool {
-        let event_key = Self::path_key(event_path, self.platform);
-        self.files.contains(&event_key)
-            || self.dirs.iter().any(|dir_key| {
-                event_key == *dir_key
-                    || event_key
-                        .strip_prefix(dir_key)
-                        .is_some_and(|relative| relative.starts_with('/'))
-            })
-    }
-
-    fn path_key(path: &Path, platform: HostPlatform) -> String {
-        let mut key = ArtifactPathSerializer::path_to_slash_string(path)
-            .unwrap_or_else(|_| ArtifactPathSerializer::rel_to_slash(path));
-        while key.len() > 1 && key.ends_with('/') {
-            key.pop();
-        }
-        if platform == HostPlatform::Windows {
-            key.make_ascii_lowercase();
-        }
-        key
     }
 }
 
@@ -745,55 +656,6 @@ mod tests {
         let batch = WatchInvalidationBatch::from_watch_events(&[source, resource], &HashMap::new());
         assert_eq!(batch.changed_files.len(), 2);
         assert_eq!(batch.change_kind(), WatchChangeKind::Cold);
-    }
-
-    #[test]
-    fn custom_task_file_with_arbitrary_extension_invalidates_all_stages() {
-        let path = PathBuf::from("/project/fixture-input.txt");
-        let event = WatchEvent::new(path.clone(), crate::watcher::WatchEventKind::Modified);
-        let batch = WatchInvalidationBatch::from_watch_events_with_custom_inputs(
-            &[event],
-            &HashMap::new(),
-            std::slice::from_ref(&path),
-            &[],
-        );
-        assert_eq!(batch.changed_files, vec![path]);
-        assert_eq!(batch.change_kind(), WatchChangeKind::Cold);
-        assert_eq!(batch.events[0].affected_stages, vec![AffectedStage::All]);
-        assert!(batch.events[0].affected_modules_set.is_global);
-    }
-
-    #[test]
-    fn custom_task_directory_matches_descendants_but_not_nearby_prefixes() {
-        let directory = PathBuf::from("/project/schema");
-        let matcher = CustomTaskInputMatcher::with_platform(
-            &[],
-            std::slice::from_ref(&directory),
-            HostPlatform::Linux,
-        );
-        assert!(matcher.matches(Path::new("/project/schema/nested/model.proto")));
-        assert!(!matcher.matches(Path::new("/project/schema-other/model.proto")));
-    }
-
-    #[test]
-    fn custom_task_paths_follow_windows_case_insensitive_semantics() {
-        let file = PathBuf::from(r"C:\Work\Project\Fixture-Input.TXT");
-        let matcher = CustomTaskInputMatcher::with_platform(
-            std::slice::from_ref(&file),
-            &[],
-            HostPlatform::Windows,
-        );
-        assert!(matcher.matches(Path::new("c:/work/project/fixture-input.txt")));
-    }
-
-    #[test]
-    fn custom_task_paths_remain_case_sensitive_on_macos_and_linux() {
-        let file = PathBuf::from("/Work/Project/Fixture-Input.TXT");
-        for platform in [HostPlatform::Macos, HostPlatform::Linux] {
-            let matcher =
-                CustomTaskInputMatcher::with_platform(std::slice::from_ref(&file), &[], platform);
-            assert!(!matcher.matches(Path::new("/work/project/fixture-input.txt")));
-        }
     }
 
     #[test]

@@ -140,8 +140,20 @@ test('native package exposes typed services and plugin bridges, not a command ru
 
   assert.doesNotMatch(napi, /run_runtime_tasks|RuntimeTaskBridgeSeed|RuntimeBuildScriptSession/)
   assert.doesNotMatch(
+    napi,
+    /BuildTaskHook|__arkdownBuildTaskHooks|build_plugin_project_inventory/,
+  )
+  assert.doesNotMatch(
     coordinator,
     /BuildTaskObserver|BuildTaskEvent|BuildCycleEvent|BuildNativeCommandEvent|BuildAbcTransformEvent/,
+  )
+  assert.equal(
+    fs.existsSync(path.resolve(packageRoot, '../../crates/arkdown-build/src/plugin_project.rs')),
+    false,
+  )
+  assert.equal(
+    fs.existsSync(path.resolve(packageRoot, '../../crates/arkdown-build/src/plugin_task.rs')),
+    false,
   )
   assert.doesNotMatch(declarations, /runRuntimeTasks|RuntimeHvigor|RuntimeBuildScriptSession/)
   assert.match(declarations, /build\(config: BuildConfig, plugins\?: Array<ArkdownPlugin>/)

@@ -492,8 +492,8 @@ fn print_report_summary(report: &Value) {
   let fixture = report["fixture"].as_str().unwrap_or("<unknown fixture>");
 
   tracing::info!(
-        "hvigor parity report [{fixture}] written to {report_path}; equal={equal}; diff_count={diff_count}"
-    );
+    "hvigor parity report [{fixture}] written to {report_path}; equal={equal}; diff_count={diff_count}"
+  );
 }
 
 #[test]
@@ -576,26 +576,33 @@ fn parity_for_fixture(
     .prefix("arkdown-hvigor-parity-")
     .tempdir()?;
   let temp_root = temp.path().to_path_buf();
-  let hvigor_root = temp.path().join(format!("hvigor/{fixture_name}"));
-  let arkdown_root = temp.path().join(format!("arkdown/{fixture_name}"));
-  copy_clean_fixture(&fixture_abs, &hvigor_root)?;
-  copy_clean_fixture(&fixture_abs, &arkdown_root)?;
-  materialize_local_file_dependencies(&hvigor_root)?;
-  materialize_local_file_dependencies(&arkdown_root)?;
+  // `@ohos/coverage` local-test templates embed the absolute project path in
+  // executable source. Building two copies under `hvigor/` and `arkdown/`
+  // therefore changes both source-map generated columns and the ABC string
+  // pool before either implementation is compared. Run the cold builds at
+  // the same absolute path and keep the first build as an owned snapshot.
+  let project_root = temp.path().join(format!("project/{fixture_name}"));
+  copy_clean_fixture(&fixture_abs, &project_root)?;
+  materialize_local_file_dependencies(&project_root)?;
 
-  let hvigorw = hvigorw_program(&hvigor_root)?;
+  let hvigorw = hvigorw_program(&project_root)?;
   let arkdown_bin = arkdown_program();
   let hvigor_args = hvigor_args(artifact_type, build_mode);
 
-  let hvigor_command = run_command("hvigor", &hvigorw, &hvigor_args, &hvigor_root);
-  let arkdown_project_arg = arkdown_root.to_string_lossy().into_owned();
+  let hvigor_command = run_command("hvigor", &hvigorw, &hvigor_args, &project_root);
+  let hvigor = collect_build("hvigor", &project_root, hvigor_command, artifact_type)?;
+
+  fs::remove_dir_all(&project_root)?;
+  copy_clean_fixture(&fixture_abs, &project_root)?;
+  materialize_local_file_dependencies(&project_root)?;
+
+  let arkdown_project_arg = project_root.to_string_lossy().into_owned();
   let mut arkdown_args = arkdown_args(artifact_type, build_mode);
   arkdown_args.push("--project".to_string());
   arkdown_args.push(arkdown_project_arg);
-  let arkdown_command = run_command("arkdown", &arkdown_bin, &arkdown_args, &arkdown_root);
+  let arkdown_command = run_command("arkdown", &arkdown_bin, &arkdown_args, &project_root);
 
-  let hvigor = collect_build("hvigor", &hvigor_root, hvigor_command, artifact_type)?;
-  let arkdown = collect_build("arkdown", &arkdown_root, arkdown_command, artifact_type)?;
+  let arkdown = collect_build("arkdown", &project_root, arkdown_command, artifact_type)?;
   let diffs = compare_builds(&hvigor, &arkdown);
 
   let equal = diffs.is_empty()
@@ -1604,21 +1611,12 @@ fn collect_build(
     }
   }
 
-  // Local unit-test cache trees contain `filesInfo.txt` whose module order
-  // is nondeterministic in hvigor (async Rollup resolver timing), and the
-  // `modules.abc` debug-info line numbers differ by the empty-function-body
-  // formatting. Compare only the deterministic artifacts for `test` and
-  // `ohosTest`.
-  let build_files = if matches!(artifact_type, ArtifactType::Test | ArtifactType::OhosTest) {
-    BTreeMap::new()
-  } else {
-    collect_build_default_files(root)?
-  };
-  let loader_out_js = if matches!(artifact_type, ArtifactType::Test | ArtifactType::OhosTest) {
-    BTreeMap::new()
-  } else {
-    collect_loader_out_js(root)?
-  };
+  // `filesInfo.txt` and `modules.cache` are unordered line manifests because
+  // current ets2bundle fills them as concurrent resolver work completes.
+  // ArtifactNormalization handles that source-owned nondeterminism, so test
+  // targets retain the same complete build/cache comparison as normal modules.
+  let build_files = collect_build_default_files(root)?;
+  let loader_out_js = collect_loader_out_js(root)?;
 
   Ok(BuildSnapshot {
     tool: tool.to_string(),
@@ -1919,7 +1917,7 @@ fn build_default_key(root: &Path, path: &Path) -> Option<String> {
     .collect::<Vec<_>>();
 
   for index in 0..components.len().saturating_sub(2) {
-    if components[index] == "build"
+    if matches!(components[index].as_str(), "build" | ".test")
       && components[index + 1] == "default"
       && matches!(components[index + 2].as_str(), "intermediates" | "outputs")
     {
@@ -2014,6 +2012,7 @@ enum ArtifactNormalization {
   PreserveOrder,
   UnorderedLineManifest,
   JsonObjectInsertionOrder,
+  CoverageParserInput,
   ZipContainerTimestamps,
   TarContainerMetadata,
 }
@@ -2037,6 +2036,12 @@ impl ArtifactNormalization {
   fn for_file_name(file_name: &OsStr) -> Self {
     if matches!(file_name.to_str(), Some("filesInfo.txt" | "modules.cache")) {
       Self::UnorderedLineManifest
+    } else if matches!(file_name.to_str(), Some("coverage.log")) {
+      // @ohos/coverage localTest/previewer.js appends raw Previewer stdout to
+      // this file. coverageParser.js consumes only the OHOS_REPORT records and
+      // an engine-error stack sequence; timestamps, PIDs, thread IDs, and
+      // unrelated engine diagnostics are not build-output semantics.
+      Self::CoverageParserInput
     } else if matches!(
       file_name.to_str(),
       Some("sourceMaps.map" | "sourceMaps.json")
@@ -2067,47 +2072,127 @@ impl ArtifactNormalization {
       Self::JsonObjectInsertionOrder => serde_json::from_str::<BTreeMap<String, Value>>(&text)
         .and_then(|value| serde_json::to_string_pretty(&value))
         .unwrap_or(text),
+      Self::CoverageParserInput => Self::normalize_coverage_parser_input(&text),
       Self::ZipContainerTimestamps | Self::TarContainerMetadata => text,
     }
   }
 
-  fn normalize_binary(self, mut bytes: Vec<u8>) -> Vec<u8> {
+  fn normalize_coverage_parser_input(text: &str) -> String {
+    const ENGINE_ERROR: &str = "[Engine Log]Error message:";
+    const ENGINE_LOG: &str = "[Engine Log]";
+    const REPORT_TAGS: [&str; 5] = [
+      "OHOS_REPORT_COVERAGE_DATA: ",
+      "OHOS_REPORT_STATUS: ",
+      "OHOS_REPORT_STATUS_CODE: ",
+      "OHOS_REPORT_RESULT: stream=",
+      "OHOS_REPORT_COVERAGE_PATH: ",
+    ];
+    const DURATION_PREFIXES: [&str; 3] = [
+      "OHOS_REPORT_STATUS: consuming=",
+      "OHOS_REPORT_STATUS: suiteconsuming=",
+      "OHOS_REPORT_STATUS: taskconsuming=",
+    ];
+
+    let mut engine_error = false;
+    let mut records = Vec::<String>::new();
+    for line in text.lines() {
+      if let Some(index) = line.find(ENGINE_ERROR) {
+        engine_error = true;
+        records.push(line[index..].to_string());
+        continue;
+      }
+      if engine_error {
+        if let Some(index) = line.rfind(ENGINE_LOG) {
+          records.push(line[index..].to_string());
+          continue;
+        }
+        engine_error = false;
+      }
+      let Some(index) = REPORT_TAGS.iter().filter_map(|tag| line.find(tag)).min() else {
+        continue;
+      };
+      let record = &line[index..];
+      // Hypium's OhReport writes wall-clock durations into these status
+      // records. coverageParser.js does not read them: its consumers are
+      // class/test, result/status-code, stack/stream and coverage records.
+      // Preserve the status shape while removing run-to-run scheduler timing.
+      if let Some(prefix) = DURATION_PREFIXES
+        .iter()
+        .find(|prefix| record.starts_with(**prefix))
+      {
+        records.push(format!("{prefix}<DURATION>"));
+      } else {
+        records.push(record.to_string());
+      }
+    }
+
+    let mut normalized = records.join("\n");
+    if !normalized.is_empty() {
+      normalized.push('\n');
+    }
+    normalized
+  }
+
+  fn normalize_binary(self, bytes: Vec<u8>) -> Vec<u8> {
     if matches!(self, Self::TarContainerMetadata) {
       return Self::normalize_tar_container(&bytes).unwrap_or(bytes);
     }
     if !matches!(self, Self::ZipContainerTimestamps) {
       return bytes;
     }
+    Self::normalize_zip_container(&bytes).unwrap_or(bytes)
+  }
 
-    let header_offsets = {
-      let Ok(mut archive) = ZipArchive::new(Cursor::new(bytes.as_slice())) else {
-        return bytes;
+  fn normalize_zip_container(bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut archive = ZipArchive::new(Cursor::new(bytes)).ok()?;
+    let mut members = Vec::with_capacity(archive.len());
+    for index in 0..archive.len() {
+      let mut entry = archive.by_index(index).ok()?;
+      let path = entry.name().to_string();
+      let is_dir = entry.is_dir();
+      let compression = format!("{:?}", entry.compression());
+      let unix_mode = entry.unix_mode();
+      let compressed_size = entry.compressed_size();
+      let mut content = Vec::new();
+      entry.read_to_end(&mut content).ok()?;
+      let member_normalization = Self::for_path(Path::new(&path));
+      let content = match member_normalization {
+        Self::UnorderedLineManifest
+        | Self::JsonObjectInsertionOrder
+        | Self::CoverageParserInput => String::from_utf8(content)
+          .map(|text| member_normalization.normalize_text(text).into_bytes())
+          .ok()?,
+        _ => member_normalization.normalize_binary(content),
       };
-      let mut offsets = Vec::with_capacity(archive.len());
-      for index in 0..archive.len() {
-        let Ok(file) = archive.by_index(index) else {
-          return bytes;
-        };
-        offsets.push((file.header_start(), file.central_header_start()));
-      }
-      offsets
-    };
-
-    for (local_header, central_header) in header_offsets {
-      for (header, timestamp_offset) in [(local_header, 10u64), (central_header, 12u64)] {
-        let Some(start) = header
-          .checked_add(timestamp_offset)
-          .and_then(|offset| usize::try_from(offset).ok())
-        else {
-          return bytes;
-        };
-        let Some(timestamp) = bytes.get_mut(start..start + 4) else {
-          return bytes;
-        };
-        timestamp.fill(0);
-      }
+      members.push((
+        path,
+        is_dir,
+        compression,
+        unix_mode,
+        compressed_size,
+        content,
+      ));
     }
-    bytes
+    // app_packing_tool receives a set of package inputs. Its ZIP timestamp and
+    // member order are container metadata, while the members and their storage
+    // properties are the package contract. `sourceMaps.map` additionally uses
+    // the source-owned top-level object normalization above because
+    // generate_sourcemap.ts fills it as concurrent transforms complete.
+    members.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut normalized = Vec::new();
+    for (path, is_dir, compression, unix_mode, compressed_size, content) in members {
+      normalized.extend_from_slice(&(path.len() as u64).to_le_bytes());
+      normalized.extend_from_slice(path.as_bytes());
+      normalized.push(u8::from(is_dir));
+      normalized.extend_from_slice(&(compression.len() as u64).to_le_bytes());
+      normalized.extend_from_slice(compression.as_bytes());
+      normalized.extend_from_slice(&unix_mode.unwrap_or_default().to_le_bytes());
+      normalized.extend_from_slice(&compressed_size.to_le_bytes());
+      normalized.extend_from_slice(&(content.len() as u64).to_le_bytes());
+      normalized.extend_from_slice(&content);
+    }
+    Some(normalized)
   }
 
   fn normalize_tar_container(bytes: &[u8]) -> Option<Vec<u8>> {
@@ -2120,7 +2205,15 @@ impl ArtifactNormalization {
       let entry_type = entry.header().entry_type().as_byte();
       let mut content = Vec::new();
       entry.read_to_end(&mut content).ok()?;
-      let content = Self::for_path(Path::new(&path)).normalize_binary(content);
+      let member_normalization = Self::for_path(Path::new(&path));
+      let content = match member_normalization {
+        Self::UnorderedLineManifest
+        | Self::JsonObjectInsertionOrder
+        | Self::CoverageParserInput => String::from_utf8(content)
+          .map(|text| member_normalization.normalize_text(text).into_bytes())
+          .ok()?,
+        _ => member_normalization.normalize_binary(content),
+      };
       members.insert(path, (entry_type, content));
     }
 
@@ -2295,6 +2388,54 @@ fn source_map_manifest_compares_entries_independent_of_transform_completion_orde
 }
 
 #[test]
+fn coverage_log_compares_only_records_consumed_by_the_oh_coverage_parser() {
+  // @ohos/coverage localTest/previewer.js persists the raw process stream,
+  // while coverageParser.js locates these records with String#indexOf.
+  let normalization = ArtifactNormalization::for_file_name(OsStr::new("coverage.log"));
+  let hvigor = normalization.normalize_text(
+    "09-08 10:11:12.123 100 200 I Previewer unrelated runtime detail\n\
+     09-08 10:11:12.124 100 200 I OHOS_REPORT_STATUS: class=ExampleTest\n\
+     09-08 10:11:12.125 100 200 I OHOS_REPORT_STATUS: test=passes\n\
+     09-08 10:11:12.126 100 200 I OHOS_REPORT_STATUS_CODE: 0\n"
+      .to_string(),
+  );
+  let arkdown = normalization.normalize_text(
+    "09-08 11:22:33.456 900 901 D Previewer another diagnostic\n\
+     09-08 11:22:33.457 900 901 I OHOS_REPORT_STATUS: class=ExampleTest\n\
+     09-08 11:22:33.458 900 901 I OHOS_REPORT_STATUS: test=passes\n\
+     09-08 11:22:33.459 900 901 I OHOS_REPORT_STATUS_CODE: 0\n"
+      .to_string(),
+  );
+
+  assert_eq!(hvigor, arkdown);
+  assert_eq!(
+    hvigor,
+    "OHOS_REPORT_STATUS: class=ExampleTest\n\
+     OHOS_REPORT_STATUS: test=passes\n\
+     OHOS_REPORT_STATUS_CODE: 0\n"
+  );
+}
+
+#[test]
+fn coverage_log_ignores_hypium_runtime_durations() {
+  let normalization = ArtifactNormalization::for_file_name(OsStr::new("coverage.log"));
+  let hvigor = normalization.normalize_text(
+    "OHOS_REPORT_STATUS: consuming=0\n\
+     OHOS_REPORT_STATUS: suiteconsuming=4\n\
+     OHOS_REPORT_STATUS: taskconsuming=9\n"
+      .to_string(),
+  );
+  let arkdown = normalization.normalize_text(
+    "OHOS_REPORT_STATUS: consuming=1\n\
+     OHOS_REPORT_STATUS: suiteconsuming=12\n\
+     OHOS_REPORT_STATUS: taskconsuming=31\n"
+      .to_string(),
+  );
+
+  assert_eq!(hvigor, arkdown);
+}
+
+#[test]
 fn ordered_compile_arkts_text_keeps_record_order_significant() {
   let root = tempfile::tempdir().expect("tempdir");
   let hvigor = ArtifactSnapshot::from_bytes(
@@ -2419,12 +2560,24 @@ fn shared_tgz_comparison_normalizes_nested_hsp_and_interface_har_containers() {
     br#"{"module":"entry"}"#,
   );
   let first_har = gzip_tar(
-    &[("package/Index.d.ets", b"export {};\n")],
+    &[
+      ("package/Index.d.ets", b"export {};\n"),
+      (
+        "package/ets/sourceMaps.map",
+        br#"{"second":{"version":3},"first":{"version":3}}"#,
+      ),
+    ],
     1,
     flate2::Compression::fast(),
   );
   let second_har = gzip_tar(
-    &[("package/Index.d.ets", b"export {};\n")],
+    &[
+      ("package/Index.d.ets", b"export {};\n"),
+      (
+        "package/ets/sourceMaps.map",
+        br#"{"first":{"version":3},"second":{"version":3}}"#,
+      ),
+    ],
     2,
     flate2::Compression::best(),
   );

@@ -237,6 +237,15 @@ impl InputFingerprintSet {
             sdk.component_api_version.to_string().as_bytes(),
         );
         builder.add_value("compile_sdk_version", sdk.compile_sdk_version.as_bytes());
+        builder.add_value(
+            "ets_options",
+            &serde_json::to_vec(&sdk.ets_options.as_deref()).map_err(|source| {
+                FingerprintError::Serialize {
+                    name: "ets_options",
+                    source,
+                }
+            })?,
+        );
         let module_prefixes =
             serde_json::to_vec(sdk.module_prefixes.as_ref()).map_err(|source| {
                 FingerprintError::Serialize {
@@ -245,6 +254,51 @@ impl InputFingerprintSet {
                 }
             })?;
         builder.add_value("module_prefixes", &module_prefixes);
+        builder.add_value(
+            "resolver_configs",
+            &serde_json::to_vec(sdk.resolver_configs.as_ref()).map_err(|source| {
+                FingerprintError::Serialize {
+                    name: "SdkSnapshot.resolver_configs",
+                    source,
+                }
+            })?,
+        );
+        builder.add_value(
+            "system_modules",
+            &serde_json::to_vec(sdk.system_modules.as_ref()).map_err(|source| {
+                FingerprintError::Serialize {
+                    name: "SdkSnapshot.system_modules",
+                    source,
+                }
+            })?,
+        );
+        builder.add_value(
+            "all_module_paths",
+            &serde_json::to_vec(sdk.all_module_paths.as_ref()).map_err(|source| {
+                FingerprintError::Serialize {
+                    name: "SdkSnapshot.all_module_paths",
+                    source,
+                }
+            })?,
+        );
+        builder.add_value(
+            "arkui_declaration_dirs",
+            &serde_json::to_vec(sdk.arkui_declaration_dirs.as_ref()).map_err(|source| {
+                FingerprintError::Serialize {
+                    name: "SdkSnapshot.arkui_declaration_dirs",
+                    source,
+                }
+            })?,
+        );
+        builder.add_value(
+            "fallback_module_roots",
+            &serde_json::to_vec(sdk.fallback_module_roots.as_ref()).map_err(|source| {
+                FingerprintError::Serialize {
+                    name: "SdkSnapshot.fallback_module_roots",
+                    source,
+                }
+            })?,
+        );
         let crossplatform_dependencies =
             serde_json::to_vec(sdk.crossplatform_dependencies.as_ref()).map_err(|source| {
                 FingerprintError::Serialize {

@@ -128,6 +128,7 @@ impl<'a> ModulePackageResolutionPlanner<'a> {
             main: package.package_json.main.clone(),
             types: package.package_json.types.clone(),
             exports: package.package_json.extra.get("exports").cloned(),
+            oh_export_files: package.oh_export_files.clone(),
             module: package
                 .package_json
                 .extra

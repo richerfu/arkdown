@@ -82,12 +82,14 @@ rolldown_error = { git = "https://github.com/ohos-rs/rolldown", rev = "3aac1451a
 napi = { version = "3.9.1", features = [
   "async",
   "napi4",
+  "napi9",
   "tokio_rt",
   "compat-mode",
   "serde-json",
 ] }
 napi-derive = "3.5.6"
 napi-build = "2"
+url = "2"
 
 # Async
 tokio = { version = "1", features = ["full"] }
@@ -107,7 +109,7 @@ crc32fast = "1"
 object = { version = "0.37.3", default-features = false, features = ["elf", "read_core"] }
 
 # Serialization
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml = "0.9"
 json5 = "0.4"

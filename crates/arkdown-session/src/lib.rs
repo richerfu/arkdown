@@ -100,9 +100,9 @@ pub use plan_input::{
 // sdk
 pub use sdk::{
     HvigorSdkComponentMetadata, HvigorSdkDetailsError, HvigorSdkDetailsInventory,
-    HvigorSdkDetailsRequest, HvigorSdkDetailsSnapshot, SdkCrossplatformDependency,
-    SdkEs2abcOptionSnapshot, SdkSystemCapabilityError, SdkSystemCapabilityInventory,
-    SdkSystemCapabilitySelection,
+    HvigorSdkDetailsRequest, HvigorSdkDetailsSnapshot, SdkApiCheckPlugin, SdkApiClassCheckPlugin,
+    SdkCrossplatformDependency, SdkEs2abcOptionSnapshot, SdkSystemCapabilityError,
+    SdkSystemCapabilityInventory, SdkSystemCapabilitySelection,
 };
 
 // profiles

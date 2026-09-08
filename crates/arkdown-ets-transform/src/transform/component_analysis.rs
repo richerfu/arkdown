@@ -8,11 +8,15 @@ use oxc_ast::ast::{
     Argument, ArkUIChild, ArkUIComponentExpression, ArrowFunctionBody, CallExpression, Declaration,
     Decorator, ExportDefaultDeclarationKind, Expression, Function, FunctionBody,
     ImportDeclarationSpecifier, ModuleExportName, Program, PropertyDefinition, Statement,
-    StructElement, StructStatement, TSLiteral, TSType, TSTypeName,
+    StructElement, StructStatement, TSType,
 };
+use oxc_span::Span;
 use rayon::prelude::*;
 
-use super::{ArkuiDecorator, ArkuiDecoratorName, ArkuiDecoratorRules, TransformOptions};
+use super::{
+    ArktsFileTypeFacts, ArkuiDecorator, ArkuiDecoratorName, ArkuiDecoratorRules, BuilderAccessKind,
+    ResolvedTypeIdentity, TransformOptions,
+};
 use crate::source::{CompileArktsSourceType, TransformSourceFile};
 use crate::transform::build_fn::{
     CustomComponentGeneration, CustomComponentInfo, CustomComponentPropertyKind,
@@ -20,10 +24,7 @@ use crate::transform::build_fn::{
 };
 use crate::transform::component_meta::SdkComponentInfo;
 use crate::transform::decorator::ArkuiStateDecorator;
-use crate::transform::legacy_extend::LegacyExtendSource;
-use crate::transform::system_api::{
-    ExportedSystemApiSymbols, SystemApiModuleFacts, SystemApiSymbol,
-};
+use crate::transform::legacy_extend::ArktsExtendSource;
 use crate::transform::viewpu_emit::GeneratedViewpuName;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,10 +86,15 @@ impl ExtendAttributeIndex {
         else {
             return;
         };
-        self.by_component
-            .entry(component)
-            .or_default()
-            .insert(name.name.to_string(), kind);
+        let attributes = self.by_component.entry(component.clone()).or_default();
+        attributes.insert(name.name.to_string(), kind);
+        // `validate_ui_syntax.ts::preprocessExtend` records both the generated
+        // `__Component__attribute` spelling and the original attribute name.
+        // The latter is what chained component syntax uses at the call site.
+        let generated_prefix = format!("__{component}__");
+        if let Some(original_name) = name.name.strip_prefix(&generated_prefix) {
+            attributes.insert(original_name.to_string(), kind);
+        }
     }
 }
 
@@ -1262,16 +1268,6 @@ pub(super) struct StructBuilderParamNames<'a> {
     statement: &'a StructStatement<'a>,
 }
 
-/// Resolves the component properties whose `.builder()` call has
-/// `MutableBuilder` semantics. The upstream implementation asks the TypeScript
-/// checker for the receiver type in
-/// `process_component_build.ts::isMutableBuilder`; component property type
-/// annotations and direct `mutableBuilder(...)` initializers are the
-/// authoritative syntax available to the OXC lowering stage.
-pub(super) struct StructMutableBuilderProperties<'a> {
-    statement: &'a StructStatement<'a>,
-}
-
 /// Collects instance fields that ets-loader treats as immutable attribute
 /// inputs while lowering a reusable component. V1 records every undecorated
 /// property in `regularCollection`; V2 additionally requires an explicit
@@ -1348,55 +1344,6 @@ impl<'a> PreviewComponentNameCollector<'a> {
     }
 }
 
-impl<'a> StructMutableBuilderProperties<'a> {
-    const CLASS: &'static str = "MutableBuilder";
-    const FACTORY: &'static str = "mutableBuilder";
-
-    pub(super) fn new(statement: &'a StructStatement<'a>) -> Self {
-        Self { statement }
-    }
-
-    pub(super) fn collect(&self) -> FxHashSet<String> {
-        self.statement
-            .body
-            .body
-            .iter()
-            .filter_map(|element| {
-                let StructElement::PropertyDefinition(property) = element else {
-                    return None;
-                };
-                Self::is_mutable_builder_property(property)
-                    .then(|| property.key.static_name().map(|name| name.into_owned()))
-                    .flatten()
-            })
-            .collect()
-    }
-
-    fn is_mutable_builder_property(property: &PropertyDefinition<'_>) -> bool {
-        property.type_annotation.as_ref().is_some_and(|annotation| {
-            matches!(
-                &annotation.type_annotation,
-                TSType::TSTypeReference(reference)
-                    if matches!(
-                        &reference.type_name,
-                        TSTypeName::IdentifierReference(identifier)
-                            if identifier.name == Self::CLASS
-                    )
-            )
-        }) || property.value.as_ref().is_some_and(|initializer| {
-            matches!(
-                initializer,
-                Expression::CallExpression(call)
-                    if matches!(
-                        &call.callee,
-                        Expression::Identifier(identifier)
-                            if identifier.name == Self::FACTORY
-                    )
-            )
-        })
-    }
-}
-
 impl<'a> StructRegularAttributeProperties<'a> {
     pub(super) fn new(statement: &'a StructStatement<'a>, component_v2: bool) -> Self {
         Self {
@@ -1470,413 +1417,54 @@ impl<'a> StructBuilderParamNames<'a> {
 }
 
 pub(super) struct SimpleTypeContext {
-    enum_names: FxHashSet<String>,
-    simple_type_aliases: FxHashSet<String>,
-    qualified_simple_type_names: FxHashMap<String, FxHashSet<String>>,
-    authoritative_namespace_imports: FxHashSet<String>,
-    non_simple_import_bindings: FxHashSet<String>,
-    component_metadata: Arc<crate::transform::component_meta::ComponentMetadata>,
+    facts: Option<Arc<ArktsFileTypeFacts>>,
 }
 
 impl SimpleTypeContext {
-    /// Mirrors ets-loader `process_component_member.js`: primitive annotations
-    /// are simple, and `TSTypeReference` is simple when its identifier is in
-    /// `validate_ui_syntax.enumCollection`.
-    ///
-    /// `process_import.js::processImportNode` discovers enums through the
-    /// current file's import/export graph, but the SDK stores their unqualified
-    /// names in a process-wide collection that is cleared only by plugin
-    /// `cleanUp()`. With concurrent Rollup entry loading, unrelated same-named
-    /// declarations can therefore change wrapper selection according to I/O
-    /// scheduling. Resolve the current program's bindings structurally so
-    /// parallel transforms remain deterministic while preserving the SDK's
-    /// local, imported, re-exported, and declaration-file enum semantics.
     pub(super) fn from_program(
-        program: &Program<'_>,
+        _program: &Program<'_>,
         id: &str,
         options: &TransformOptions,
     ) -> Self {
-        let mut enum_names = LocalEnumNamesCollector::new(program).collect();
-        let mut simple_type_aliases = LocalSimpleTypeAliasCollector::new(program).collect();
-        let mut qualified_simple_type_names: FxHashMap<String, FxHashSet<String>> =
-            FxHashMap::default();
-        let mut authoritative_namespace_imports = FxHashSet::default();
-        let mut non_simple_import_bindings = FxHashSet::default();
-        let importer = Path::new(id);
-        let resolver = ImportTargetResolver::new(importer, &options.sources, &options.module_roots);
-        for statement in &program.body {
-            let Statement::ImportDeclaration(import) = statement else {
-                continue;
-            };
-            let Some(specifiers) = &import.specifiers else {
-                continue;
-            };
-            let import_source = import.source.value.as_str();
-            let target = resolver.resolve(import_source);
-            let target_enums = target
-                .as_ref()
-                .map(|target| options.module_exports.enum_names(&target.path))
-                .unwrap_or_default();
-            let target_aliases = target
-                .as_ref()
-                .map(|target| options.module_exports.simple_type_alias_names(&target.path))
-                .unwrap_or_default();
-            for specifier in specifiers {
-                match specifier {
-                    ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
-                        let imported = ComponentModuleExportName::value(&specifier.imported);
-                        let local = specifier.local.name.to_string();
-                        let sdk_enum = options
-                            .component_metadata
-                            .is_sdk_enum_export(import_source, &imported);
-                        if target_enums.contains(&imported) || sdk_enum {
-                            enum_names.insert(specifier.local.name.to_string());
-                        }
-                        if target_aliases.contains(&imported) {
-                            simple_type_aliases.insert(specifier.local.name.to_string());
-                        }
-                        if let Some(names) = options
-                            .component_metadata
-                            .sdk_namespace_enum_exports(import_source, &imported)
-                        {
-                            authoritative_namespace_imports.insert(local.clone());
-                            qualified_simple_type_names
-                                .entry(local.clone())
-                                .or_default()
-                                .extend(names.iter().cloned());
-                        }
-                        if !target_enums.contains(&imported)
-                            && !target_aliases.contains(&imported)
-                            && !sdk_enum
-                            && !authoritative_namespace_imports.contains(&local)
-                        {
-                            non_simple_import_bindings.insert(local);
-                        }
-                    }
-                    ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
-                        let local = specifier.local.name.to_string();
-                        authoritative_namespace_imports.insert(local.clone());
-                        let names = qualified_simple_type_names.entry(local).or_default();
-                        names.extend(target_enums.iter().cloned());
-                        names.extend(target_aliases.iter().cloned());
-                        if let Some(sdk_names) = options
-                            .component_metadata
-                            .sdk_namespace_enum_exports(import_source, "default")
-                        {
-                            names.extend(sdk_names.iter().cloned());
-                        }
-                    }
-                    ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
-                        let local = specifier.local.name.to_string();
-                        if let Some(names) = options
-                            .component_metadata
-                            .sdk_namespace_enum_exports(import_source, "default")
-                        {
-                            authoritative_namespace_imports.insert(local.clone());
-                            qualified_simple_type_names
-                                .entry(local)
-                                .or_default()
-                                .extend(names.iter().cloned());
-                        } else {
-                            non_simple_import_bindings.insert(local);
-                        }
-                    }
-                }
-            }
-        }
-
         Self {
-            enum_names,
-            simple_type_aliases,
-            qualified_simple_type_names,
-            authoritative_namespace_imports,
-            non_simple_import_bindings,
-            component_metadata: Arc::clone(&options.component_metadata),
+            facts: options.type_facts.file_facts(id).cloned().map(Arc::new),
         }
     }
 
-    pub(super) fn is_simple_type_annotation(&self, ty: &TSType<'_>) -> bool {
-        match ty {
-            TSType::TSStringKeyword(_)
-            | TSType::TSNumberKeyword(_)
-            | TSType::TSBooleanKeyword(_) => true,
-            TSType::TSTypeReference(reference) => {
-                self.is_direct_enum_reference_name(&reference.type_name)
-                    || self.is_type_checker_simple_reference_name(&reference.type_name)
-            }
-            // ets-loader getDeclarationType first checks only StringKeyword,
-            // NumberKeyword, BooleanKeyword and enum declarations by syntax.
-            // Every other annotation goes through TypeScript's TypeFlags path.
-            _ => self.is_type_checker_simple(ty),
-        }
-    }
-
-    fn is_type_checker_simple(&self, ty: &TSType<'_>) -> bool {
-        match ty {
-            TSType::TSTypeReference(reference) => {
-                self.is_type_checker_simple_reference_name(&reference.type_name)
-            }
-            TSType::TSUnionType(union) => {
-                let non_nullable = union
-                    .types
-                    .iter()
-                    .filter(|ty| {
-                        !matches!(ty, TSType::TSNullKeyword(_) | TSType::TSUndefinedKeyword(_))
-                    })
-                    .collect::<Vec<_>>();
-                match non_nullable.as_slice() {
-                    // utils.findNonNullType collapses a one-member nullable
-                    // union. getDeclarationType then accepts only EnumLike;
-                    // TypeScript represents `boolean` as two boolean literals,
-                    // so it remains the one primitive exception.
-                    [ty] => {
-                        matches!(ty, TSType::TSBooleanKeyword(_)) || self.is_type_checker_enum(ty)
-                    }
-                    [] => false,
-                    types => {
-                        types.iter().all(|ty| self.is_basic_union_type(ty))
-                            && !TypeScriptUnionNormalization::collapses_to_single_primitive(types)
-                    }
-                }
-            }
-            TSType::TSParenthesizedType(parenthesized) => {
-                self.is_type_checker_simple(&parenthesized.type_annotation)
-            }
-            _ => false,
-        }
-    }
-
-    fn is_basic_union_type(&self, ty: &TSType<'_>) -> bool {
-        matches!(
+    /// Source owner: ets2bundle
+    /// process_component_member.ts::isSimpleType/getDeclarationType.
+    /// Primitive syntax is checked before the TypeScript query there; every
+    /// other shape consumes the immutable native checker identity.
+    pub(super) fn is_simple_type_annotation(
+        &self,
+        ty: &TSType<'_>,
+        property_name_span: Span,
+    ) -> bool {
+        if matches!(
             ty,
-            TSType::TSStringKeyword(_)
-                | TSType::TSNumberKeyword(_)
-                | TSType::TSBooleanKeyword(_)
-                | TSType::TSBigIntKeyword(_)
-        ) || matches!(
-            ty,
-            TSType::TSLiteralType(literal)
-                if matches!(
-                    &literal.literal,
-                    TSLiteral::StringLiteral(_)
-                        | TSLiteral::NumericLiteral(_)
-                        | TSLiteral::BooleanLiteral(_)
-                        | TSLiteral::BigIntLiteral(_)
-                )
-        ) || self.is_type_checker_enum(ty)
-    }
-
-    fn is_type_checker_enum(&self, ty: &TSType<'_>) -> bool {
-        match ty {
-            TSType::TSTypeReference(reference) => {
-                self.is_type_checker_simple_reference_name(&reference.type_name)
-            }
-            TSType::TSParenthesizedType(parenthesized) => {
-                self.is_type_checker_enum(&parenthesized.type_annotation)
-            }
-            _ => false,
+            TSType::TSStringKeyword(_) | TSType::TSNumberKeyword(_) | TSType::TSBooleanKeyword(_)
+        ) {
+            return true;
         }
+        self.facts
+            .as_ref()
+            .and_then(|facts| facts.property(property_name_span))
+            .and_then(|property| property.declared_type.as_ref())
+            .is_some_and(ResolvedTypeIdentity::is_simple_declaration_type)
     }
 
-    fn is_direct_enum_reference_name(&self, type_name: &TSTypeName<'_>) -> bool {
-        let name = match type_name {
-            TSTypeName::IdentifierReference(identifier) => identifier.name.as_str(),
-            // SDK getDeclarationType requires `ts.isIdentifier(typeName)`.
-            TSTypeName::QualifiedName(_) | TSTypeName::ThisExpression(_) => return false,
-        };
-        self.enum_names.contains(name)
-            || (!self.non_simple_import_bindings.contains(name)
-                && self.component_metadata.is_known_enum(name))
+    pub(super) fn builder_access_kind(
+        &self,
+        span: Span,
+        api_version: u32,
+    ) -> Option<BuilderAccessKind> {
+        self.facts
+            .as_ref()
+            .and_then(|facts| facts.builder_access_kind(span, api_version))
     }
 
-    fn is_type_checker_simple_reference_name(&self, type_name: &TSTypeName<'_>) -> bool {
-        match type_name {
-            TSTypeName::IdentifierReference(identifier) => {
-                let name = identifier.name.as_str();
-                self.enum_names.contains(name)
-                    || self.simple_type_aliases.contains(name)
-                    || (!self.non_simple_import_bindings.contains(name)
-                        && self.component_metadata.is_known_enum(name))
-            }
-            TSTypeName::QualifiedName(qualified) => {
-                let right = qualified.right.name.as_str();
-                match &qualified.left {
-                    TSTypeName::IdentifierReference(namespace) => {
-                        let namespace = namespace.name.as_str();
-                        if self.authoritative_namespace_imports.contains(namespace) {
-                            return self
-                                .qualified_simple_type_names
-                                .get(namespace)
-                                .is_some_and(|names| names.contains(right));
-                        }
-                        self.qualified_simple_type_names
-                            .get(namespace)
-                            .is_some_and(|names| names.contains(right))
-                            || self.component_metadata.is_known_enum(right)
-                    }
-                    TSTypeName::QualifiedName(_) | TSTypeName::ThisExpression(_) => false,
-                }
-            }
-            TSTypeName::ThisExpression(_) => false,
-        }
-    }
-}
-
-struct LocalEnumNamesCollector<'a> {
-    program: &'a Program<'a>,
-}
-
-impl<'a> LocalEnumNamesCollector<'a> {
-    fn new(program: &'a Program<'a>) -> Self {
-        Self { program }
-    }
-
-    fn collect(&self) -> FxHashSet<String> {
-        let mut enums = FxHashSet::default();
-        for statement in &self.program.body {
-            match statement {
-                Statement::TSEnumDeclaration(declaration) => {
-                    enums.insert(declaration.id.name.to_string());
-                }
-                Statement::ExportDeclaration(export) => {
-                    if let Declaration::TSEnumDeclaration(declaration) = &export.declaration {
-                        enums.insert(declaration.id.name.to_string());
-                    }
-                }
-                _ => {}
-            }
-        }
-        enums
-    }
-}
-
-struct LocalSimpleTypeAliasCollector<'a> {
-    program: &'a Program<'a>,
-}
-
-impl<'a> LocalSimpleTypeAliasCollector<'a> {
-    fn new(program: &'a Program<'a>) -> Self {
-        Self { program }
-    }
-
-    fn collect(&self) -> FxHashSet<String> {
-        let mut aliases = FxHashSet::default();
-        for statement in &self.program.body {
-            let declaration = match statement {
-                Statement::TSTypeAliasDeclaration(declaration) => Some(declaration.as_ref()),
-                Statement::ExportDeclaration(export) => match &export.declaration {
-                    Declaration::TSTypeAliasDeclaration(declaration) => Some(declaration.as_ref()),
-                    _ => None,
-                },
-                _ => None,
-            };
-            let Some(declaration) = declaration else {
-                continue;
-            };
-            if BasicTypeAliasRules::is_simple(&declaration.type_annotation) {
-                aliases.insert(declaration.id.name.to_string());
-            }
-        }
-        aliases
-    }
-}
-
-struct BasicTypeAliasRules;
-
-impl BasicTypeAliasRules {
-    /// Structural subset of TypeScript `TypeFlags` used by SDK
-    /// `getDeclarationType`: aliases resolving to a multi-member union of
-    /// string/number/boolean/bigint primitives or literals are simple.
-    fn is_simple(ty: &TSType<'_>) -> bool {
-        let TSType::TSUnionType(union) = ty else {
-            return false;
-        };
-        let non_nullable = union
-            .types
-            .iter()
-            .filter(|ty| !matches!(ty, TSType::TSNullKeyword(_) | TSType::TSUndefinedKeyword(_)))
-            .collect::<Vec<_>>();
-        match non_nullable.as_slice() {
-            [ty] => matches!(ty, TSType::TSBooleanKeyword(_)),
-            types if 1 < types.len() => {
-                types.iter().all(|ty| Self::is_basic(ty))
-                    && !TypeScriptUnionNormalization::collapses_to_single_primitive(types)
-            }
-            _ => false,
-        }
-    }
-
-    fn is_basic(ty: &TSType<'_>) -> bool {
-        matches!(
-            ty,
-            TSType::TSStringKeyword(_)
-                | TSType::TSNumberKeyword(_)
-                | TSType::TSBooleanKeyword(_)
-                | TSType::TSBigIntKeyword(_)
-        ) || matches!(
-            ty,
-            TSType::TSLiteralType(literal)
-                if matches!(
-                    &literal.literal,
-                    TSLiteral::StringLiteral(_)
-                        | TSLiteral::NumericLiteral(_)
-                        | TSLiteral::BooleanLiteral(_)
-                        | TSLiteral::BigIntLiteral(_)
-                )
-        )
-    }
-}
-
-struct TypeScriptUnionNormalization;
-
-impl TypeScriptUnionNormalization {
-    /// TypeChecker.getTypeFromTypeNode normalizes a union before
-    /// getDeclarationType inspects `type.types`. A broad primitive absorbs
-    /// literals of the same family (`'toast' | string` becomes `string`) and
-    /// therefore no longer has the multi-member union shape accepted by the
-    /// SDK. Boolean is excluded because TypeScript represents `boolean`
-    /// itself as the union of its two literal types.
-    fn collapses_to_single_primitive(types: &[&TSType<'_>]) -> bool {
-        Self::primitive_absorbs_all_literals(types, PrimitiveTypeFamily::String)
-            || Self::primitive_absorbs_all_literals(types, PrimitiveTypeFamily::Number)
-            || Self::primitive_absorbs_all_literals(types, PrimitiveTypeFamily::BigInt)
-    }
-
-    fn primitive_absorbs_all_literals(types: &[&TSType<'_>], family: PrimitiveTypeFamily) -> bool {
-        types.iter().any(|ty| family.is_keyword(ty))
-            && types
-                .iter()
-                .all(|ty| family.is_keyword(ty) || family.is_literal(ty))
-    }
-}
-
-#[derive(Clone, Copy)]
-enum PrimitiveTypeFamily {
-    String,
-    Number,
-    BigInt,
-}
-
-impl PrimitiveTypeFamily {
-    fn is_keyword(self, ty: &TSType<'_>) -> bool {
-        matches!(
-            (self, ty),
-            (Self::String, TSType::TSStringKeyword(_))
-                | (Self::Number, TSType::TSNumberKeyword(_))
-                | (Self::BigInt, TSType::TSBigIntKeyword(_))
-        )
-    }
-
-    fn is_literal(self, ty: &TSType<'_>) -> bool {
-        let TSType::TSLiteralType(literal) = ty else {
-            return false;
-        };
-        matches!(
-            (self, &literal.literal),
-            (Self::String, TSLiteral::StringLiteral(_))
-                | (Self::Number, TSLiteral::NumericLiteral(_))
-                | (Self::BigInt, TSLiteral::BigIntLiteral(_))
-        )
+    pub(super) fn file_facts(&self) -> Option<Arc<ArktsFileTypeFacts>> {
+        self.facts.as_ref().map(Arc::clone)
     }
 }
 
@@ -1977,20 +1565,6 @@ impl ModuleExportIndex {
         }
     }
 
-    fn enum_names(&self, path: &Path) -> FxHashSet<String> {
-        self.entries
-            .get(path)
-            .map(|entry| entry.enums.clone())
-            .unwrap_or_default()
-    }
-
-    fn simple_type_alias_names(&self, path: &Path) -> FxHashSet<String> {
-        self.entries
-            .get(path)
-            .map(|entry| entry.simple_type_aliases.clone())
-            .unwrap_or_default()
-    }
-
     fn builder_function_names(&self, path: &Path) -> FxHashSet<String> {
         self.entries
             .get(path)
@@ -2003,16 +1577,6 @@ impl ModuleExportIndex {
             .get(path)
             .map(|entry| entry.components.clone())
             .unwrap_or_default()
-    }
-
-    pub(super) fn system_api_exports(&self, path: &Path) -> Option<&ExportedSystemApiSymbols> {
-        self.entries.get(path).map(|entry| &entry.system_apis)
-    }
-
-    pub(crate) fn has_system_api_exports(&self) -> bool {
-        self.entries
-            .values()
-            .any(|entry| !entry.system_apis.is_empty())
     }
 
     pub(crate) fn imported_class_observations(
@@ -2131,13 +1695,10 @@ impl ModuleExportIndex {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct ModuleExportEntry {
-    enums: FxHashSet<String>,
-    simple_type_aliases: FxHashSet<String>,
     builders: FxHashSet<String>,
     components: ExportedComponentNames,
     classes: ExportedClassObservations,
     entities: ExportedInsightIntentEntities,
-    system_apis: ExportedSystemApiSymbols,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -2238,14 +1799,10 @@ impl<'a> ModuleExportFactInventoryBuilder<'a> {
 #[derive(Clone, Debug, Default)]
 struct ModuleExportFacts {
     direct: ModuleExportEntry,
-    local_enums: FxHashSet<String>,
-    local_simple_type_aliases: FxHashSet<String>,
     local_builders: FxHashSet<String>,
     local_components: CustomComponentUpdateProps,
     local_classes: FxHashMap<String, ClassObservation>,
     local_entities: FxHashMap<String, String>,
-    local_system_apis: FxHashMap<Box<str>, SystemApiSymbol>,
-    direct_system_api_bindings: Vec<(Box<str>, Box<str>)>,
     imports: Vec<ModuleImportFact>,
     exports: Vec<ModuleExportFact>,
 }
@@ -2261,7 +1818,7 @@ impl ModuleExportFacts {
         let allocator = Allocator::default();
         let source_type =
             CompileArktsSourceType::from_path_with_version(&source.path, arkts_language_version);
-        let parser_source = LegacyExtendSource::new(&source.source, arkts_language_version);
+        let parser_source = ArktsExtendSource::new(&source.source, arkts_language_version);
         let parsed = component_metadata.parse_ets(&allocator, parser_source.as_str(), source_type);
         if !parsed.diagnostics.is_empty() {
             return Self::default();
@@ -2275,23 +1832,7 @@ impl ModuleExportFacts {
         sources: &crate::source::TransformSourceSnapshot,
         module_roots: &[(String, PathBuf)],
     ) -> Self {
-        let system_api = SystemApiModuleFacts::from_program(
-            path,
-            program,
-            sources.is_sdk_declaration(path),
-            module_roots.iter().any(|(_, root)| path.starts_with(root)),
-        );
-        let mut facts = Self {
-            local_enums: LocalEnumNamesCollector::new(program).collect(),
-            local_simple_type_aliases: LocalSimpleTypeAliasCollector::new(program).collect(),
-            local_system_apis: system_api.local,
-            direct_system_api_bindings: system_api.direct_bindings,
-            direct: ModuleExportEntry {
-                system_apis: system_api.direct,
-                ..ModuleExportEntry::default()
-            },
-            ..Self::default()
-        };
+        let mut facts = Self::default();
         for statement in &program.body {
             match statement {
                 Statement::ClassDeclaration(class) => {
@@ -2342,20 +1883,6 @@ impl ModuleExportFacts {
                                     .named
                                     .insert(name.name.to_string(), name.name.to_string());
                             }
-                        }
-                    }
-                    if let Declaration::TSEnumDeclaration(declaration) = &export.declaration {
-                        facts.direct.enums.insert(declaration.id.name.to_string());
-                    }
-                    if let Declaration::TSTypeAliasDeclaration(declaration) = &export.declaration {
-                        if facts
-                            .local_simple_type_aliases
-                            .contains(declaration.id.name.as_str())
-                        {
-                            facts
-                                .direct
-                                .simple_type_aliases
-                                .insert(declaration.id.name.to_string());
                         }
                     }
                     if let Declaration::FunctionDeclaration(function) = &export.declaration {
@@ -2479,13 +2006,8 @@ impl ModuleExportFacts {
                             ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
                                 fact.default_components
                                     .push(specifier.local.name.to_string());
-                                fact.default_system_apis
-                                    .push(specifier.local.name.to_string());
                             }
-                            ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
-                                fact.namespace_system_apis
-                                    .push(specifier.local.name.to_string());
-                            }
+                            ImportDeclarationSpecifier::ImportNamespaceSpecifier(_) => {}
                         }
                     }
                     facts.imports.push(fact);
@@ -2580,8 +2102,6 @@ struct ModuleImportFact {
     target: PathBuf,
     named: Vec<ModuleImportBindingFact>,
     default_components: Vec<String>,
-    default_system_apis: Vec<String>,
-    namespace_system_apis: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -2650,20 +2170,14 @@ impl<'a> ModuleExportClosureAnalyzer<'a> {
 
         let facts = self.facts.get(path).cloned().unwrap_or_default();
         let mut entry = facts.direct.clone();
-        let mut local_enums = facts.local_enums.clone();
-        let local_simple_type_aliases = facts.local_simple_type_aliases.clone();
         let mut local_builders = facts.local_builders.clone();
         let mut local_components = facts.local_components.clone();
         let mut local_classes = facts.local_classes.clone();
         let mut local_entities = facts.local_entities.clone();
-        let mut local_system_apis = facts.local_system_apis.clone();
 
         for import in &facts.imports {
             let target_entry = self.export_entry(&import.target);
             for binding in &import.named {
-                if target_entry.enums.contains(&binding.imported) {
-                    local_enums.insert(binding.local.clone());
-                }
                 if target_entry.builders.contains(&binding.imported) {
                     local_builders.insert(binding.local.clone());
                 }
@@ -2682,9 +2196,6 @@ impl<'a> ModuleExportClosureAnalyzer<'a> {
                 }
                 if let Some(class_name) = target_entry.entities.get(&binding.imported) {
                     local_entities.insert(binding.local.clone(), class_name.to_string());
-                }
-                if let Some(symbol) = target_entry.system_apis.get(&binding.imported) {
-                    local_system_apis.insert(binding.local.clone().into(), symbol.clone());
                 }
             }
             for local in &import.default_components {
@@ -2711,24 +2222,6 @@ impl<'a> ModuleExportClosureAnalyzer<'a> {
                     local_entities.insert(local.clone(), class_name.clone());
                 }
             }
-            for local in &import.default_system_apis {
-                if let Some(symbol) = target_entry.system_apis.default.as_ref() {
-                    local_system_apis.insert(local.clone().into(), symbol.clone());
-                }
-            }
-            for local in &import.namespace_system_apis {
-                local_system_apis
-                    .insert(local.clone().into(), target_entry.system_apis.namespace());
-            }
-        }
-
-        let system_api_type_table =
-            SystemApiModuleFacts::resolve_local_references(&mut local_system_apis);
-        entry.system_apis.bind_type_table(&system_api_type_table);
-        for (local, exported) in &facts.direct_system_api_bindings {
-            if let Some(symbol) = local_system_apis.get(local) {
-                entry.system_apis.insert(exported.clone(), symbol.clone());
-            }
         }
 
         for export in &facts.exports {
@@ -2736,12 +2229,6 @@ impl<'a> ModuleExportClosureAnalyzer<'a> {
                 ModuleExportFact::NamedFrom { target, bindings } => {
                     let target_entry = self.export_entry(target);
                     for binding in bindings {
-                        if target_entry.enums.contains(&binding.local) {
-                            entry.enums.insert(binding.exported.clone());
-                        }
-                        if target_entry.simple_type_aliases.contains(&binding.local) {
-                            entry.simple_type_aliases.insert(binding.exported.clone());
-                        }
                         if target_entry.builders.contains(&binding.local) {
                             entry.builders.insert(binding.exported.clone());
                         }
@@ -2764,11 +2251,6 @@ impl<'a> ModuleExportClosureAnalyzer<'a> {
                                     .named
                                     .insert(binding.exported.clone(), class_name.to_string());
                             }
-                        }
-                        if let Some(symbol) = target_entry.system_apis.get(&binding.local) {
-                            entry
-                                .system_apis
-                                .insert(binding.exported.clone(), symbol.clone());
                         }
                         let props = if binding.local == ComponentModuleExportName::DEFAULT
                             && target_entry.components.has_default
@@ -2805,12 +2287,6 @@ impl<'a> ModuleExportClosureAnalyzer<'a> {
                                 .named
                                 .insert(binding.exported.clone(), props.clone());
                         }
-                        if local_simple_type_aliases.contains(&binding.local) {
-                            entry.simple_type_aliases.insert(binding.exported.clone());
-                        }
-                        if local_enums.contains(&binding.local) {
-                            entry.enums.insert(binding.exported.clone());
-                        }
                         if local_builders.contains(&binding.local) {
                             entry.builders.insert(binding.exported.clone());
                         }
@@ -2834,11 +2310,6 @@ impl<'a> ModuleExportClosureAnalyzer<'a> {
                                     .insert(binding.exported.clone(), class_name.clone());
                             }
                         }
-                        if let Some(symbol) = local_system_apis.get(binding.local.as_str()) {
-                            entry
-                                .system_apis
-                                .insert(binding.exported.clone(), symbol.clone());
-                        }
                     }
                 }
                 ModuleExportFact::DefaultLocal { local } => {
@@ -2857,21 +2328,13 @@ impl<'a> ModuleExportClosureAnalyzer<'a> {
                     if let Some(class_name) = local_entities.get(local) {
                         entry.entities.default = Some(class_name.clone());
                     }
-                    if let Some(symbol) = local_system_apis.get(local.as_str()) {
-                        entry.system_apis.insert("default", symbol.clone());
-                    }
                 }
                 ModuleExportFact::AllFrom { target } => {
                     let target_entry = self.export_entry(target);
-                    entry.enums.extend(target_entry.enums);
-                    entry
-                        .simple_type_aliases
-                        .extend(target_entry.simple_type_aliases);
                     entry.builders.extend(target_entry.builders);
                     entry.components.extend(target_entry.components);
                     entry.classes.extend_named(&target_entry.classes);
                     entry.entities.named.extend(target_entry.entities.named);
-                    entry.system_apis.extend_named(&target_entry.system_apis);
                 }
                 ModuleExportFact::NamespaceFrom { target, exported } => {
                     let target_entry = self.export_entry(target);

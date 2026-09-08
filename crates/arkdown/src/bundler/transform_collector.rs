@@ -33,7 +33,7 @@ pub(crate) struct HvigorModuleTransformRecord {
     pub(crate) module_id: String,
     pub(crate) module_source_code: Option<Arc<str>>,
     pub(crate) source_map: Option<Arc<str>>,
-    pub(crate) emits_javascript: bool,
+    pub(crate) module_source_emits_javascript: bool,
     pub(crate) is_shared_module: bool,
     pub(crate) insight_intent: InsightIntentSourceMetadata,
     pub(crate) crossplatform_collection: CrossplatformSourceCollection,
@@ -45,7 +45,7 @@ impl HvigorModuleTransformStore {
             module_id,
             module_source_code,
             source_map,
-            emits_javascript,
+            module_source_emits_javascript,
             is_shared_module,
             insight_intent,
             crossplatform_collection,
@@ -57,7 +57,7 @@ impl HvigorModuleTransformStore {
         if let Some(source_map) = source_map {
             self.source_maps.insert(module_id.clone(), source_map);
         }
-        if emits_javascript {
+        if module_source_emits_javascript {
             self.javascript_module_ids.insert(module_id.clone(), ());
         }
         if is_shared_module {
@@ -375,7 +375,7 @@ impl Plugin for HvigorModuleTransformCollector {
                     module_id,
                     module_source_code: metadata.module_source_code,
                     source_map,
-                    emits_javascript: metadata.emits_javascript,
+                    module_source_emits_javascript: metadata.module_source_emits_javascript,
                     is_shared_module: metadata.is_shared_module,
                     insight_intent: metadata.insight_intent,
                     crossplatform_collection: metadata.crossplatform_collection,
@@ -385,7 +385,7 @@ impl Plugin for HvigorModuleTransformCollector {
                     module_id,
                     module_source_code: None,
                     source_map: Some(source_map),
-                    emits_javascript: true,
+                    module_source_emits_javascript: true,
                     is_shared_module: false,
                     insight_intent: InsightIntentSourceMetadata::default(),
                     crossplatform_collection: CrossplatformSourceCollection::default(),

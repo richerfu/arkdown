@@ -14,6 +14,16 @@ const enabled = process.env.ARKDOWN_NATIVE_PLUGIN_E2E === '1'
 
 function prepareCompilePluginProject(project) {
   fs.cpSync(path.join(workspaceRoot, 'tests', 'fixtures', 'minimal-hap'), project, { recursive: true })
+  const buildProfile = path.join(project, 'entry', 'build-profile.json5')
+  fs.writeFileSync(
+    buildProfile,
+    fs
+      .readFileSync(buildProfile, 'utf8')
+      .replace(
+        '"buildOption": {',
+        '"buildOption": {\n    "arkOptions": { "tscConfig": { "targetESVersion": "ES2021", "maxFlowDepth": 4096 }, "bundle": { "bundledDeclare": true } },',
+      ),
+  )
   const compileRoot = path.join(project, 'entry', 'compile-plugins')
   fs.mkdirSync(compileRoot, { recursive: true })
   fs.copyFileSync(
@@ -100,6 +110,9 @@ test('TypeScript compile plugin executes its complete source-module lifecycle', 
     dependencyAliasMapIsMap: true,
     permissionRequestCount: 0,
     permissionDefineCount: 0,
+    targetESVersion: 'ES2021',
+    maxFlowDepth: 4096,
+    bundledDeclare: true,
   })
   assert.deepEqual(firstTrace.depInfo, { enableIncre: false, changedDeps: [] })
   assert.equal(path.isAbsolute(firstTrace.projectConfig.cachePath), true)
@@ -132,6 +145,16 @@ test('TypeScript compile plugin executes its complete source-module lifecycle', 
     },
   )
   assert.equal(child.status, 0, `${child.stdout}\n${child.stderr}`)
+  assert.doesNotMatch(
+    child.stderr,
+    /The 'UIAbility' API is supported since SDK version 11/,
+    `the HarmonyOS SDK callback must accept API 11 for 5.0.5(17):\n${child.stderr}`,
+  )
+  assert.match(
+    child.stderr,
+    /The 'fontWeight' API is supported since SDK version 20/,
+    `the HarmonyOS SDK callback must reject API 20 for 5.0.5(17):\n${child.stderr}`,
+  )
   const childTrace = JSON.parse(fs.readFileSync(tracePath, 'utf8'))
   assert.equal(childTrace.shareCacheBuildCount, 3)
 })

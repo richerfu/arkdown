@@ -201,6 +201,12 @@ impl BuildCoordinator {
         target: &EffectiveTargetConfig,
         module_layout: &ModuleBuildLayout<'_>,
     ) -> Result<Vec<ModulePackInfoPlan>> {
+        // Current hvigor `TestCA -> GenerateUnitTestResultCA ->
+        // ArkTsUnitTestCA` never reaches `MakePackInfoCA`. Local test output is
+        // the UnitTestArkTS assets tree, not a package graph.
+        if matches!(config.output_target, OutputTarget::Test) {
+            return Ok(Vec::new());
+        }
         let module_context = session.module_context(&module.name).ok_or_else(|| {
             anyhow::anyhow!("missing build session module context for {}", module.name)
         })?;

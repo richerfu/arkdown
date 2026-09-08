@@ -110,7 +110,12 @@ impl GeneratedViewpuName {
     }
 
     pub(crate) fn extend_function(component: &str, name: &str) -> String {
-        GeneratedViewpuIdentifier::from_parts(["__", component, "__", name])
+        let prefix = GeneratedViewpuIdentifier::from_parts(["__", component, "__"]);
+        if name.starts_with(&prefix) {
+            name.to_string()
+        } else {
+            GeneratedViewpuIdentifier::from_parts([prefix.as_str(), name])
+        }
     }
 
     pub(crate) fn params_interface(component: &str) -> String {
@@ -315,41 +320,19 @@ impl ViewpuAstEmitter {
     }
 }
 
-pub(crate) enum ParamsInterfaceFieldType<'a> {
-    Annotation(&'a TSTypeAnnotation<'a>),
-    Unknown,
-}
-
 pub(crate) struct ParamsInterfaceField<'a> {
     name: Cow<'a, str>,
     optional: bool,
-    type_annotation: Option<ParamsInterfaceFieldType<'a>>,
+    type_annotation: Option<&'a TSTypeAnnotation<'a>>,
     source_span: Span,
     name_span: Span,
 }
 
 impl<'a> ParamsInterfaceField<'a> {
-    pub(crate) fn new<T>(
-        name: T,
-        optional: bool,
-        type_annotation: Option<ParamsInterfaceFieldType<'a>>,
-    ) -> Self
-    where
-        T: Into<Cow<'a, str>>,
-    {
-        Self {
-            name: name.into(),
-            optional,
-            type_annotation,
-            source_span: SPAN,
-            name_span: SPAN,
-        }
-    }
-
     pub(crate) fn with_source<T>(
         name: T,
         optional: bool,
-        type_annotation: Option<ParamsInterfaceFieldType<'a>>,
+        type_annotation: Option<&'a TSTypeAnnotation<'a>>,
         source_span: Span,
         name_span: Span,
     ) -> Self
@@ -454,18 +437,13 @@ impl<'a> ParamsInterfaceAstEmitter<'a> {
 
     fn type_annotation<'b>(
         &self,
-        annotation: &ParamsInterfaceFieldType<'_>,
+        annotation: &&TSTypeAnnotation<'_>,
         allocator: &'b Allocator,
     ) -> oxc_allocator::Box<'b, TSTypeAnnotation<'b>> {
-        match annotation {
-            ParamsInterfaceFieldType::Annotation(annotation) => ArenaBox::new_in(
-                (**annotation).clone_in(allocator),
-                &AstBuilder::new(allocator),
-            ),
-            ParamsInterfaceFieldType::Unknown => {
-                ViewpuAstBuilder::new(allocator).unknown_type_annotation()
-            }
-        }
+        ArenaBox::new_in(
+            (**annotation).clone_in(allocator),
+            &AstBuilder::new(allocator),
+        )
     }
 }
 

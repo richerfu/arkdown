@@ -54,8 +54,10 @@ pub struct ResourceConfigInput<'a> {
 /// SDK-specific package handoff for the aggregated source map.
 ///
 /// HAP/HSP and source HAR stages materialize `intermediates/source_map`, while
-/// current ByteCode HAR packaging reads the compiler-owned map directly and
-/// removes that stale intermediate when a project switches artifact kind.
+/// current ByteCode HAR packaging reads the compiler-owned map directly.
+/// Local `test` has no package graph and writes its map straight into the
+/// `UnitTestArkTS` assets output. Suppressed modes remove a stale package
+/// intermediate when the selected build kind changes.
 pub enum SourceMapPackageHandoff<'a> {
     Materialize(&'a Path),
     Suppress(&'a Path),
@@ -183,14 +185,13 @@ impl IntermediateArtifactWriter {
 
     pub fn write_router_map_intermediates(
         &self,
-        module: &ModuleConfig,
+        module_layout: &ModuleBuildLayout<'_>,
         loader_json: &arkdown_profile::LoaderJson,
         config: &ArkdownConfig,
         res_out: &Path,
     ) -> Result<()> {
         if loader_json.router_map.is_empty() {
-            return self
-                .write_empty_router_map_intermediates(&module.src_path, &config.product.name);
+            return self.write_empty_router_map_intermediates(module_layout);
         }
 
         let loader_router_map = serde_json::json!({
@@ -218,8 +219,7 @@ impl IntermediateArtifactWriter {
                 })
                 .collect::<Vec<_>>()
         });
-        let module_layout = ModuleBuildLayout::for_product(&module.src_path, &config.product.name);
-        self.write_router_map_task_outputs(&module_layout, &loader_router_map, &temp_router_map)?;
+        self.write_router_map_task_outputs(module_layout, &loader_router_map, &temp_router_map)?;
         let resource_layout = ResourceOutputLayout::new(res_out);
         self.write_bytes(
             &resource_layout.profile_router_map(),
@@ -233,15 +233,10 @@ impl IntermediateArtifactWriter {
     /// resource profile remains absent because there is no route to advertise.
     pub fn write_empty_router_map_intermediates(
         &self,
-        module_root: &Path,
-        product_name: &str,
+        module_layout: &ModuleBuildLayout<'_>,
     ) -> Result<()> {
         let empty_router_map = serde_json::json!({ "routerMap": [] });
-        self.write_router_map_task_outputs(
-            &ModuleBuildLayout::for_product(module_root, product_name),
-            &empty_router_map,
-            &empty_router_map,
-        )
+        self.write_router_map_task_outputs(module_layout, &empty_router_map, &empty_router_map)
     }
 
     fn write_router_map_task_outputs(
@@ -1167,6 +1162,11 @@ impl IntermediateArtifactWriter {
     /// packaging. The task predicts the output name from target configuration;
     /// it does not inspect a package that has already been produced.
     pub fn write_package_metadata(&self, input: PackageMetadataInput<'_>) -> Result<()> {
+        // Current hvigor's local `test` graph does not depend on
+        // `GenerateMetadataCA`; metadata belongs to HAP/HSP packaging only.
+        if matches!(input.output_target, OutputTarget::Test) {
+            return Ok(());
+        }
         if matches!(input.module_type, OhosModuleType::Har) && input.target_name != "ohosTest" {
             return Ok(());
         }

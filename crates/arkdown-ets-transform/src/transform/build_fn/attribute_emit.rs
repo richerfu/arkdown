@@ -538,14 +538,8 @@ impl<'a> RegularAttributeExpression<'a> {
             | Expression::ArrowFunctionExpression(_) => true,
             Expression::StaticMemberExpression(member) => {
                 self.matches_regular_property_access(member)
-                    || matches!(
-                        &member.object,
-                        Expression::Identifier(identifier)
-                            if self
-                                .context
-                                .component_metadata
-                                .is_known_enum(identifier.name.as_str())
-                    )
+                    || matches!(&member.object, Expression::Identifier(_))
+                        && self.context.is_enum_member_access(member.span)
             }
             Expression::ParenthesizedExpression(parenthesized) => {
                 self.matches_expression(&parenthesized.expression)
@@ -614,16 +608,19 @@ impl ArkuiCallName {
         Some(member.property.name.to_string())
     }
 
-    pub(super) fn is_builder_dispatch_call(
-        call: &CallExpression<'_>,
+    pub(super) fn builder_dispatch_member<'a>(
+        call: &'a CallExpression<'a>,
         context: &BuildContext,
-    ) -> bool {
-        matches!(
-            &call.callee,
-            Expression::StaticMemberExpression(member)
-                if member.property.name.as_str()
-                    == context.runtime_names().builder_property.as_str()
-        )
+    ) -> Option<(&'a StaticMemberExpression<'a>, BuilderAccessKind)> {
+        let Expression::StaticMemberExpression(member) = &call.callee else {
+            return None;
+        };
+        if member.property.name.as_str() != context.runtime_names().builder_property.as_str() {
+            return None;
+        }
+        context
+            .builder_access_kind(member.span)
+            .map(|kind| (member.as_ref(), kind))
     }
 }
 

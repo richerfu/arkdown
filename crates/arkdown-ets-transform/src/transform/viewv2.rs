@@ -27,7 +27,7 @@ use crate::transform::component::{
     GlobalReusePoolPropertyEmitter,
 };
 use crate::transform::component_analysis::{
-    ExtendAttributeIndex, StructMutableBuilderProperties, StructRegularAttributeProperties,
+    ExtendAttributeIndex, SimpleTypeContext, StructRegularAttributeProperties,
 };
 use crate::transform::component_meta::ArkuiRuntimeNames;
 use crate::transform::component_meta::ComponentMetadata;
@@ -184,6 +184,8 @@ pub(super) struct ComponentV2Lowerer<'a, 'b> {
     global_reuse_pool: Option<GlobalReusePoolConfig<'a>>,
     runtime_options: ComponentRuntimeOptions<'a>,
     has_local_builder_in_file: bool,
+    simple_type_context: &'a SimpleTypeContext,
+    api_version: u32,
 }
 
 impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
@@ -208,6 +210,8 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
         global_reuse_pool: Option<GlobalReusePoolConfig<'a>>,
         runtime_options: ComponentRuntimeOptions<'a>,
         has_local_builder_in_file: bool,
+        simple_type_context: &'a SimpleTypeContext,
+        api_version: u32,
     ) -> Self {
         Self {
             stmt,
@@ -229,14 +233,14 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
             global_reuse_pool,
             runtime_options,
             has_local_builder_in_file,
+            simple_type_context,
+            api_version,
         }
     }
 
     pub(super) fn lower(&self) -> Result<OxcVec<'b, Statement<'b>>, ComponentV2Error> {
         let name = self.stmt.id.name.as_str();
         let raw_object_fields = FxHashSet::default();
-        let mutable_builder_properties =
-            Arc::new(StructMutableBuilderProperties::new(self.stmt).collect());
         let regular_attribute_properties =
             Arc::new(StructRegularAttributeProperties::new(self.stmt, true).collect());
         let mut visible_builder_methods = self.visible_builder_methods();
@@ -309,7 +313,7 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
                     )
                     .with_xcomponent_module_identity(self.bundle_name, self.module_name)
                     .with_shared_extend_attributes(Arc::clone(&self.extend_attributes))
-                    .with_shared_mutable_builder_properties(Arc::clone(&mutable_builder_properties))
+                    .with_type_facts(self.simple_type_context.file_facts(), self.api_version)
                     .with_shared_regular_attribute_properties(Arc::clone(
                         &regular_attribute_properties,
                     ))
@@ -369,7 +373,7 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
                     }
                     .with_xcomponent_module_identity(self.bundle_name, self.module_name)
                     .with_shared_extend_attributes(Arc::clone(&self.extend_attributes))
-                    .with_shared_mutable_builder_properties(Arc::clone(&mutable_builder_properties))
+                    .with_type_facts(self.simple_type_context.file_facts(), self.api_version)
                     .with_shared_regular_attribute_properties(Arc::clone(
                         &regular_attribute_properties,
                     ))
@@ -774,27 +778,13 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
             }
             Expression::StaticMemberExpression(member) => {
                 visible_builder_methods.contains(member.property.name.as_str())
-                    || self.is_wrapped_builder_property_access(initializer)
+                    || self
+                        .simple_type_context
+                        .builder_access_kind(member.span, self.api_version)
+                        .is_some()
             }
             _ => false,
         }
-    }
-
-    fn is_wrapped_builder_property_access(&self, initializer: &Expression<'_>) -> bool {
-        let Expression::StaticMemberExpression(member) = initializer else {
-            return false;
-        };
-        if member.property.name != "builder" {
-            return false;
-        }
-        let Expression::CallExpression(call) = &member.object else {
-            return false;
-        };
-        matches!(
-            &call.callee,
-            Expression::Identifier(identifier)
-                if matches!(identifier.name.as_str(), "wrapBuilder" | "mutableBuilder")
-        )
     }
 
     fn validate_lifecycle_method(

@@ -110,6 +110,9 @@ pub struct PackageManifestSnapshot {
     pub main: Option<String>,
     pub types: Option<String>,
     pub exports: Option<serde_json::Value>,
+    /// Materialized `oh-exports` file set. `None` means the field was absent;
+    /// `Some([])` intentionally denies every non-exported materialized path.
+    pub oh_export_files: Option<Arc<[PathBuf]>>,
     pub module: Option<String>,
     pub jsnext_main: Option<String>,
     pub byte_code_har: bool,
@@ -186,6 +189,7 @@ impl From<&crate::oh_modules::OhPackage> for PackageManifestSnapshot {
             main: package.main.clone(),
             types: package.types.clone(),
             exports: package.exports.clone(),
+            oh_export_files: None,
             module: package.module.clone(),
             jsnext_main: package.jsnext_main.clone(),
             byte_code_har: package.metadata.byte_code_har,
