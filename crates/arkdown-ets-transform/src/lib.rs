@@ -59,9 +59,13 @@ pub use source::{
 pub use sys_resource::SystemResourceReferenceLoader;
 pub use transform::source_emit::{HvigorTypescriptPrintOutput, HvigorTypescriptPrinter};
 pub use transform::{
-    ArktsTransformer, ArkuiComponentNameCollector, CheckerMode, CrossplatformSourceCollection,
+    AnnotationConstant, AnnotationImportDisposition, AnnotationInfo, AnnotationProperty,
+    AnnotationUse, ArktsExtendSource, ArktsFileTypeFacts, ArktsTransformer, ArktsTypeFactsSnapshot,
+    ArkuiComponentNameCollector, CheckerMode, CrossplatformSourceCollection,
     InsightIntentDeclaration, InsightIntentEntityDeclaration, InsightIntentSchemaCatalog,
-    InsightIntentSourceMetadata, NavigationRoute, NavigationRouteMap, SystemApiCheckOptions,
+    InsightIntentSourceMetadata, NavigationRoute, NavigationRouteMap, PropertyTypeFacts,
+    ResolvedTypeIdentity, SpannedAnnotationImport, SpannedAnnotationInfo, SpannedAnnotationUse,
+    SpannedPropertyTypeFacts, SpannedTypeIdentity, SystemApiCheckOptions,
 };
 pub use typescript_emit::TypeScriptDirectiveFlags;
 pub use visual::VisualGeneratedSource;

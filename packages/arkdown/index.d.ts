@@ -120,7 +120,10 @@ export interface BuildConfig {
    * active only for verbose and trace.
    */
   analyze?: 'normal' | 'default' | 'verbose' | 'false' | 'trace'
-  /** Explicit ArkTS compiler language. Omitted means ArkTS 1.1. */
+  /**
+   * Explicit ArkTS compiler language override. Omitted uses the selected
+   * product's `arkTSVersion`, defaulting to ArkTS 1.1.
+   */
   arktsVersion?: '1.1' | '1.2'
   module?: string
   product?: string
@@ -149,7 +152,11 @@ export interface BuildConfig {
   /** Match `ignoreCrossplatformCheck`: emit 11706007 as a warning instead of an error. */
   ignoreCrossplatformCheck?: boolean
   cache?: boolean
-  /** Node executable injected by the JavaScript service wrapper for SDK subprocesses. */
+  /**
+   * Node executable of the JavaScript process that owns this build. The JS
+   * service wrapper injects `process.execPath`; SDK subprocesses must not
+   * silently select a different Node version from PATH.
+   */
   nodeExecutable?: string
   compilePluginPath?: string | string[]
   hvigorPluginFile?: string | string[]
@@ -436,20 +443,7 @@ export interface JsLoadOutput {
 }
 
 export interface JsPluginAstParseOptions {
-  sourceType?: string
-  ranges?: boolean
-  locations?: boolean
-  sourceFile?: string
-  directSourceFile?: string
   allowReturnOutsideFunction?: boolean
-  preserveParens?: boolean
-  captureComments?: boolean
-  ecmaVersion?: string | number
-  allowAwaitOutsideFunction?: boolean
-  allowSuperOutsideMethod?: boolean
-  allowHashBang?: boolean
-  hasOnToken?: boolean
-  hasProgram?: boolean
 }
 
 export interface JsPluginContextLoadOptions {

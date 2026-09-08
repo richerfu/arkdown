@@ -1,92 +1,82 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, collections::BTreeSet, sync::OnceLock};
 
 use arkdown_core::ArktsLanguageVersion;
-use oxc_syntax::identifier::{is_identifier_part, is_identifier_start};
+use regex::{Captures, Regex};
 
-/// Parser input adapter for ArkTS 1.1's original `@Extend Component.name()`
-/// declaration spelling.
+/// Exact ArkTS 1.1 Extend preprocessing used before both TypeScript checking
+/// and source transformation.
 ///
-/// The SDK parser represents this spelling as the same decorated function AST
-/// produced by `@Extend(Component) function name()`. OXC intentionally exposes
-/// the modern AST shape, so normalize only declaration-leading source lines
-/// before parsing and keep the rest of the transform entirely AST based.
-pub(crate) struct LegacyExtendSource<'a> {
+/// Source owner: `validate_ui_syntax.ts::preprocessExtend` and
+/// `preprocessNewExtend`. Those functions deliberately use global source-text
+/// regular expressions; they do not parse comments or string literals first.
+pub struct ArktsExtendSource<'a> {
     source: Cow<'a, str>,
+    legacy_names: BTreeSet<String>,
+    modern_names: BTreeSet<String>,
 }
 
-impl<'a> LegacyExtendSource<'a> {
-    pub(crate) fn new(source: &'a str, version: ArktsLanguageVersion) -> Self {
-        if version.is_static()
-            || (!source.contains("@Extend ") && !source.contains("@AnimatableExtend "))
-        {
+impl<'a> ArktsExtendSource<'a> {
+    pub fn new(source: &'a str, version: ArktsLanguageVersion) -> Self {
+        if version.is_static() || !source.contains("@Extend") {
             return Self {
                 source: Cow::Borrowed(source),
+                legacy_names: BTreeSet::new(),
+                modern_names: BTreeSet::new(),
             };
         }
 
-        let mut normalized = String::with_capacity(source.len());
-        let mut changed = false;
-        for line in source.split_inclusive('\n') {
-            if let Some(replacement) = Self::normalized_line(line) {
-                normalized.push_str(&replacement);
-                changed = true;
-            } else {
-                normalized.push_str(line);
-            }
+        let legacy_pattern = Self::legacy_pattern();
+        let mut legacy_names = BTreeSet::new();
+        let normalized = legacy_pattern.replace_all(source, |captures: &Captures<'_>| {
+            let whitespace = captures.get(1).expect("Extend whitespace capture").as_str();
+            let component = captures.get(2).expect("Extend component capture").as_str();
+            let name = captures.get(3).expect("Extend name capture").as_str();
+            legacy_names.insert(name.to_string());
+            format!("@Extend({component}){whitespace}function __{component}__{name}(")
+        });
+        let mut modern_names = BTreeSet::new();
+        for captures in Self::modern_pattern().captures_iter(normalized.as_ref()) {
+            modern_names.insert(
+                captures
+                    .get(1)
+                    .expect("modern Extend name capture")
+                    .as_str()
+                    .to_string(),
+            );
         }
-        if changed {
-            Self {
-                source: Cow::Owned(normalized),
-            }
-        } else {
-            Self {
-                source: Cow::Borrowed(source),
-            }
+        Self {
+            source: normalized,
+            legacy_names,
+            modern_names,
         }
     }
 
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         self.source.as_ref()
     }
 
-    fn normalized_line(line: &str) -> Option<String> {
-        let source = line.trim_start_matches([' ', '\t']);
-        let indentation = &line[..line.len() - source.len()];
-        let (decorator, tail) = ["@Extend", "@AnimatableExtend"]
-            .into_iter()
-            .find_map(|decorator| source.strip_prefix(decorator).map(|tail| (decorator, tail)))?;
-        if !tail.starts_with([' ', '\t']) {
-            return None;
-        }
-
-        let tail = tail.trim_start_matches([' ', '\t']);
-        let (component, tail) = Self::identifier(tail)?;
-        let tail = tail.trim_start_matches([' ', '\t']);
-        let tail = tail.strip_prefix('.')?.trim_start_matches([' ', '\t']);
-        let (name, tail) = Self::identifier(tail)?;
-        if !tail.trim_start_matches([' ', '\t']).starts_with('(') {
-            return None;
-        }
-
-        Some(format!(
-            "{indentation}{decorator}({component}) function {name}{tail}"
-        ))
+    pub fn legacy_names(&self) -> &BTreeSet<String> {
+        &self.legacy_names
     }
 
-    fn identifier(source: &str) -> Option<(&str, &str)> {
-        let mut chars = source.char_indices();
-        let (_, first) = chars.next()?;
-        if !is_identifier_start(first) {
-            return None;
-        }
-        let mut end = first.len_utf8();
-        for (offset, character) in chars {
-            if !is_identifier_part(character) {
-                break;
-            }
-            end = offset + character.len_utf8();
-        }
-        Some((&source[..end], &source[end..]))
+    pub fn modern_names(&self) -> &BTreeSet<String> {
+        &self.modern_names
+    }
+
+    fn legacy_pattern() -> &'static Regex {
+        static PATTERN: OnceLock<Regex> = OnceLock::new();
+        PATTERN.get_or_init(|| {
+            Regex::new(r"@Extend(\s+)([^\.\s]+)\.([^\(]+)\(")
+                .expect("upstream Extend pattern is valid")
+        })
+    }
+
+    fn modern_pattern() -> &'static Regex {
+        static PATTERN: OnceLock<Regex> = OnceLock::new();
+        PATTERN.get_or_init(|| {
+            Regex::new(r"@Extend\s*\([^\)]+\)\s*function\s+([^\(\s]+)\s*\(")
+                .expect("upstream modern Extend pattern is valid")
+        })
     }
 }
 
@@ -98,25 +88,42 @@ mod tests {
     fn normalizes_original_extend_declarations_only_in_arkts_11() {
         let source = "  @Extend Text.fancy(color:string){\n    .fontColor(color)\n  }\n";
         assert_eq!(
-            LegacyExtendSource::new(source, ArktsLanguageVersion::V1_1).as_str(),
-            "  @Extend(Text) function fancy(color:string){\n    .fontColor(color)\n  }\n"
+            ArktsExtendSource::new(source, ArktsLanguageVersion::V1_1).as_str(),
+            "  @Extend(Text) function __Text__fancy(color:string){\n    .fontColor(color)\n  }\n"
         );
         assert_eq!(
-            LegacyExtendSource::new(source, ArktsLanguageVersion::V1_2).as_str(),
+            ArktsExtendSource::new(source, ArktsLanguageVersion::V1_2).as_str(),
             source
         );
     }
 
     #[test]
-    fn ignores_strings_comments_and_modern_extend_declarations() {
+    fn preserves_upstream_global_text_matching_and_collects_modern_names() {
         let source = concat!(
             "const text = '@Extend Text.fake()';\n",
             "// @Extend Text.comment()\n",
             "@Extend(Text) function modern() {}\n"
         );
+        let processed = ArktsExtendSource::new(source, ArktsLanguageVersion::V1_1);
         assert_eq!(
-            LegacyExtendSource::new(source, ArktsLanguageVersion::V1_1).as_str(),
-            source
+            processed.as_str(),
+            concat!(
+                "const text = '@Extend(Text) function __Text__fake()';\n",
+                "// @Extend(Text) function __Text__comment()\n",
+                "@Extend(Text) function modern() {}\n"
+            )
+        );
+        assert_eq!(
+            processed.legacy_names(),
+            &BTreeSet::from(["comment".into(), "fake".into()])
+        );
+        assert_eq!(
+            processed.modern_names(),
+            &BTreeSet::from([
+                "__Text__comment".into(),
+                "__Text__fake".into(),
+                "modern".into(),
+            ])
         );
     }
 }

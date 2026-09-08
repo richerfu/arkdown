@@ -745,6 +745,8 @@ pub struct RawExpandImportPath {
 pub struct RawArkTscConfig {
     #[serde(rename = "targetESVersion", default)]
     pub target_es_version: Option<String>,
+    #[serde(rename = "maxFlowDepth", default)]
+    pub max_flow_depth: Option<f64>,
 }
 
 pub(crate) struct BuildOptionDecoder<'a> {
@@ -845,6 +847,10 @@ impl<'a> BuildOptionDecoder<'a> {
                 }
             }),
             tsc_config: arkdown_core::ArkTscConfig {
+                max_flow_depth: options
+                    .tsc_config
+                    .as_ref()
+                    .and_then(|config| config.max_flow_depth),
                 target_es_version: arkdown_core::ArkTscTarget::from_hvigor_option(
                     options
                         .tsc_config

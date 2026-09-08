@@ -20,7 +20,7 @@ use anyhow::Result;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use arkdown_core::ArkdownConfig;
-use arkdown_path::{lexical_normalize, AbsPath, ArtifactPathSerializer};
+use arkdown_path::ArtifactPathSerializer;
 use arkdown_session::BuildSession;
 use arkdown_watcher::{SessionWatcher, WatchChangeKind, WatchInput, WatchInvalidationBatch};
 
@@ -69,7 +69,7 @@ pub(super) struct WatchStageInput {
     pub(super) cache: bool,
     pub(super) package_plugins: Vec<PackagePlugin>,
     pub(super) node_executable: Option<PathBuf>,
-    pub(super) custom_task_input_paths: Vec<PathBuf>,
+    pub(super) typescript_executable: Option<PathBuf>,
     pub(super) pack_compress_level: Option<u32>,
     pub(super) align_device_types: Vec<String>,
     pub(super) enable_sign_task: bool,
@@ -147,7 +147,7 @@ impl WatchStageInput {
             cache: args.cache,
             package_plugins,
             node_executable: args.node_executable.clone(),
-            custom_task_input_paths: args.custom_task_input_paths.clone(),
+            typescript_executable: args.typescript_executable.clone(),
             pack_compress_level: args.pack_compress_level,
             align_device_types: args.align_device_types.clone(),
             enable_sign_task: args.enable_sign_task,
@@ -206,7 +206,7 @@ impl WatchStage {
         let cache = input.cache;
         let package_plugins = input.package_plugins;
         let node_executable = input.node_executable;
-        let custom_task_input_paths = input.custom_task_input_paths;
+        let typescript_executable = input.typescript_executable;
         let pack_compress_level = input.pack_compress_level;
         let align_device_types = input.align_device_types;
         let enable_sign_task = input.enable_sign_task;
@@ -222,15 +222,8 @@ impl WatchStage {
         let action = input.action;
         let hot_reload_mode = input.hot_reload_mode;
 
-        let watch_plan = WatchSessionPlan::from_session(
-            &session,
-            preview_mode,
-            hot_reload_mode,
-            &custom_task_input_paths,
-        );
+        let watch_plan = WatchSessionPlan::from_session(&session, preview_mode, hot_reload_mode);
         let fingerprint_baseline = watch_plan.input.fingerprint_baseline.clone();
-        let custom_input_files = watch_plan.custom_input_files;
-        let custom_input_dirs = watch_plan.custom_input_dirs;
         let watcher = SessionWatcher::new(watch_plan.input);
 
         tracing::info!("watching for changes");
@@ -244,12 +237,8 @@ impl WatchStage {
 
         tokio::task::spawn_blocking(move || {
             let watch_result = watcher.watch(|events| {
-                let invalidation = WatchInvalidationBatch::from_watch_events_with_custom_inputs(
-                    events,
-                    &fingerprint_baseline,
-                    &custom_input_files,
-                    &custom_input_dirs,
-                );
+                let invalidation =
+                    WatchInvalidationBatch::from_watch_events(events, &fingerprint_baseline);
                 if invalidation.is_empty() {
                     return Ok(());
                 }
@@ -381,7 +370,6 @@ impl WatchStage {
                     skip_resource: is_hot,
                     skip_profile: is_hot,
                     watch_invalidation: Some(invalidation),
-                    custom_task_input_paths: custom_task_input_paths.clone(),
                     pack_compress_level,
                     align_device_types: align_device_types.clone(),
                     collect_debug_symbol,
@@ -392,6 +380,7 @@ impl WatchStage {
                     hvigor_properties: hvigor_properties.clone(),
                     parameter_file_override: parameter_file_override.clone(),
                     node_executable: node_executable.clone(),
+                    typescript_executable: typescript_executable.clone(),
                     hvigor_cache_dir: hvigor_cache_dir.clone(),
                 };
                 let command =
@@ -417,21 +406,12 @@ impl WatchStage {
 
 struct WatchSessionPlan {
     input: WatchInput,
-    custom_input_files: Vec<PathBuf>,
-    custom_input_dirs: Vec<PathBuf>,
 }
 
 impl WatchSessionPlan {
-    fn from_session(
-        session: &BuildSession,
-        preview_mode: bool,
-        hot_reload_mode: bool,
-        custom_task_input_paths: &[PathBuf],
-    ) -> Self {
+    fn from_session(session: &BuildSession, preview_mode: bool, hot_reload_mode: bool) -> Self {
         let mut watch_dirs = FxHashSet::default();
         let mut watch_files = FxHashSet::default();
-        let mut custom_input_files = FxHashSet::default();
-        let mut custom_input_dirs = FxHashSet::default();
         for plan in session.watch_inputs.iter() {
             if preview_mode {
                 watch_dirs.extend(plan.resource_roots.iter().cloned());
@@ -445,38 +425,15 @@ impl WatchSessionPlan {
                 }
             }
         }
-        for input in custom_task_input_paths {
-            let input = Self::normalize_custom_input(input);
-            if input.is_dir() {
-                watch_dirs.insert(input.clone());
-                custom_input_dirs.insert(input);
-            } else {
-                watch_files.insert(input.clone());
-                custom_input_files.insert(input);
-            }
-        }
-
         let mut watch_dirs = watch_dirs.into_iter().collect::<Vec<_>>();
         watch_dirs.sort();
         let mut watch_files = watch_files.into_iter().collect::<Vec<_>>();
         watch_files.sort();
-        let mut custom_input_files = custom_input_files.into_iter().collect::<Vec<_>>();
-        custom_input_files.sort();
-        let mut custom_input_dirs = custom_input_dirs.into_iter().collect::<Vec<_>>();
-        custom_input_dirs.sort();
         Self {
             input: WatchInput::new()
                 .with_dirs(watch_dirs)
                 .with_files(watch_files),
-            custom_input_files,
-            custom_input_dirs,
         }
-    }
-
-    fn normalize_custom_input(input: &Path) -> PathBuf {
-        AbsPath::canonicalize(input)
-            .map(AbsPath::into_path_buf)
-            .unwrap_or_else(|_| lexical_normalize(input))
     }
 }
 

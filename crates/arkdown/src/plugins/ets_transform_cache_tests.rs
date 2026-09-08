@@ -44,6 +44,7 @@ fn output() -> RolldownEtsTransformOutput {
         module_source_code: Some(Arc::from("export const cached: number = 1;")),
         source_map: Some(r#"{"version":3,"sources":["Index.ets"],"mappings":"AAAA"}"#.to_string()),
         record_module_source_code: true,
+        module_source_emits_javascript: false,
         emits_javascript: false,
         is_comment_only_javascript: false,
         is_shared_module: true,

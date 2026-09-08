@@ -25,6 +25,7 @@ use crate::transform::component_meta::{
 };
 use crate::transform::global_rewrite::GlobalContextCallRewriter;
 use crate::transform::local_builder::LocalBuilderRuntimeEmitter;
+use crate::transform::type_facts::{ArktsFileTypeFacts, BuilderAccessKind};
 use crate::transform::viewpu_emit::{GeneratedViewpuName, ViewpuStatementAstEmitter};
 
 mod custom_component;
@@ -206,7 +207,8 @@ struct BuildContext {
     inside_page_transition: bool,
     raw_object_fields: Arc<FxHashSet<String>>,
     regular_attribute_properties: Arc<FxHashSet<String>>,
-    mutable_builder_properties: Arc<FxHashSet<String>>,
+    type_facts: Option<Arc<ArktsFileTypeFacts>>,
+    api_version: u32,
     component_metadata: Arc<ComponentMetadata>,
     extend_attributes: Arc<ExtendAttributeIndex>,
     module_name: Arc<str>,
@@ -227,7 +229,8 @@ impl Default for BuildContext {
             inside_page_transition: false,
             raw_object_fields: Arc::default(),
             regular_attribute_properties: Arc::default(),
-            mutable_builder_properties: Arc::default(),
+            type_facts: None,
+            api_version: 1,
             component_metadata: Arc::new(ComponentMetadata::default()),
             extend_attributes: Arc::new(ExtendAttributeIndex::default()),
             module_name: Arc::from(""),
@@ -494,7 +497,8 @@ pub struct BuildBodyPlan<'a> {
     styles: StylesAttributeIndex<'a>,
     raw_object_fields: FxHashSet<String>,
     regular_attribute_properties: Arc<FxHashSet<String>>,
-    mutable_builder_properties: Arc<FxHashSet<String>>,
+    type_facts: Option<Arc<ArktsFileTypeFacts>>,
+    api_version: u32,
     module_name: Option<Arc<str>>,
     xcomponent_module_identity: Option<Arc<str>>,
     context_kind: BuildBodyContextKind,
@@ -668,7 +672,8 @@ impl<'a> BuildBodyPlan<'a> {
             styles: StylesAttributeIndex::default(),
             raw_object_fields: inputs.raw_object_fields.clone(),
             regular_attribute_properties: Arc::default(),
-            mutable_builder_properties: Arc::default(),
+            type_facts: None,
+            api_version: 1,
             module_name: inputs.module_name,
             xcomponent_module_identity: None,
             context_kind,
@@ -706,11 +711,13 @@ impl<'a> BuildBodyPlan<'a> {
         self
     }
 
-    pub(crate) fn with_shared_mutable_builder_properties(
+    pub(crate) fn with_type_facts(
         mut self,
-        properties: Arc<FxHashSet<String>>,
+        facts: Option<Arc<ArktsFileTypeFacts>>,
+        api_version: u32,
     ) -> Self {
-        self.mutable_builder_properties = properties;
+        self.type_facts = facts;
+        self.api_version = api_version;
         self
     }
 
@@ -747,8 +754,8 @@ impl<'a> BuildBodyPlan<'a> {
         .with_current_component_reusable(self.current_component_reusable)
         .with_raw_object_fields(&self.raw_object_fields)
         .with_shared_regular_attribute_properties(Arc::clone(&self.regular_attribute_properties));
-        context = context
-            .with_shared_mutable_builder_properties(Arc::clone(&self.mutable_builder_properties));
+        context =
+            context.with_type_facts(self.type_facts.as_ref().map(Arc::clone), self.api_version);
         if let Some(module_name) = &self.module_name {
             context = context.with_module_name(module_name);
         }
@@ -2500,11 +2507,9 @@ impl BuildContext {
         self
     }
 
-    fn with_shared_mutable_builder_properties(
-        mut self,
-        properties: Arc<FxHashSet<String>>,
-    ) -> Self {
-        self.mutable_builder_properties = properties;
+    fn with_type_facts(mut self, facts: Option<Arc<ArktsFileTypeFacts>>, api_version: u32) -> Self {
+        self.type_facts = facts;
+        self.api_version = api_version;
         self
     }
 
@@ -2520,22 +2525,16 @@ impl BuildContext {
         self.regular_attribute_properties.contains(name)
     }
 
-    fn is_mutable_builder_receiver(&self, expression: &Expression<'_>) -> bool {
-        match expression {
-            Expression::CallExpression(call) => {
-                matches!(
-                    &call.callee,
-                    Expression::Identifier(identifier) if identifier.name == "mutableBuilder"
-                )
-            }
-            Expression::StaticMemberExpression(member) => {
-                matches!(&member.object, Expression::ThisExpression(_))
-                    && self
-                        .mutable_builder_properties
-                        .contains(member.property.name.as_str())
-            }
-            _ => false,
-        }
+    fn builder_access_kind(&self, span: Span) -> Option<BuilderAccessKind> {
+        self.type_facts
+            .as_ref()
+            .and_then(|facts| facts.builder_access_kind(span, self.api_version))
+    }
+
+    fn is_enum_member_access(&self, span: Span) -> bool {
+        self.type_facts
+            .as_ref()
+            .is_some_and(|facts| facts.is_enum_member_access(span))
     }
 
     fn with_shared_component_metadata(

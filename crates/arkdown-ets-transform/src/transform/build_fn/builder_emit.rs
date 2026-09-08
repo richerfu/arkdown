@@ -543,7 +543,7 @@ impl<'a, 'ctx> BuilderDispatchCallEmitter<'a, 'ctx> {
     }
 
     pub(super) fn matches(&self) -> bool {
-        ArkuiCallName::is_builder_dispatch_call(self.call, self.context)
+        ArkuiCallName::builder_dispatch_member(self.call, self.context).is_some()
     }
 
     pub(super) fn expression<'b>(&self, allocator: &'b Allocator) -> Expression<'b> {
@@ -675,12 +675,8 @@ impl<'a, 'ctx> BuilderDispatchCallEmitter<'a, 'ctx> {
     }
 
     fn mutable_receiver(&self) -> Option<&Expression<'a>> {
-        let Expression::StaticMemberExpression(member) = &self.call.callee else {
-            return None;
-        };
-        self.context
-            .is_mutable_builder_receiver(&member.object)
-            .then_some(&member.object)
+        let (member, kind) = ArkuiCallName::builder_dispatch_member(self.call, self.context)?;
+        (kind == BuilderAccessKind::Mutable).then_some(&member.object)
     }
 }
 

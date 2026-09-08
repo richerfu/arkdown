@@ -29,6 +29,12 @@ pub enum EtsTransformError {
 
     #[error("Fatal ETS check error in {file}: {message}")]
     Fatal { file: String, message: String },
+
+    #[error("Missing native TypeScript facts for {capability} in {file}")]
+    MissingTypeFacts {
+        file: String,
+        capability: &'static str,
+    },
 }
 
 impl EtsTransformError {
@@ -37,7 +43,7 @@ impl EtsTransformError {
             Self::Diagnostic { severity, .. } | Self::CodedDiagnostic { severity, .. } => {
                 matches!(severity, DiagnosticSeverity::Error)
             }
-            Self::Fatal { .. } => true,
+            Self::Fatal { .. } | Self::MissingTypeFacts { .. } => true,
         }
     }
 }

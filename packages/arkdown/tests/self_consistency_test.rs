@@ -220,7 +220,6 @@ impl SelfConsistencyOracle {
         skip_resource: false,
         skip_profile: false,
         watch_invalidation: None,
-        custom_task_input_paths: Vec::new(),
         pack_compress_level: None,
         align_device_types: Vec::new(),
         collect_debug_symbol: None,
@@ -231,6 +230,7 @@ impl SelfConsistencyOracle {
         parameter_file_override: None,
         build_version: None,
         node_executable: None,
+        typescript_executable: None,
         hvigor_cache_dir: None,
         hvigor_properties: Default::default(),
       })

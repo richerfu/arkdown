@@ -1213,7 +1213,7 @@ impl BuildCoordinator {
             if runs_router_map_task && !skip_profile_writes {
                 let _timer = BuildTimingProbe::module(&module.name, "router_map_intermediates");
                 intermediate_writer.write_router_map_intermediates(
-                    module,
+                    &module_layout,
                     &loader_json,
                     module_config.as_ref(),
                     &res_out,

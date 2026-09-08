@@ -15,10 +15,6 @@ impl ParsedPluginAst {
     fn program(&self) -> &Value {
         &self.0["ast"]["node"]
     }
-
-    fn comments(&self) -> &Value {
-        &self.0["comments"]
-    }
 }
 
 #[test]
@@ -40,46 +36,27 @@ fn plugin_ast_matches_latest_ide_rollup_default_program_shape() {
 }
 
 #[test]
-fn plugin_ast_uses_acorn_compatible_utf16_ranges_locations_and_comments() {
-    let parsed = ParsedPluginAst::parse(
-        "// 注释\nconst emoji = \"🤨\";",
-        PluginAstParseOptions {
-            ranges: true,
-            locations: true,
-            source_file: Some("plugin.ts".to_string()),
-            capture_comments: true,
-            ..PluginAstParseOptions::default()
-        },
-    );
+fn plugin_ast_ignores_options_outside_rollup_4_parse_ast_contract() {
+    let options = PluginAstParseOptions::from_json(Some(
+        r#"{
+            "allowReturnOutsideFunction": true,
+            "sourceType": "script",
+            "ranges": true,
+            "locations": true,
+            "onToken": [],
+            "program": {"type": "Program"}
+        }"#,
+    ))
+    .unwrap();
+    let parsed = ParsedPluginAst::parse("// 注释\nreturn \"🤨\";", options);
     let program = parsed.program();
 
-    assert_eq!(program["end"], 25);
-    assert_eq!(program["range"], json!([0, 25]));
-    assert_eq!(
-        program["loc"],
-        json!({
-            "start": { "line": 1, "column": 0 },
-            "end": { "line": 2, "column": 19 },
-            "source": "plugin.ts"
-        })
-    );
-    assert_eq!(program["body"][0]["start"], 6);
-    assert_eq!(program["body"][0]["declarations"][0]["init"]["end"], 24);
-    assert_eq!(
-        parsed.comments(),
-        &json!([{
-            "type": "Line",
-            "value": " 注释",
-            "start": 0,
-            "end": 5,
-            "loc": {
-                "start": { "line": 1, "column": 0 },
-                "end": { "line": 1, "column": 5 },
-                "source": "plugin.ts"
-            },
-            "range": [0, 5]
-        }])
-    );
+    assert_eq!(program["sourceType"], "module");
+    assert_eq!(program["end"], 18);
+    assert_eq!(program["body"][0]["type"], "ReturnStatement");
+    assert!(program.get("range").is_none());
+    assert!(program.get("loc").is_none());
+    assert!(parsed.0.get("comments").is_none());
 }
 
 #[test]
@@ -107,15 +84,9 @@ fn plugin_ast_records_only_bigint_and_regexp_literal_fix_paths() {
 
 #[test]
 fn plugin_ast_matches_rollup_script_return_policy() {
-    let rejected = PluginAstParser::new(
-        "return 1",
-        PluginAstParseOptions {
-            source_type: Some("script".to_string()),
-            ..PluginAstParseOptions::default()
-        },
-    )
-    .parse()
-    .expect_err("top-level script return should be rejected");
+    let rejected = PluginAstParser::new("return 1", PluginAstParseOptions::default())
+        .parse()
+        .expect_err("top-level script return should be rejected");
     assert!(matches!(
         rejected,
         PluginAstParseError::Parse {
@@ -129,12 +100,10 @@ fn plugin_ast_matches_rollup_script_return_policy() {
     let parsed = ParsedPluginAst::parse(
         "return 1",
         PluginAstParseOptions {
-            source_type: Some("script".to_string()),
             allow_return_outside_function: true,
-            ..PluginAstParseOptions::default()
         },
     );
-    assert_eq!(parsed.program()["sourceType"], "script");
+    assert_eq!(parsed.program()["sourceType"], "module");
     assert_eq!(parsed.program()["body"][0]["type"], "ReturnStatement");
 }
 

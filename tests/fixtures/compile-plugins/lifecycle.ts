@@ -54,6 +54,9 @@ export default {
       dependencyAliasMapIsMap: this.share.projectConfig.dependencyAliasMap instanceof Map,
       permissionRequestCount: this.share.projectConfig.permission?.requestPermissions?.length ?? -1,
       permissionDefineCount: this.share.projectConfig.permission?.definePermissions?.length ?? -1,
+      targetESVersion: this.share.projectConfig.projectArkOption?.tscConfig?.targetESVersion,
+      maxFlowDepth: this.share.projectConfig.projectArkOption?.tscConfig?.maxFlowDepth,
+      bundledDeclare: this.share.projectConfig.projectArkOption?.bundle?.bundledDeclare,
     };
     state.depInfo = this.share.depInfo;
     const hookEventFactory = this.share.getHookEventFactory("fixture", "buildStart");

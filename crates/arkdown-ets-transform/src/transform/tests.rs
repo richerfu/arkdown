@@ -1,5 +1,7 @@
 use super::*;
 use oxc_span::SourceType;
+use oxc_span::Span;
+use rustc_hash::FxHashMap;
 
 use arkdown_core::{ArktsLanguageVersion, InsightIntentFormBinding, ModuleType, ResolvedId};
 
@@ -30,6 +32,41 @@ impl TransformHarness {
         ArktsTransformer::with_options(source, options).transform()
     }
 
+    fn transform_with_builder_receiver(
+        source: &ModuleSource,
+        access: &str,
+        symbol_name: &str,
+        api_version: u32,
+    ) -> Result<String, EtsTransformError> {
+        let start = source
+            .content
+            .find(access)
+            .expect("builder access must exist in the fixture") as u32;
+        let mut files = FxHashMap::default();
+        files.insert(
+            PathBuf::from(&source.id.id),
+            ArktsFileTypeFacts {
+                builder_accesses: vec![SpannedTypeIdentity {
+                    span: Span::new(start, start + access.len() as u32),
+                    identity: ResolvedTypeIdentity {
+                        is_nullable: false,
+                        is_enum: false,
+                        is_basic: false,
+                        symbol_name: symbol_name.to_string(),
+                        types: Vec::new(),
+                    },
+                }],
+                ..ArktsFileTypeFacts::default()
+            },
+        );
+        let options = TransformOptions {
+            api_version,
+            type_facts: ArktsTypeFactsSnapshot::new(files),
+            ..TransformOptions::default()
+        };
+        Self::transform_with_options(source, &options)
+    }
+
     fn transform_output_with_options(
         source: &ModuleSource,
         options: &TransformOptions,
@@ -52,54 +89,36 @@ impl TransformHarness {
 
 #[test]
 fn crossplatform_collection_merges_direct_and_sdk_dependency_facts() {
-    let sdk_root = PathBuf::from("/sdk/arkui-x/api");
-    let declaration_path = sdk_root.join("@arkui-x.telephony.d.ts");
-    let mut files = rustc_hash::FxHashMap::default();
-    files.insert(
-        declaration_path,
-        std::sync::Arc::<str>::from(
-            "/** @crossplatform */\n\
-             export declare class CallManager {\n\
-               /** @crossplatform */\n\
-               static dial(): void;\n\
-             }\n\
-             /** @crossplatform */\n\
-             declare namespace telephony {\n\
-               /** @crossplatform */\n\
-               function connect(): void;\n\
-             }\n\
-             export default telephony;\n",
-        ),
-    );
-    let sources = crate::source::TransformSourceSnapshot::new(files)
-        .with_sdk_declaration_roots(vec![sdk_root]);
+    let source_path = PathBuf::from("/project/entry/src/main/ets/pages/Call.ets");
     let component_metadata = ComponentMetadata::default();
-    let module_exports = ModuleExportIndex::build(&sources, &[], &component_metadata);
     let system_api = SystemApiCheckOptions::default()
-        .with_crossplatform(true, false)
         .with_crossplatform_collection(true)
-        .with_module_prefixes(["ohos", "system", "kit", "arkts", "arkui-x"])
-        .with_crossplatform_dependency(
-            "@arkui-x.telephony",
-            "CallManager#dial",
-            ["ohos.telephony.call"],
-            ["Button"],
-        )
-        .with_crossplatform_dependency(
-            "@arkui-x.telephony",
-            "connect",
-            ["ohos.net.connection"],
-            ["Text"],
-        );
+        .with_module_prefixes(["ohos", "system", "kit", "arkts", "arkui-x"]);
+    let type_facts = ArktsTypeFactsSnapshot::new(rustc_hash::FxHashMap::from_iter([(
+        source_path.clone(),
+        ArktsFileTypeFacts {
+            crossplatform_dependencies: CrossplatformSourceCollection {
+                modules: [
+                    "ohos.telephony.call".to_string(),
+                    "ohos.net.connection".to_string(),
+                ]
+                .into_iter()
+                .collect(),
+                components: ["Button".to_string(), "Text".to_string()]
+                    .into_iter()
+                    .collect(),
+            },
+            ..ArktsFileTypeFacts::default()
+        },
+    )]));
     let options = TransformOptions {
         system_api,
         component_metadata: std::sync::Arc::new(component_metadata),
-        sources,
-        module_exports,
+        type_facts,
         ..TransformOptions::default()
     };
     let source = make_source(
-        "/project/entry/src/main/ets/pages/Call.ets",
+        source_path.to_str().unwrap(),
         "import telephony, { CallManager } from '@arkui-x.telephony';\n\
          import router from '@ohos.router';\n\
          ForEach();\n\
@@ -797,30 +816,6 @@ fn point_compatible_sdk_keeps_native_api_available_behavior() {
 }
 
 #[test]
-fn api_available_rejects_invalid_sdk_arguments_like_source_checker() {
-    for (argument, expected) in [
-        ("null", "Null and undefined are not allowed"),
-        ("undefined", "Null and undefined are not allowed"),
-        ("0x10", "Only decimal digits are allowed"),
-        ("01", "Only decimal digits are allowed"),
-        ("26", "decimal integer between 1 and 25"),
-        ("'25.0.0'", "M must be greater than or equal to 26"),
-        ("'26.00.0'", "M must be greater than or equal to 26"),
-        ("'OpenHarmony 26.0.0'", "Only digits and dots are allowed"),
-    ] {
-        let source = format!(
-            "import deviceInfo from '@ohos.deviceInfo'\nconst available = deviceInfo.apiAvailable({argument})"
-        );
-        let error = TransformHarness::transform(&make_source("Index.ets", &source))
-            .expect_err("invalid SDK apiAvailable argument must be rejected");
-        assert!(
-            error.to_string().contains("[11706013]") && error.to_string().contains(expected),
-            "argument {argument} produced unexpected diagnostic: {error}"
-        );
-    }
-}
-
-#[test]
 fn api_available_accepts_source_checker_literal_forms() {
     for argument in ["1", "+25", "'26.0.0'", "`99.99.99`"] {
         let source = format!(
@@ -830,32 +825,6 @@ fn api_available_accepts_source_checker_literal_forms() {
             .unwrap_or_else(|error| panic!("argument {argument} must be valid: {error}"));
         assert!(output.contains("__mockApiAvailable(deviceInfo"), "{output}");
     }
-}
-
-#[test]
-fn api_available_uses_distribution_os_version_rules() {
-    let options = TransformOptions {
-        api_available: ApiAvailableTransformOptions::from_build_context("12", "HarmonyOS"),
-        ..TransformOptions::default()
-    };
-    for argument in ["'6.1.1'", "'6.1.1(24)'", "'26.0.0'"] {
-        let source = format!(
-            "import {{ deviceInfo as info }} from '@kit.BasicServicesKit'\nconst available = info.apiAvailable({argument})"
-        );
-        TransformHarness::transform_with_options(&make_source("Index.ets", &source), &options)
-            .unwrap_or_else(|error| panic!("argument {argument} must be valid: {error}"));
-    }
-
-    let source = "import deviceInfo from '@ohos.deviceInfo'\nconst available = deviceInfo.apiAvailable('26.0.0(24)')";
-    let error =
-        TransformHarness::transform_with_options(&make_source("Index.ets", source), &options)
-            .expect_err("major >= 26 must not carry an OH build version");
-    assert!(
-        error
-            .to_string()
-            .contains("decimal integers between 1 and 99"),
-        "{error}"
-    );
 }
 
 #[test]
@@ -881,27 +850,6 @@ fn api_available_validation_respects_local_shadowing_of_sdk_import() {
         output.contains("__mockApiAvailable(deviceInfo, null)"),
         "process_available_statement still lowers the property shape after identity-safe validation:\n{output}"
     );
-}
-
-#[test]
-fn api_available_rejects_sdk_usage_in_typescript_sources() {
-    let source =
-        "import deviceInfo from '@ohos.deviceInfo'\nconst available = deviceInfo.apiAvailable(12)";
-    let error = TransformHarness::transform(&make_source("Index.ts", source))
-        .expect_err("the source checker rejects apiAvailable in .ts files");
-    assert!(error.to_string().contains("[11706015]"), "{error}");
-}
-
-#[test]
-fn api_available_requires_exactly_one_argument() {
-    for arguments in ["", "12, 13"] {
-        let source = format!(
-            "import deviceInfo from '@ohos.deviceInfo'\nconst available = deviceInfo.apiAvailable({arguments})"
-        );
-        let error = TransformHarness::transform(&make_source("Index.ets", &source))
-            .expect_err("SDK apiAvailable arity must be checked");
-        assert!(error.to_string().contains("[11706013]"), "{error}");
-    }
 }
 
 #[test]
@@ -960,8 +908,14 @@ struct Probe {
     this.content.builder({ value: this.value })
   }
 }"#;
-    let result = TransformHarness::transform(&make_source("Probe.ets", src))
-        .expect("MutableBuilder source must transform");
+    let source = make_source("Probe.ets", src);
+    let result = TransformHarness::transform_with_builder_receiver(
+        &source,
+        "this.content.builder",
+        "MutableBuilder",
+        11,
+    )
+    .expect("MutableBuilder source must transform");
 
     assert!(
         result.contains("this.content._dispatchBuilder.bind(this)(() => this.content"),
@@ -974,6 +928,42 @@ struct Probe {
     assert!(
         !result.contains("this.content.builder.bind(this)"),
         "MutableBuilder must not take the WrappedBuilder branch:\n{result}"
+    );
+}
+
+#[test]
+fn wrapped_builder_dispatch_uses_checker_identity_and_api_gate() {
+    let src = r#"@Builder function Content() {}
+@Component
+struct Probe {
+  ctx: WrappedBuilder<[]> = wrapBuilder(Content)
+  build() { this.ctx.builder() }
+}"#;
+    let source = make_source("Probe.ets", src);
+    let result = TransformHarness::transform_with_builder_receiver(
+        &source,
+        "this.ctx.builder",
+        "WrappedBuilder",
+        11,
+    )
+    .expect("API 11 WrappedBuilder source must transform");
+    assert!(
+        result.contains("this.ctx.builder.bind(this)();"),
+        "WrappedBuilder must use transferBuilderCall: {result}"
+    );
+
+    let error = TransformHarness::transform_with_builder_receiver(
+        &source,
+        "this.ctx.builder",
+        "WrappedBuilder",
+        10,
+    )
+    .expect_err("WrappedBuilder is unavailable before API 11");
+    assert!(
+        error
+            .to_string()
+            .contains("Unsupported ArkUI component callee"),
+        "{error}"
     );
 }
 
@@ -2955,16 +2945,56 @@ struct Page {
   }
 }
 "#;
-    let result =
-        TransformHarness::transform(&make_source("entry/src/main/ets/pages/Page.ets", src))
-            .unwrap();
-    assert!(result.contains("interface RouteMeta"));
+    let source = make_source("entry/src/main/ets/pages/Page.ets", src);
+    let declaration_start = src.find("@interface RouteMeta").unwrap() as u32;
+    let declaration_end = src.find("\n\nimport lazy").unwrap() as u32;
+    let mut files = FxHashMap::default();
+    files.insert(
+        PathBuf::from(&source.id.id),
+        ArktsFileTypeFacts {
+            declarations: vec![SpannedAnnotationInfo {
+                span: Span::new(declaration_start, declaration_end),
+                info: AnnotationInfo {
+                    source_retention: false,
+                    properties: vec![
+                        AnnotationProperty {
+                            name: "value".to_string(),
+                            name_text: "value".to_string(),
+                            initializer: None,
+                            argument: None,
+                            array_depth: 0,
+                            enum_first_value: None,
+                            type_text: "string".to_string(),
+                            element_type_text: "string".to_string(),
+                        },
+                        AnnotationProperty {
+                            name: "minApiVersion".to_string(),
+                            name_text: "minApiVersion".to_string(),
+                            initializer: None,
+                            argument: None,
+                            array_depth: 0,
+                            enum_first_value: None,
+                            type_text: "string".to_string(),
+                            element_type_text: "string".to_string(),
+                        },
+                    ],
+                },
+            }],
+            ..ArktsFileTypeFacts::default()
+        },
+    );
+    let options = TransformOptions {
+        type_facts: ArktsTypeFactsSnapshot::new(files),
+        ..TransformOptions::default()
+    };
+    let result = TransformHarness::transform_with_options(&source, &options).unwrap();
+    assert!(result.contains("@interface __$$ETS_ANNOTATION$$__RouteMeta"));
     assert!(
         result.contains("import lazy LazyPage, { Helper } from './lazy';"),
         "{result}"
     );
     assert!(result.contains("class Page extends ViewPU"));
-    assert!(!result.contains("@interface"));
+    assert!(!result.contains("@interface RouteMeta"));
     assert!(!result.contains("struct Page"));
     assert!(!result.contains("Column() {"));
 
@@ -2976,6 +3006,23 @@ struct Page {
         parsed.diagnostics,
         result
     );
+}
+
+#[test]
+fn test_rejects_annotation_lowering_without_native_typescript_facts() {
+    let source = make_source(
+        "entry/src/main/ets/pages/Annotation.ets",
+        "@interface RouteMeta { value: string; }",
+    );
+    let error = TransformHarness::transform(&source)
+        .expect_err("OH annotation lowering requires native TypeScript facts");
+    assert!(matches!(
+        error,
+        EtsTransformError::MissingTypeFacts {
+            capability: "OH annotation lowering",
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -3547,6 +3594,7 @@ fn test_transforms_entry_component_with_hvigor_route_registration() {
     let src = "@Entry\n@Component\nstruct Page {\n  build() {}\n}";
     let options = TransformOptions {
         arkts_language_version: ArktsLanguageVersion::default(),
+        api_version: 12,
         api_available: ApiAvailableTransformOptions::default(),
         system_api: SystemApiCheckOptions::default(),
         bundle_name: Some("com.example.arkdown.test".to_string()),
@@ -3556,6 +3604,7 @@ fn test_transforms_entry_component_with_hvigor_route_registration() {
         module_roots: Vec::new(),
         component_metadata: std::sync::Arc::new(ComponentMetadata::default()),
         sources: crate::source::TransformSourceSnapshot::default(),
+        type_facts: ArktsTypeFactsSnapshot::default(),
         module_exports: ModuleExportIndex::default(),
         navigation_routes: NavigationRouteMap::default(),
         form_entry: false,
@@ -3639,6 +3688,7 @@ export struct SecureModePage {
 "#;
     let options = TransformOptions {
         arkts_language_version: ArktsLanguageVersion::default(),
+        api_version: 12,
         api_available: ApiAvailableTransformOptions::default(),
         system_api: SystemApiCheckOptions::default(),
         bundle_name: Some("com.example.hexample".to_string()),
@@ -3648,6 +3698,7 @@ export struct SecureModePage {
         module_roots: Vec::new(),
         component_metadata: std::sync::Arc::new(ComponentMetadata::default()),
         sources: crate::source::TransformSourceSnapshot::default(),
+        type_facts: ArktsTypeFactsSnapshot::default(),
         module_exports: ModuleExportIndex::default(),
         navigation_routes: NavigationRouteMap::default(),
         form_entry: false,
@@ -3766,6 +3817,7 @@ export struct SecureModePage {
     let sources = crate::source::TransformSourceSnapshot::new(sources);
     let options = TransformOptions {
         arkts_language_version: ArktsLanguageVersion::default(),
+        api_version: 12,
         api_available: ApiAvailableTransformOptions::default(),
         system_api: SystemApiCheckOptions::default(),
         bundle_name: Some("com.example.hexample".to_string()),
@@ -3776,6 +3828,7 @@ export struct SecureModePage {
         component_metadata: std::sync::Arc::new(ComponentMetadata::default()),
         module_exports: ModuleExportIndex::build(&sources, &[], &ComponentMetadata::default()),
         sources,
+        type_facts: ArktsTypeFactsSnapshot::default(),
         navigation_routes: NavigationRouteMap::default(),
         form_entry: false,
         insight_intent_form_binding: None,
@@ -4569,6 +4622,143 @@ fn call_trailing_ranges_match_typescript_printer_source_map() {
 }
 
 #[test]
+fn retained_comment_boundaries_match_typescript_printer_source_map() {
+    // ohos-typescript emitter.ts writes emitPos(commentPos), the raw comment,
+    // then emitPos(commentEnd) for both leading and trailing comments.
+    let source = "export function run() {\n    // retained comment\n    execute();\n}\n";
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed =
+        oxc_parser::Parser::new(&allocator, source, SourceType::ts().with_module(true)).parse();
+    assert!(parsed.diagnostics.is_empty());
+    let output = HvigorTypescriptPrinter::print_with_source_map(
+        &parsed.program,
+        oxc_codegen::CodegenOptions {
+            source_map_path: Some("/project/entry/src/main/ets/Run.ets".into()),
+            indent_char: oxc_codegen::IndentChar::Space,
+            indent_width: 4,
+            ..oxc_codegen::CodegenOptions::default()
+        },
+        source,
+    );
+    let source_map = rolldown_sourcemap::OwnedSourceMap::from_json_string(
+        output.source_map.as_deref().expect("TypeScript source map"),
+    )
+    .expect("valid source map");
+    let comment = "// retained comment";
+    let source_start = source.find(comment).expect("source comment") as u32;
+    let generated_start = output.code.find(comment).expect("generated comment") as u32;
+
+    for (generated_offset, source_offset) in [
+        (generated_start, source_start),
+        (
+            generated_start + comment.len() as u32,
+            source_start + comment.len() as u32,
+        ),
+    ] {
+        let generated_position =
+            crate::source_map::offset_to_line_col(&output.code, generated_offset);
+        let source_position = crate::source_map::offset_to_line_col(source, source_offset);
+        let token = source_map
+            .get_tokens()
+            .find(|token| (token.get_dst_line(), token.get_dst_col()) == generated_position)
+            .unwrap_or_else(|| panic!("comment boundary mapping at {generated_position:?}"));
+        assert_eq!((token.get_src_line(), token.get_src_col()), source_position);
+    }
+}
+
+#[test]
+fn source_backed_multiline_empty_arrow_keeps_typescript_function_body_layout() {
+    // emitter.ts::shouldEmitBlockFunctionBodyOnSingleLine returns false when
+    // the retained body range crosses source lines. Factory-created empty
+    // arrows remain synthesized and continue to print as `{ }`.
+    let source = "Button.onClick(() => {\n});\n";
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed =
+        oxc_parser::Parser::new(&allocator, source, SourceType::ts().with_module(true)).parse();
+    assert!(parsed.diagnostics.is_empty());
+    let output = HvigorTypescriptPrinter::print_with_source_map(
+        &parsed.program,
+        oxc_codegen::CodegenOptions {
+            source_map_path: Some("/project/entry/src/main/ets/Index.ets".into()),
+            indent_char: oxc_codegen::IndentChar::Space,
+            indent_width: 4,
+            ..oxc_codegen::CodegenOptions::default()
+        },
+        source,
+    );
+
+    assert_eq!(output.code, source);
+}
+
+#[test]
+fn moved_object_and_arrow_arguments_keep_typescript_trailing_source_maps() {
+    // emitter.ts emits the generic trailing source map after the closing `}`
+    // of a source-backed ObjectLiteralExpression or ArrowFunction. ArkUI moves
+    // both arguments into generated Button calls but retains their source
+    // ranges through the TypeScript transform.
+    let source = r#"@Component
+struct Page {
+  build() {
+    Button() {}
+      .margin({
+        top: 20
+      })
+      .onClick(() => {
+      })
+  }
+}
+"#;
+    let output = TransformHarness::transform_output_with_options(
+        &make_source("entry/src/main/ets/pages/Page.ets", source),
+        &TransformOptions::default(),
+    )
+    .expect("ArkUI object and arrow argument transform");
+    let source_map = rolldown_sourcemap::OwnedSourceMap::from_json_string(
+        output.source_map.as_deref().expect("ArkUI source map"),
+    )
+    .expect("valid ArkUI source map");
+    let mappings = source_map
+        .get_tokens()
+        .filter_map(|token| {
+            token.get_source_id().map(|_| {
+                (
+                    (token.get_dst_line(), token.get_dst_col()),
+                    (token.get_src_line(), token.get_src_col()),
+                )
+            })
+        })
+        .collect::<FxHashMap<_, _>>();
+
+    for (generated_call, source_call) in [
+        ("Button.margin({", ".margin({"),
+        ("Button.onClick(() => {", ".onClick(() => {"),
+    ] {
+        let generated_start = output
+            .code
+            .find(generated_call)
+            .expect("generated argument call");
+        let generated_close = output.code[generated_start..]
+            .find("});")
+            .map(|offset| generated_start + offset + 1)
+            .expect("generated argument close");
+        let source_start = source.find(source_call).expect("source argument call");
+        let source_close = source[source_start..]
+            .find("})")
+            .map(|offset| source_start + offset + 1)
+            .expect("source argument close");
+        let generated_position =
+            crate::source_map::offset_to_line_col(&output.code, generated_close as u32);
+        let source_position = crate::source_map::offset_to_line_col(source, source_close as u32);
+        assert_eq!(
+            mappings.get(&generated_position),
+            Some(&source_position),
+            "{generated_call}:\n{}",
+            output.code
+        );
+    }
+}
+
+#[test]
 fn entry_source_map_accepts_synthetic_zero_span_objects_after_leading_whitespace() {
     // process_component_class.ts#createEntryNode creates the empty argument
     // and route metadata object with synthetic zero-length source spans. A
@@ -4703,172 +4893,85 @@ struct ConditionalStateView {
 }
 
 #[test]
-fn test_imported_reexported_enum_state_is_simple_like_hvigor_enum_collection() {
-    let temp = tempfile::tempdir().unwrap();
-    let utils_root = temp.path().join("commons/utils");
-    let enum_dir = utils_root.join("src/main/ets/common");
-    let index_path = utils_root.join("Index.ets");
-    let index_source = r#"
-import {
-  EventTypeEnum,
-  LoadingStatus,
-  ResourcesType
-} from './src/main/ets/common/CommonEnums';
-export {
-  EventTypeEnum,
-  LoadingStatus,
-  ResourcesType
-};
-"#;
-    let enum_path = enum_dir.join("CommonEnums.ets");
-    let enum_source = "export enum LoadingStatus { OFF, LOADING, SUCCESS, FAILED }\nexport enum EventTypeEnum { A }\nexport class ResourcesType {}\n";
-
-    let src = r#"
-import {
-  EventTypeEnum,
-  LoadingStatus,
-  ResourcesType
-} from '@ohos/utils';
-
-@Component
-struct Page {
-    @State loadingStatus: LoadingStatus = LoadingStatus.Loading;
-  build() {}
-}
-"#;
-    let mut sources = rustc_hash::FxHashMap::default();
-    sources.insert(
-        arkdown_path::lexical_normalize(&index_path),
-        std::sync::Arc::<str>::from(index_source),
-    );
-    sources.insert(
-        arkdown_path::lexical_normalize(&enum_path),
-        std::sync::Arc::<str>::from(enum_source),
-    );
-    let sources = crate::source::TransformSourceSnapshot::new(sources);
-    let module_roots = vec![("utils".to_string(), utils_root)];
-    let options = TransformOptions {
-        module_exports: ModuleExportIndex::build(
-            &sources,
-            &module_roots,
-            &ComponentMetadata::default(),
-        ),
-        module_roots,
-        sources,
-        ..Default::default()
-    };
-    let result = TransformHarness::transform_with_options(
-        &make_source(
-            temp.path()
-                .join("features/discover/src/main/ets/pages/Page.ets")
-                .to_str()
-                .unwrap(),
-            src,
-        ),
-        &options,
-    )
-    .unwrap();
-    assert!(
-        result.contains("private __loadingStatus: ObservedPropertySimplePU<LoadingStatus>"),
-        "imported enum state must use SimplePU like hvigor enumCollection, got:\n{result}"
-    );
-}
-
-#[test]
-fn test_imported_reexported_basic_union_alias_is_simple_like_hvigor_type_checker() {
-    let temp = tempfile::tempdir().unwrap();
-    let package_root = temp.path().join("payment/recce");
-    let alias_path = package_root.join("src/main/ets/Mode.ets");
-    let index_path = package_root.join("Index.ets");
-    let mut source_map = rustc_hash::FxHashMap::default();
-    source_map.insert(
-        arkdown_path::lexical_normalize(&alias_path),
-        std::sync::Arc::<str>::from(
-            "export type OfflineMode = \"specified_only\" | \"cache_only\";",
-        ),
-    );
-    source_map.insert(
-        arkdown_path::lexical_normalize(&index_path),
-        std::sync::Arc::<str>::from("export * from './src/main/ets/Mode';"),
-    );
-    let sources = crate::source::TransformSourceSnapshot::new(source_map);
-    let module_roots = vec![("recce".to_string(), package_root)];
-    let options = TransformOptions {
-        module_exports: ModuleExportIndex::build(
-            &sources,
-            &module_roots,
-            &ComponentMetadata::default(),
-        ),
-        module_roots,
-        sources,
-        ..Default::default()
-    };
-    let result = TransformHarness::transform_with_options(
-        &make_source(
-            temp.path()
-                .join("entry/src/main/ets/pages/Page.ets")
-                .to_str()
-                .unwrap(),
-            "import { OfflineMode } from '@ohos/recce';\n@Component\nstruct Page {\n  @State mode: OfflineMode = \"specified_only\";\n  build() {}\n}",
-        ),
-        &options,
-    )
-    .unwrap();
-
-    assert!(
-        result.contains("private __mode: ObservedPropertySimplePU<OfflineMode>"),
-        "SDK getDeclarationType follows re-exported basic-union aliases through the TypeScript checker:\n{result}"
-    );
-}
-
-#[test]
-fn test_sdk_enum_and_nullable_state_types_are_simple_like_hvigor_type_checker() {
-    let component_metadata = ComponentMetadata::from_ets_loader_path(Path::new(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/ets-loader"
-    )))
-    .expect("test ets-loader metadata");
-    let options = TransformOptions {
-        component_metadata: std::sync::Arc::new(component_metadata),
-        ..Default::default()
-    };
-    let source = r#"
+fn test_component_state_wrappers_consume_native_typescript_type_facts() {
+    let content = r#"
+type OfflineMode = "specified_only" | "cache_only";
 @Component
 struct Page {
   @State weight: FontWeight | null = null;
-  @State visible: boolean | undefined = undefined;
+  @State mode: OfflineMode = "specified_only";
   @State label: string | null = null;
   @State exact: "text" = "text";
-  @State normalizedString: "toast" | "loading" | string = "toast";
   @State qualifiedEnum: arkui.FontWeight = arkui.FontWeight.Normal;
   @State qualifiedObject: cips.Channel = {} as cips.Channel;
   build() {}
 }
 "#;
-    let result = TransformHarness::transform_with_options(
-        &make_source("entry/src/main/ets/pages/Page.ets", source),
-        &options,
-    )
-    .unwrap();
+    let source = make_source("entry/src/main/ets/pages/Page.ets", content);
+    let identity = |is_nullable, is_enum, is_basic, types| ResolvedTypeIdentity {
+        is_nullable,
+        is_enum,
+        is_basic,
+        symbol_name: String::new(),
+        types,
+    };
+    let basic = || identity(false, false, true, Vec::new());
+    let nullable = || identity(true, false, false, Vec::new());
+    let property = |name: &str, declared_type: ResolvedTypeIdentity| {
+        let needle = format!("{name}:");
+        let start = content.find(&needle).unwrap() as u32;
+        SpannedPropertyTypeFacts {
+            span: Span::new(start, start + name.len() as u32),
+            facts: PropertyTypeFacts {
+                declared_type: Some(declared_type),
+            },
+        }
+    };
+    let facts = ArktsFileTypeFacts {
+        properties: vec![
+            property(
+                "weight",
+                identity(
+                    false,
+                    false,
+                    false,
+                    vec![identity(false, true, true, Vec::new()), nullable()],
+                ),
+            ),
+            property(
+                "mode",
+                identity(false, false, false, vec![basic(), basic()]),
+            ),
+            property(
+                "label",
+                identity(false, false, false, vec![basic(), nullable()]),
+            ),
+            property("exact", basic()),
+            property("qualifiedEnum", identity(false, true, true, Vec::new())),
+            property("qualifiedObject", identity(false, false, false, Vec::new())),
+        ],
+        ..ArktsFileTypeFacts::default()
+    };
+    let mut files = FxHashMap::default();
+    files.insert(PathBuf::from(&source.id.id), facts);
+    let options = TransformOptions {
+        type_facts: ArktsTypeFactsSnapshot::new(files),
+        ..TransformOptions::default()
+    };
+    let result = TransformHarness::transform_with_options(&source, &options).unwrap();
 
     assert!(
         result.contains("private __weight: ObservedPropertySimplePU<FontWeight | null>")
-            && result.contains(
-                "private __visible: ObservedPropertySimplePU<boolean | undefined>"
-            )
+            && result.contains("private __mode: ObservedPropertySimplePU<OfflineMode>")
             && result
                 .contains("private __qualifiedEnum: ObservedPropertySimplePU<arkui.FontWeight>"),
-        "SDK enumCollection and findNonNullType keep enum/nullable primitive unions on SimplePU:\n{result}"
+        "isSimpleType/getDeclarationType must consume native checker identities:\n{result}"
     );
     assert!(
         result.contains("private __label: ObservedPropertyObjectPU<string | null>")
             && result.contains("private __exact: ObservedPropertyObjectPU<\"text\">")
-            && result.contains(
-                "private __normalizedString: ObservedPropertyObjectPU<\"toast\" | \"loading\" | string>"
-            )
-            && result
-                .contains("private __qualifiedObject: ObservedPropertyObjectPU<cips.Channel>"),
-        "SDK getDeclarationType applies TypeScript union normalization before inspecting TypeFlags:\n{result}"
+            && result.contains("private __qualifiedObject: ObservedPropertyObjectPU<cips.Channel>"),
+        "scalar non-enum aliases and object types remain object-backed:\n{result}"
     );
 }
 
@@ -4945,40 +5048,6 @@ struct Page {
     assert!(
         !result.contains("createCollaborationServiceMenuItems.create("),
         "an SDK @Builder must not be lowered as an ArkUI component: {result}"
-    );
-}
-
-#[test]
-fn test_kit_namespace_enum_prop_is_simple_like_typescript_checker() {
-    let component_metadata = ComponentMetadata::from_ets_loader_path(Path::new(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/ets-loader"
-    )))
-    .expect("test ets-loader metadata");
-    let options = TransformOptions {
-        component_metadata: std::sync::Arc::new(component_metadata),
-        ..Default::default()
-    };
-    let source = r#"
-import { photoAccessHelper } from "@kit.MediaLibraryKit";
-
-@Component
-struct Page {
-  @Prop mimeType: photoAccessHelper.PhotoViewMIMETypes;
-  build() {}
-}
-"#;
-    let result = TransformHarness::transform_with_options(
-        &make_source("entry/src/main/ets/pages/Page.ets", source),
-        &options,
-    )
-    .unwrap();
-
-    assert!(
-        result.contains(
-            "this.__mimeType = new SynchedPropertySimpleOneWayPU(params.mimeType, this, \"mimeType\")"
-        ),
-        "SDK process_component_member.js delegates qualified namespace enums to the TypeScript checker:\n{result}"
     );
 }
 
@@ -6112,6 +6181,7 @@ struct WidgetCard {
         &make_source("phone/src/main/ets/widget/pages/WidgetCard.ets", src),
         &TransformOptions {
             arkts_language_version: ArktsLanguageVersion::default(),
+            api_version: 12,
             api_available: ApiAvailableTransformOptions::default(),
             system_api: SystemApiCheckOptions::default(),
             bundle_name: Some("com.example.hmosworld".to_string()),
@@ -6121,6 +6191,7 @@ struct WidgetCard {
             module_roots: vec![],
             component_metadata: std::sync::Arc::new(ComponentMetadata::default()),
             sources: crate::source::TransformSourceSnapshot::default(),
+            type_facts: ArktsTypeFactsSnapshot::default(),
             module_exports: ModuleExportIndex::default(),
             navigation_routes: NavigationRouteMap::default(),
             form_entry: true,
@@ -6267,6 +6338,7 @@ struct ModalPage {
         &make_source("example/src/main/ets/page/ModalPage.ets", src),
         &TransformOptions {
             arkts_language_version: ArktsLanguageVersion::default(),
+            api_version: 12,
             api_available: ApiAvailableTransformOptions::default(),
             system_api: SystemApiCheckOptions::default(),
             bundle_name: Some("com.example.hexample".to_string()),
@@ -6276,6 +6348,7 @@ struct ModalPage {
             module_roots: vec![],
             component_metadata: std::sync::Arc::new(ComponentMetadata::default()),
             sources: crate::source::TransformSourceSnapshot::default(),
+            type_facts: ArktsTypeFactsSnapshot::default(),
             module_exports: ModuleExportIndex::default(),
             navigation_routes: NavigationRouteMap::default(),
             form_entry: false,

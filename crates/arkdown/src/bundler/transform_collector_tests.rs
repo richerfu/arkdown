@@ -113,7 +113,7 @@ fn transform_store_hands_crossplatform_facts_to_bundle_state() {
         module_id: "/project/entry/src/main/ets/model/Router.js".to_string(),
         module_source_code: None,
         source_map: None,
-        emits_javascript: false,
+        module_source_emits_javascript: false,
         is_shared_module: false,
         insight_intent: InsightIntentSourceMetadata::default(),
         crossplatform_collection: CrossplatformSourceCollection {

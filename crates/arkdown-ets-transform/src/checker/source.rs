@@ -6,14 +6,10 @@ use oxc_allocator::Allocator;
 
 use crate::error::EtsTransformError;
 use crate::source::{ArktsSourceLanguageDetector, CompileArktsSourceType};
-use crate::transform::api_available::ApiAvailableTransformOptions;
 use crate::transform::component_meta::ComponentMetadata;
-use crate::transform::legacy_extend::LegacyExtendSource;
+use crate::transform::legacy_extend::ArktsExtendSource;
 use crate::transform::static_directive::StaticDirectiveSource;
-use crate::transform::system_api::Arkts11SystemApiValidator;
-use crate::transform::{
-    CustomComponentSemanticInventory, ModuleExportIndex, SystemApiCheckOptions, TransformOptions,
-};
+use crate::transform::{CustomComponentSemanticInventory, ModuleExportIndex, TransformOptions};
 use crate::TransformSourceSnapshot;
 
 use super::{EtsCheckReport, EtsChecker};
@@ -26,8 +22,6 @@ use super::{EtsCheckReport, EtsChecker};
 pub struct ArktsSourceChecker {
     component_metadata: Arc<ComponentMetadata>,
     arkts_language_version: ArktsLanguageVersion,
-    api_available: ApiAvailableTransformOptions,
-    system_api: SystemApiCheckOptions,
     page_context: Option<ArktsSourcePageContext>,
     project_semantics: Option<ArktsProjectSemantics>,
 }
@@ -37,8 +31,6 @@ impl ArktsSourceChecker {
         Self {
             component_metadata,
             arkts_language_version: ArktsLanguageVersion::default(),
-            api_available: ApiAvailableTransformOptions::default(),
-            system_api: SystemApiCheckOptions::default(),
             page_context: None,
             project_semantics: None,
         }
@@ -81,26 +73,6 @@ impl ArktsSourceChecker {
         self
     }
 
-    pub fn with_api_available_context(
-        mut self,
-        compatible_sdk_version: &str,
-        runtime_os: &str,
-    ) -> Self {
-        self.api_available =
-            ApiAvailableTransformOptions::from_build_context(compatible_sdk_version, runtime_os);
-        self.system_api = self
-            .system_api
-            .clone()
-            .with_compatible_sdk_version(compatible_sdk_version)
-            .with_runtime_os(runtime_os);
-        self
-    }
-
-    pub fn with_system_api_context(mut self, context: SystemApiCheckOptions) -> Self {
-        self.system_api = context;
-        self
-    }
-
     pub fn with_page_context(
         mut self,
         entry_source: bool,
@@ -117,7 +89,7 @@ impl ArktsSourceChecker {
 
     pub fn check(&self, source_id: &str, content: &str) -> EtsCheckReport {
         let allocator = Allocator::default();
-        let parser_source = LegacyExtendSource::new(content, self.arkts_language_version);
+        let parser_source = ArktsExtendSource::new(content, self.arkts_language_version);
         let path = Path::new(source_id);
         let source_language_version = ArktsSourceLanguageDetector::new(parser_source.as_str())
             .version_for_path(self.arkts_language_version, path);
@@ -177,40 +149,7 @@ impl ArktsSourceChecker {
                 context.check_entry,
             );
         }
-        let mut report = checker.check();
-        let (module_exports, sources, module_roots) = if let Some(project) = &self.project_semantics
-        {
-            (
-                &project.module_exports,
-                &project.sources,
-                project.module_roots.as_slice(),
-            )
-        } else {
-            static EMPTY_EXPORTS: std::sync::LazyLock<ModuleExportIndex> =
-                std::sync::LazyLock::new(ModuleExportIndex::default);
-            static EMPTY_SOURCES: std::sync::LazyLock<TransformSourceSnapshot> =
-                std::sync::LazyLock::new(TransformSourceSnapshot::default);
-            (
-                &*EMPTY_EXPORTS,
-                &*EMPTY_SOURCES,
-                &[] as &[(String, std::path::PathBuf)],
-            )
-        };
-        report.extend(
-            Arkts11SystemApiValidator::new(
-                source_id,
-                content,
-                self.api_available,
-                &self.system_api.clone().with_ohos_test_source(
-                    ArktsSourceCheckPath::new(std::path::Path::new(source_id)).is_ohos_test(),
-                ),
-                module_exports,
-                sources,
-                module_roots,
-            )
-            .diagnostics(&parsed.program),
-        );
-        report
+        checker.check()
     }
 
     fn custom_component_options(&self) -> TransformOptions {
@@ -237,20 +176,4 @@ struct ArktsProjectSemantics {
     sources: TransformSourceSnapshot,
     module_roots: Vec<(String, std::path::PathBuf)>,
     module_exports: ModuleExportIndex,
-}
-
-struct ArktsSourceCheckPath<'a> {
-    path: &'a std::path::Path,
-}
-
-impl<'a> ArktsSourceCheckPath<'a> {
-    fn new(path: &'a std::path::Path) -> Self {
-        Self { path }
-    }
-
-    fn is_ohos_test(&self) -> bool {
-        self.path
-            .components()
-            .any(|component| component.as_os_str() == "ohosTest")
-    }
 }

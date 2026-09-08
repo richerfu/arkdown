@@ -1,6 +1,6 @@
+mod annotation;
 pub(crate) mod api_available;
 mod auto_lazy_import;
-pub(crate) mod available_annotation;
 pub(crate) use auto_lazy_import::apply as apply_auto_lazy_import;
 mod build_fn;
 mod builder_factory;
@@ -16,6 +16,7 @@ mod expand_import_path;
 mod global_rewrite;
 mod insight_intent;
 pub(crate) mod legacy_extend;
+pub use legacy_extend::ArktsExtendSource;
 mod local_builder;
 mod navigation;
 pub mod source_emit;
@@ -24,6 +25,7 @@ pub(crate) mod static_directive;
 mod static_graph;
 mod syntax;
 pub(crate) mod system_api;
+mod type_facts;
 pub(crate) mod viewpu_emit;
 mod viewpu_finalize;
 mod viewv2;
@@ -54,6 +56,7 @@ use oxc_span::{GetSpan, SPAN};
 
 use crate::error::EtsTransformError;
 use crate::source::{ArktsSourceLanguageDetector, CompileArktsSourceType, TransformSourceSnapshot};
+use crate::transform::annotation::AnnotationLowerer;
 use crate::transform::api_available::{ApiAvailableLowerer, ApiAvailableTransformOptions};
 use crate::transform::build_fn::{
     BuildBodyInfo, BuildBodyPlan, BuildBodySharedInputs, ExtendBodyPlan, StylesMethodInfo,
@@ -73,11 +76,11 @@ use crate::transform::component_analysis::{
     BuilderFunctionNameCollector, CustomComponentNameCollector, ExtendAttributeIndex,
     ImportedCustomComponentNamesCollector, LocalBuilderFileInventory,
     PreviewComponentNameCollector, SimpleTypeContext, StructBuilderMethodNames,
-    StructBuilderParamNames, StructMutableBuilderProperties, StructRegularAttributeProperties,
+    StructBuilderParamNames, StructRegularAttributeProperties,
 };
 use crate::transform::component_collection::ComponentNameCollector;
 use crate::transform::component_meta::ComponentMetadata;
-use crate::transform::declaration_emit::{ParamsInterfaceEmitter, TopLevelFunctionEmitter};
+use crate::transform::declaration_emit::TopLevelFunctionEmitter;
 use crate::transform::decorator::{ArkuiDecorator, ArkuiDecoratorName};
 use crate::transform::entry::{
     EntryOptions, EntryRegistrationBlock, EntryRegistrationInfo, PreviewRegistrationBlock,
@@ -97,7 +100,6 @@ use crate::transform::source_emit::HvigorTypescriptPrinter;
 use crate::transform::source_text::ViewpuOutputText;
 use crate::transform::static_directive::StaticDirectiveSource;
 use crate::transform::static_graph::StaticArktsGraphProjection;
-use crate::transform::system_api::Arkts11SystemApiValidator;
 pub use crate::transform::system_api::SystemApiCheckOptions;
 use crate::transform::viewpu_emit::GeneratedViewpuName;
 use crate::transform::viewpu_finalize::ViewpuProgramFinalizer;
@@ -108,6 +110,13 @@ pub(crate) use component_analysis::{
 };
 pub use crossplatform_collection::CrossplatformSourceCollection;
 pub use navigation::{NavigationRoute, NavigationRouteMap};
+use type_facts::BuilderAccessKind;
+pub use type_facts::{
+    AnnotationConstant, AnnotationImportDisposition, AnnotationInfo, AnnotationProperty,
+    AnnotationUse, ArktsFileTypeFacts, ArktsTypeFactsSnapshot, PropertyTypeFacts,
+    ResolvedTypeIdentity, SpannedAnnotationImport, SpannedAnnotationInfo, SpannedAnnotationUse,
+    SpannedPropertyTypeFacts, SpannedTypeIdentity,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckerMode {
@@ -119,6 +128,9 @@ pub enum CheckerMode {
 pub struct TransformOptions {
     /// Explicit build-wide ArkTS language. The default remains ArkTS 1.1.
     pub arkts_language_version: ArktsLanguageVersion,
+    /// Normalized `projectConfig.minAPIVersion`. Source transforms use this
+    /// value for API-gated behavior such as WrappedBuilder support.
+    pub api_version: u32,
     pub(crate) api_available: ApiAvailableTransformOptions,
     pub system_api: SystemApiCheckOptions,
     pub bundle_name: Option<String>,
@@ -133,6 +145,10 @@ pub struct TransformOptions {
     pub module_roots: Vec<(String, PathBuf)>,
     pub component_metadata: Arc<ComponentMetadata>,
     pub sources: TransformSourceSnapshot,
+    /// TypeScript checker-owned facts consumed by OXC lowering. The snapshot
+    /// is prepared once before Rolldown starts; transform hooks never query a
+    /// compiler process or infer types independently.
+    pub type_facts: ArktsTypeFactsSnapshot,
     pub(crate) module_exports: ModuleExportIndex,
     /// Source-indexed `routerMap` data supplied by the build coordinator.
     ///
@@ -192,6 +208,7 @@ impl Default for TransformOptions {
     fn default() -> Self {
         Self {
             arkts_language_version: ArktsLanguageVersion::default(),
+            api_version: 1,
             api_available: ApiAvailableTransformOptions::default(),
             system_api: SystemApiCheckOptions::default(),
             bundle_name: None,
@@ -201,6 +218,7 @@ impl Default for TransformOptions {
             module_roots: Vec::new(),
             component_metadata: Arc::new(ComponentMetadata::default()),
             sources: TransformSourceSnapshot::default(),
+            type_facts: ArktsTypeFactsSnapshot::default(),
             module_exports: ModuleExportIndex::default(),
             navigation_routes: NavigationRouteMap::default(),
             form_entry: false,
@@ -282,7 +300,7 @@ impl<'a> ArkuiComponentNameCollector<'a> {
             .map(|options| options.arkts_language_version)
             .unwrap_or_default();
         let parser_source =
-            legacy_extend::LegacyExtendSource::new(self.content, arkts_language_version);
+            legacy_extend::ArktsExtendSource::new(self.content, arkts_language_version);
         let source_type =
             CompileArktsSourceType::from_id_with_version(self.id, arkts_language_version);
         let parsed = match self.options {
@@ -376,7 +394,7 @@ impl<'a> ArktsTransformer<'a> {
     pub fn transform_with_source_map(&self) -> Result<ArktsTransformOutput, EtsTransformError> {
         let source = self.source;
         let options = self.options.as_ref();
-        let parser_source = legacy_extend::LegacyExtendSource::new(
+        let parser_source = legacy_extend::ArktsExtendSource::new(
             source.content.as_str(),
             options.arkts_language_version,
         );
@@ -409,22 +427,22 @@ impl<'a> ArktsTransformer<'a> {
             return self.transform_static(&allocator, &mut parsed.program);
         }
 
+        if let Some(facts) = options.type_facts.file_facts(&source.id.id) {
+            AnnotationLowerer::new(&allocator, &source.id.id, facts)
+                .program(&mut parsed.program)?;
+        } else if AnnotationLowerer::requires_facts(&parsed.program) {
+            return Err(EtsTransformError::MissingTypeFacts {
+                file: source.id.id.clone(),
+                capability: "OH annotation lowering",
+            });
+        }
+
         let mock_setup_decorators_lowered = if options.disable_mock_setup_decorator {
             MockSetupDecoratorLowerer::new().program(&mut parsed.program)
         } else {
             false
         };
         let needs_api_available = options.api_available.should_transform_source(content);
-        let system_api_validator = Arkts11SystemApiValidator::new(
-            &source.id.id,
-            content,
-            options.api_available,
-            &options.system_api,
-            &options.module_exports,
-            &options.sources,
-            &options.module_roots,
-        );
-        let needs_system_api_validation = system_api_validator.is_required();
         let mut crossplatform_collection = if options.system_api.collects_crossplatform() {
             CrossplatformSourceCollection::from_program(
                 &parsed.program,
@@ -437,7 +455,6 @@ impl<'a> ArktsTransformer<'a> {
         let syntax_detector = ArktsTransformSyntaxDetector::new();
         if !mock_setup_decorators_lowered
             && !needs_api_available
-            && !needs_system_api_validation
             && !options.system_api.collects_crossplatform()
             && !syntax_detector.program(&parsed.program)
         {
@@ -455,22 +472,13 @@ impl<'a> ArktsTransformer<'a> {
         let mut custom_components = custom_component_inventory.names;
         let mut custom_component_update_props = custom_component_inventory.info;
 
-        let system_api_validation =
-            needs_system_api_validation.then(|| system_api_validator.validate(&parsed.program));
-        if let Some(validation) = &system_api_validation {
-            crossplatform_collection.merge(&validation.crossplatform_dependencies);
+        if options.system_api.collects_crossplatform() {
+            if let Some(facts) = options.type_facts.file_facts(&source.id.id) {
+                crossplatform_collection.merge(&facts.crossplatform_dependencies);
+            }
         }
 
         if matches!(options.checker_mode, CheckerMode::Oxc) {
-            if let Some(validation) = &system_api_validation {
-                let diagnostics = &validation.diagnostics;
-                for diagnostic in diagnostics {
-                    tracing::debug!(file = %source.id.id, diagnostic = ?diagnostic, "system API diagnostic");
-                }
-                if let Some(error) = diagnostics.iter().find(|diagnostic| diagnostic.is_error()) {
-                    return Err(error.clone());
-                }
-            }
             let report = crate::checker::EtsChecker::new(&parsed.program, &source.id.id)
                 .with_component_metadata(&options.component_metadata)
                 .with_custom_component_info(&custom_component_update_props)
@@ -1031,6 +1039,8 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
             global_reuse_pool,
             runtime_options,
             self.has_local_builder_in_file,
+            self.simple_type_context,
+            self.options.api_version,
         )
         .lower()
         {
@@ -1128,12 +1138,7 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
         statement: &Statement<'_>,
     ) -> Result<Option<StatementReplacementPlan<'b>>, EtsTransformError> {
         let replacement = match statement {
-            Statement::AnnotationDeclaration(annotation) => Some(
-                StatementReplacementPlan::AstStatements(ArenaVec::from_value_in(
-                    ParamsInterfaceEmitter::new(annotation).statement(self.allocator, false),
-                    &self.allocator,
-                )),
-            ),
+            Statement::AnnotationDeclaration(_) => None,
             Statement::ClassDeclaration(_)
                 if SendableClassLowerer::statement_needs_lowering(statement) =>
             {
@@ -1168,12 +1173,7 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                             &self.allocator,
                         ))
                     }),
-                Declaration::AnnotationDeclaration(annotation) => Some(
-                    StatementReplacementPlan::AstStatements(ArenaVec::from_value_in(
-                        ParamsInterfaceEmitter::new(annotation).statement(self.allocator, true),
-                        &self.allocator,
-                    )),
-                ),
+                Declaration::AnnotationDeclaration(_) => None,
                 Declaration::ClassDeclaration(_)
                     if SendableClassLowerer::statement_needs_lowering(statement) =>
                 {
@@ -1297,6 +1297,10 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                     self.options.bundle_name.as_deref(),
                     self.module_name.as_deref(),
                 )
+                .with_type_facts(
+                    self.simple_type_context.file_facts(),
+                    self.options.api_version,
+                )
                 .with_shared_extend_attributes(Arc::clone(&self.extend_attributes))
                 // Top-level @Builder functions share the same file-level
                 // @Styles registry as component build methods in
@@ -1379,8 +1383,6 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
         }
         let builder_method_names = StructBuilderMethodNames::new(statement).collect();
         let builder_param_names = StructBuilderParamNames::new(statement).collect();
-        let mutable_builder_properties =
-            Arc::new(StructMutableBuilderProperties::new(statement).collect());
         let regular_attribute_properties =
             Arc::new(StructRegularAttributeProperties::new(statement, false).collect());
         let mut builder_initializer_names = self.builder_functions.clone();
@@ -1476,7 +1478,6 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                             !self.builder_param_initializer_is_builder(
                                 initializer,
                                 &builder_initializer_names,
-                                &mutable_builder_properties,
                             )
                         })
                     {
@@ -1524,8 +1525,9 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                         provide_allow_override,
                         provide_override_key,
                         decorator_arg,
-                        is_simple_type: type_node.is_none_or(|ty| {
-                            self.simple_type_context.is_simple_type_annotation(ty)
+                        is_simple_type: type_node.is_some_and(|ty| {
+                            self.simple_type_context
+                                .is_simple_type_annotation(ty, property.key.span())
                         }),
                     });
                 }
@@ -1556,7 +1558,10 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                         self.module_name.as_deref(),
                     )
                     .with_shared_extend_attributes(Arc::clone(&self.extend_attributes))
-                    .with_shared_mutable_builder_properties(Arc::clone(&mutable_builder_properties))
+                    .with_type_facts(
+                        self.simple_type_context.file_facts(),
+                        self.options.api_version,
+                    )
                     .with_shared_regular_attribute_properties(Arc::clone(
                         &regular_attribute_properties,
                     ))
@@ -1618,7 +1623,10 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                         self.module_name.as_deref(),
                     )
                     .with_shared_extend_attributes(Arc::clone(&self.extend_attributes))
-                    .with_shared_mutable_builder_properties(Arc::clone(&mutable_builder_properties))
+                    .with_type_facts(
+                        self.simple_type_context.file_facts(),
+                        self.options.api_version,
+                    )
                     .with_shared_regular_attribute_properties(Arc::clone(
                         &regular_attribute_properties,
                     ))
@@ -1660,7 +1668,10 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                         self.module_name.as_deref(),
                     )
                     .with_shared_extend_attributes(Arc::clone(&self.extend_attributes))
-                    .with_shared_mutable_builder_properties(Arc::clone(&mutable_builder_properties))
+                    .with_type_facts(
+                        self.simple_type_context.file_facts(),
+                        self.options.api_version,
+                    )
                     .with_styles_methods(&styles_methods);
                     page_transition_methods.push(PageTransitionMethodInfo {
                         method,
@@ -1911,7 +1922,6 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
         &self,
         initializer: &Expression<'_>,
         builder_names: &FxHashSet<String>,
-        mutable_builder_properties: &FxHashSet<String>,
     ) -> bool {
         match initializer {
             Expression::Identifier(identifier) => builder_names.contains(identifier.name.as_str()),
@@ -1922,18 +1932,9 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                 if member.property.name != "builder" {
                     return false;
                 }
-                match &member.object {
-                    Expression::CallExpression(call) => matches!(
-                        &call.callee,
-                        Expression::Identifier(identifier)
-                            if matches!(identifier.name.as_str(), "wrapBuilder" | "mutableBuilder")
-                    ),
-                    Expression::StaticMemberExpression(receiver) => {
-                        matches!(&receiver.object, Expression::ThisExpression(_))
-                            && mutable_builder_properties.contains(receiver.property.name.as_str())
-                    }
-                    _ => false,
-                }
+                self.simple_type_context
+                    .builder_access_kind(member.span, self.options.api_version)
+                    .is_some()
             }
             _ => false,
         }
@@ -2374,7 +2375,7 @@ impl<'a, 'b> ComponentRawObjectFields<'a, 'b> {
             };
             if !self
                 .simple_type_context
-                .is_simple_type_annotation(type_node)
+                .is_simple_type_annotation(type_node, property.key.span())
             {
                 names.insert(name.into_owned());
             }

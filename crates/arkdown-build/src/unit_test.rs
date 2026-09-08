@@ -574,20 +574,6 @@ impl<'a> UnitTestArtifactWriter<'a> {
         }
     }
 
-    pub fn stage_compiled_assets(
-        &self,
-        modules_abc: &Path,
-        source_maps: Option<&Path>,
-    ) -> Result<()> {
-        let output = self.layout.test_assets_ets_dir();
-        std::fs::create_dir_all(&output)?;
-        std::fs::copy(modules_abc, self.layout.test_assets_modules_abc())?;
-        if let Some(source_maps) = source_maps.filter(|path| path.is_file()) {
-            std::fs::copy(source_maps, self.layout.test_assets_source_maps())?;
-        }
-        Ok(())
-    }
-
     /// `TestCopyMockConfigJson.copyMockConfigJson` — a missing compiler output
     /// is a debug-only no-op in hvigor.
     pub fn copy_mock_config_json(&self) -> Result<()> {

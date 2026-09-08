@@ -203,6 +203,30 @@ fn bytecode_har_declarations_match_sdk_generated_entries_and_printer() {
     );
 }
 
+/// `ets_checker.ts::processHarSourceFiles` consumes compiler roots directly;
+/// a ByteCode HAR whose public entry is at the module root has no obligation
+/// to create `src/main/ets`.
+#[test]
+fn bytecode_har_root_entry_does_not_require_source_tree() {
+    let temp = tempfile::tempdir().expect("create module root");
+    let source_dir = temp.path().join("src/main/ets");
+    let entry = temp.path().join("Index.ets");
+    std::fs::write(&entry, "export const answer: number = 42;\n")
+        .expect("write ByteCode HAR entry");
+    let declarations_dir = temp.path().join("etsFortgz");
+
+    HarDeclarationGenerator::new(temp.path(), &source_dir, declarations_dir.clone(), "entry")
+        .with_module_entry_source(Some("Index.ets"))
+        .generate()
+        .expect("generate root-entry declaration");
+
+    assert_eq!(
+        std::fs::read_to_string(declarations_dir.join("entry/Index.d.ets"))
+            .expect("read root-entry declaration"),
+        "export declare const answer: number;\r\n"
+    );
+}
+
 #[test]
 fn bundled_declarations_replace_source_tree_with_self_contained_entry() {
     let temp = tempfile::tempdir().expect("create module root");

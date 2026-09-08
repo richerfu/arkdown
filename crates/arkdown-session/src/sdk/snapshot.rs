@@ -7,6 +7,7 @@ use arkdown_core::{is_harmony_os, ArktsLanguageVersion, SdkConfig};
 use arkdown_path::lexical_normalize;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use walkdir::WalkDir;
 
 use crate::sdk_compile_plugin::{SdkCompilePluginSnapshot, SdkSupportExtensionSet};
 use crate::sdk_schemas::{SdkSchemaKind, SdkSchemaPath, SdkSchemaResolver};
@@ -55,9 +56,43 @@ pub struct SdkCrossplatformDependency {
     pub components: Vec<String>,
 }
 
+/// One synchronous SDK checker callback registered by
+/// `compiler/main.js::collectExternalApiCheckPlugin`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SdkApiCheckPlugin {
+    pub os_name: String,
+    pub tag: String,
+    pub plugin_type: String,
+    pub path: PathBuf,
+    pub function_name: String,
+}
+
+/// One class-style SDK checker registered by
+/// `compiler/main.js::collectExternalApiChecker` from `apiCheckPlugins`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SdkApiClassCheckPlugin {
+    pub tag_name: String,
+    pub path: PathBuf,
+    pub class_name: String,
+}
+
+/// One ordered `sdkConfigs` entry consumed by the OH TypeScript resolver.
+///
+/// The three built-in prefixes intentionally retain three entries with the
+/// same path list. `ets_checker.ts::resolveModuleNames` walks this list in
+/// order and `getRealModulePath` lets the last existing path inside one entry
+/// win, so flattening the paths changes resolution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SdkResolverConfig {
+    pub api_paths: Vec<PathBuf>,
+}
+
 /// SDK metadata loaded once at session startup.
 #[derive(Debug, Clone)]
 pub struct SdkSnapshot {
+    /// Loader ETS tables, captured once. None denotes a tool-only SDK; semantic
+    /// checking must diagnose its missing tsconfig instead of inventing tables.
+    pub ets_options: Option<Arc<arkdown_ohos_schema::ets_options::EtsOptions>>,
     /// Root SDK directory.
     pub sdk_root: PathBuf,
     /// Project target API version passed to compilers and SDK tools.
@@ -75,9 +110,27 @@ pub struct SdkSnapshot {
     /// Module prefixes accepted by the SDK system-API transform. Prefixes do
     /// not include the leading `@` (for example `ohos` and `arkui-x`).
     pub module_prefixes: Arc<[String]>,
+    /// Ordered resolver groups corresponding to `main.js::sdkConfigs`.
+    pub resolver_configs: Arc<[SdkResolverConfig]>,
+    /// Direct directory entries corresponding to `main.js::systemModules`.
+    pub system_modules: Arc<[String]>,
+    /// Recursive SDK declaration inventory used by OH SDK JSDoc checks.
+    pub all_module_paths: Arc<[PathBuf]>,
+    /// The two exact ArkUI declaration directories recognized by
+    /// `api_check_utils.ts::isArkuiDependence`.
+    pub arkui_declaration_dirs: Arc<[PathBuf]>,
+    /// `ets_checker.ts` non-SDK-specifier fallback roots: built-in `api` then
+    /// `kits`, excluding `arkts` and external SDK roots.
+    pub fallback_module_roots: Arc<[PathBuf]>,
     /// ArkUI-X API dependency rules loaded from `depsModuleConfig` once at
     /// session startup.
     pub crossplatform_dependencies: Arc<[SdkCrossplatformDependency]>,
+    /// Ordered function-style API/annotation checker callbacks contributed by
+    /// external SDK components.
+    pub api_check_plugins: Arc<[SdkApiCheckPlugin]>,
+    /// Ordered class-style syscap checker callbacks contributed by external
+    /// SDK components.
+    pub api_class_check_plugins: Arc<[SdkApiClassCheckPlugin]>,
     /// Actual `es2abc --help` option inventory, probed once at startup.
     pub es2abc_options: Arc<SdkEs2abcOptionSnapshot>,
     /// Device system-capability declarations parsed once at session startup.
@@ -169,9 +222,24 @@ impl SdkSnapshot {
             arkts_language_version,
         )?;
         snapshot.external_api_paths = component_inventory.external_api_paths.into();
+        snapshot.ets_options = super::ets_options::SdkEtsOptions::load(
+            &config.ets_loader_path,
+            &snapshot.external_api_paths,
+        )?;
         snapshot.global_module_paths = component_inventory.global_module_paths.clone().into();
         snapshot.module_prefixes = component_inventory.module_prefixes.into();
+        snapshot.resolver_configs = component_inventory.resolver_configs.into();
+        snapshot.system_modules = component_inventory.system_modules.into();
+        snapshot.all_module_paths = component_inventory.all_module_paths.into();
+        snapshot.arkui_declaration_dirs = [
+            config.ets_loader_path.join("declarations"),
+            snapshot.sdk_root.join("component"),
+        ]
+        .into();
+        snapshot.fallback_module_roots = component_inventory.fallback_module_roots.into();
         snapshot.crossplatform_dependencies = component_inventory.crossplatform_dependencies.into();
+        snapshot.api_check_plugins = component_inventory.api_check_plugins.into();
+        snapshot.api_class_check_plugins = component_inventory.api_class_check_plugins.into();
         snapshot.es2abc_options = Arc::new(SdkEs2abcOptionSnapshot::inspect(&config.es2abc_path));
         let mut system_capability_roots = config.ets_api_dirs_for(arkts_language_version);
         system_capability_roots.extend(component_inventory.global_module_paths);
@@ -197,6 +265,7 @@ impl SdkSnapshot {
         );
 
         Self {
+            ets_options: None,
             sdk_root,
             api_version,
             component_api_version,
@@ -209,7 +278,14 @@ impl SdkSnapshot {
                 .map(str::to_string)
                 .collect::<Vec<_>>()
                 .into(),
+            resolver_configs: Arc::default(),
+            system_modules: Arc::default(),
+            all_module_paths: Arc::default(),
+            arkui_declaration_dirs: Arc::default(),
+            fallback_module_roots: Arc::default(),
             crossplatform_dependencies: Arc::default(),
+            api_check_plugins: Arc::default(),
+            api_class_check_plugins: Arc::default(),
             es2abc_options: Arc::new(SdkEs2abcOptionSnapshot::default()),
             system_capabilities: Arc::new(SdkSystemCapabilityInventory::default()),
         }
@@ -251,7 +327,13 @@ struct SdkComponentInventory {
     global_module_paths: Vec<PathBuf>,
     external_api_paths: Vec<PathBuf>,
     module_prefixes: Vec<String>,
+    resolver_configs: Vec<SdkResolverConfig>,
+    system_modules: Vec<String>,
+    all_module_paths: Vec<PathBuf>,
+    fallback_module_roots: Vec<PathBuf>,
     crossplatform_dependencies: Vec<SdkCrossplatformDependency>,
+    api_check_plugins: Vec<SdkApiCheckPlugin>,
+    api_class_check_plugins: Vec<SdkApiClassCheckPlugin>,
 }
 
 impl SdkComponentInventory {
@@ -268,10 +350,18 @@ impl SdkComponentInventory {
             .ok_or_else(|| {
                 SdkSnapshotError::InvalidEtsLoaderPath(config.ets_loader_path.clone())
             })?;
-        let mut global_module_paths = config.ets_api_dirs_for(arkts_language_version);
-        global_module_paths.extend(config.ets_arkts_dirs_for(arkts_language_version));
-        global_module_paths.extend(config.ets_kits_dirs_for(arkts_language_version));
+        let api_roots = config.ets_api_dirs_for(arkts_language_version);
+        let kit_roots = config.ets_kits_dirs_for(arkts_language_version);
+        let mut primary_api_paths = api_roots.clone();
+        primary_api_paths.extend(config.ets_arkts_dirs_for(arkts_language_version));
+        primary_api_paths.extend(kit_roots.iter().cloned());
+        let mut global_module_paths = primary_api_paths.clone();
         global_module_paths.retain(|path| path.is_dir());
+        let mut system_modules = Vec::new();
+        let mut all_module_paths = Vec::new();
+        for path in &global_module_paths {
+            Self::collect_module_inventory(path, &mut system_modules, &mut all_module_paths)?;
+        }
         let mut inventory = Self {
             global_module_paths,
             external_api_paths: Vec::new(),
@@ -279,7 +369,19 @@ impl SdkComponentInventory {
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
+            // main.js creates one entry per built-in prefix even though each
+            // entry owns the same apiPath array.
+            resolver_configs: (0..3)
+                .map(|_| SdkResolverConfig {
+                    api_paths: primary_api_paths.clone(),
+                })
+                .collect(),
+            system_modules,
+            all_module_paths,
+            fallback_module_roots: api_roots.into_iter().chain(kit_roots).collect(),
             crossplatform_dependencies: Vec::new(),
+            api_check_plugins: Vec::new(),
+            api_class_check_plugins: Vec::new(),
         };
         if config.compile_api_version <= 9 || !is_harmony_os(runtime_os) {
             return Ok(inventory);
@@ -315,20 +417,55 @@ impl SdkComponentInventory {
                         source,
                     }
                 })?;
+            // projectConfig.externalApiPaths is independent of whether the
+            // component contributes an apiPath entry.
+            inventory.external_api_paths.push(root.clone());
             let Some(api_path) = component.api_path else {
                 continue;
             };
             let api_paths = api_path.into_paths();
+            if !component.api_check_plugin.is_empty() {
+                for plugin in component
+                    .api_check_plugin
+                    .into_iter()
+                    .chain(component.annotation_check_plugin)
+                {
+                    inventory.api_check_plugins.push(SdkApiCheckPlugin {
+                        os_name: component.os_name.clone(),
+                        tag: plugin.tag,
+                        plugin_type: plugin.plugin_type,
+                        path: lexical_normalize(&root.join(plugin.path)),
+                        function_name: plugin.function_name,
+                    });
+                }
+            }
+            for plugin in component.api_check_plugins {
+                inventory
+                    .api_class_check_plugins
+                    .push(SdkApiClassCheckPlugin {
+                        tag_name: plugin.tag_name,
+                        path: lexical_normalize(&root.join(plugin.path)),
+                        class_name: plugin.class_name,
+                    });
+            }
             if api_paths.is_empty() {
                 continue;
             }
-            inventory.external_api_paths.push(root.clone());
-            inventory.global_module_paths.extend(
-                api_paths
-                    .into_iter()
-                    .map(|path| lexical_normalize(&root.join(path)))
-                    .filter(|path| path.is_dir()),
-            );
+            let resolved_api_paths = api_paths
+                .into_iter()
+                .map(|path| lexical_normalize(&root.join(path)))
+                .collect::<Vec<_>>();
+            inventory.resolver_configs.push(SdkResolverConfig {
+                api_paths: resolved_api_paths.clone(),
+            });
+            for path in resolved_api_paths.iter().filter(|path| path.is_dir()) {
+                inventory.global_module_paths.push(path.clone());
+                Self::collect_module_inventory(
+                    path,
+                    &mut inventory.system_modules,
+                    &mut inventory.all_module_paths,
+                )?;
+            }
             let prefix =
                 component
                     .prefix
@@ -358,12 +495,43 @@ impl SdkComponentInventory {
             .retain(|path| seen_global_module_paths.insert(path.clone()));
         inventory.external_api_paths.sort();
         inventory.external_api_paths.dedup();
+        inventory.system_modules.sort();
+        inventory.system_modules.dedup();
+        inventory.all_module_paths.sort();
+        inventory.all_module_paths.dedup();
         inventory.crossplatform_dependencies.sort_by(|left, right| {
             left.api_module
                 .cmp(&right.api_module)
                 .then_with(|| left.function.cmp(&right.function))
         });
         Ok(inventory)
+    }
+
+    fn collect_module_inventory(
+        root: &Path,
+        system_modules: &mut Vec<String>,
+        all_module_paths: &mut Vec<PathBuf>,
+    ) -> Result<(), SdkSnapshotError> {
+        let entries =
+            std::fs::read_dir(root).map_err(|source| SdkSnapshotError::ReadComponentConfig {
+                path: root.to_path_buf(),
+                source,
+            })?;
+        system_modules.extend(
+            entries
+                .filter_map(Result::ok)
+                .filter_map(|entry| entry.file_name().into_string().ok()),
+        );
+        for entry in WalkDir::new(root).follow_links(false) {
+            let entry = entry.map_err(|error| SdkSnapshotError::InvalidComponentConfig {
+                path: root.to_path_buf(),
+                message: error.to_string(),
+            })?;
+            if entry.file_type().is_file() {
+                all_module_paths.push(entry.path().to_path_buf());
+            }
+        }
+        Ok(())
     }
 
     fn load_crossplatform_dependencies(path: &Path) -> Option<Vec<SdkCrossplatformDependency>> {
@@ -399,6 +567,33 @@ struct SdkExternalComponentConfig {
     prefix: Option<String>,
     #[serde(rename = "depsModuleConfig")]
     deps_module_config: Option<PathBuf>,
+    #[serde(rename = "osName", default)]
+    os_name: String,
+    #[serde(rename = "apiCheckPlugin", default)]
+    api_check_plugin: Vec<SdkApiCheckPluginConfig>,
+    #[serde(rename = "annotationCheckPlugin", default)]
+    annotation_check_plugin: Vec<SdkApiCheckPluginConfig>,
+    #[serde(rename = "apiCheckPlugins", default)]
+    api_check_plugins: Vec<SdkApiClassCheckPluginConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SdkApiCheckPluginConfig {
+    tag: String,
+    #[serde(rename = "type", default)]
+    plugin_type: String,
+    path: PathBuf,
+    #[serde(rename = "functionName")]
+    function_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SdkApiClassCheckPluginConfig {
+    #[serde(rename = "tagName")]
+    tag_name: String,
+    path: PathBuf,
+    #[serde(rename = "className")]
+    class_name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -516,7 +711,15 @@ mod tests {
         }
         fs::write(
             external_ets.join("sdkConfig.json"),
-            r#"{"apiPath":["./api","./kits"],"prefix":"@arkui-x","depsModuleConfig":"crossplatform-deps.json"}"#,
+            r#"{
+              "apiPath":["./api","./kits"],
+              "prefix":"@arkui-x",
+              "osName":"HarmonyOS",
+              "apiCheckPlugin":[{"tag":"since","type":"CompatibilityCheck","path":"hooks/since.js","functionName":"checkSinceValue"}],
+              "annotationCheckPlugin":[{"tag":"available","type":"FormatValidation","path":"hooks/available.js","functionName":"checkAvailableFormat"}],
+              "apiCheckPlugins":[{"tagName":"syscap","path":"hooks/syscap.js","className":"SyscapChecker"}],
+              "depsModuleConfig":"crossplatform-deps.json"
+            }"#,
         )
         .expect("external SDK metadata");
         fs::write(
@@ -580,12 +783,39 @@ mod tests {
             .contains(&external_ets.join("kits")));
         assert!(snapshot.module_prefixes.contains(&"arkui-x".to_string()));
         assert_eq!(
+            snapshot.api_check_plugins.as_ref(),
+            &[
+                super::SdkApiCheckPlugin {
+                    os_name: "HarmonyOS".to_string(),
+                    tag: "since".to_string(),
+                    plugin_type: "CompatibilityCheck".to_string(),
+                    path: external_ets.join("hooks/since.js"),
+                    function_name: "checkSinceValue".to_string(),
+                },
+                super::SdkApiCheckPlugin {
+                    os_name: "HarmonyOS".to_string(),
+                    tag: "available".to_string(),
+                    plugin_type: "FormatValidation".to_string(),
+                    path: external_ets.join("hooks/available.js"),
+                    function_name: "checkAvailableFormat".to_string(),
+                },
+            ]
+        );
+        assert_eq!(
             snapshot.crossplatform_dependencies.as_ref(),
             &[super::SdkCrossplatformDependency {
                 api_module: "@arkui-x.telephony".to_string(),
                 function: "CallManager#dial".to_string(),
                 modules: vec!["ohos.telephony.call".to_string()],
                 components: vec!["Button".to_string(), "Text".to_string()],
+            }]
+        );
+        assert_eq!(
+            snapshot.api_class_check_plugins.as_ref(),
+            &[super::SdkApiClassCheckPlugin {
+                tag_name: "syscap".to_string(),
+                path: external_ets.join("hooks/syscap.js"),
+                class_name: "SyscapChecker".to_string(),
             }]
         );
         let capabilities = snapshot

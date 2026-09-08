@@ -5,9 +5,11 @@ use oxc_ast::ast::{Declaration, StructElement};
 use oxc_ast::builder::AstBuilder;
 use oxc_codegen::{Codegen, CodegenOptions, IndentChar};
 use oxc_parser::Parser;
-use oxc_span::{SourceType, SPAN};
+use oxc_span::{SourceType, Span, SPAN};
 use rustc_hash::FxHashSet;
 use std::path::Path;
+
+use crate::{ResolvedTypeIdentity, SpannedTypeIdentity};
 
 fn test_component_metadata() -> ComponentMetadata {
     ComponentMetadata::from_ets_loader_path(Path::new(concat!(
@@ -52,6 +54,7 @@ fn lower_build_body_with_custom_components(
         &FxHashSet::default(),
         None,
         false,
+        None,
     )
 }
 
@@ -67,6 +70,7 @@ fn lower_build_body_with_component_context(
     component_metadata: &ComponentMetadata,
     raw_object_fields: &FxHashSet<String>,
     current_component_reusable: bool,
+    type_facts: Option<Arc<ArktsFileTypeFacts>>,
 ) -> Result<String, BuildLoweringError> {
     let mut visible_builder_methods = builder_methods.clone();
     visible_builder_methods.extend(builder_param_methods.iter().cloned());
@@ -81,6 +85,7 @@ fn lower_build_body_with_component_context(
         raw_object_fields,
         None,
         current_component_reusable,
+        type_facts,
     )
 }
 
@@ -96,6 +101,7 @@ fn lower_build_body_with_component_context_and_module(
     raw_object_fields: &FxHashSet<String>,
     module_name: Option<&str>,
     current_component_reusable: bool,
+    type_facts: Option<Arc<ArktsFileTypeFacts>>,
 ) -> Result<String, BuildLoweringError> {
     let plan = BuildBodyPlan::component_with_shared_inputs(
         body,
@@ -111,7 +117,8 @@ fn lower_build_body_with_component_context_and_module(
         },
         current_component_reusable,
         GeneratedViewpuName::VIEWPU_BASE,
-    );
+    )
+    .with_type_facts(type_facts, 11);
     let allocator = Allocator::default();
     let ast = AstBuilder::new(&allocator);
     let statements = plan.statements(&allocator)?;
@@ -185,6 +192,24 @@ fn parse_and_lower_with_visible_builder_methods(
     builder_methods: &FxHashSet<String>,
     builder_param_methods: &FxHashSet<String>,
 ) -> Result<String, BuildLoweringError> {
+    parse_and_lower_with_visible_builder_methods_and_facts(
+        source,
+        raw_object_fields,
+        current_component_reusable,
+        builder_methods,
+        builder_param_methods,
+        None,
+    )
+}
+
+fn parse_and_lower_with_visible_builder_methods_and_facts(
+    source: &str,
+    raw_object_fields: &FxHashSet<String>,
+    current_component_reusable: bool,
+    builder_methods: &FxHashSet<String>,
+    builder_param_methods: &FxHashSet<String>,
+    type_facts: Option<Arc<ArktsFileTypeFacts>>,
+) -> Result<String, BuildLoweringError> {
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::ets()).parse();
     assert!(
@@ -229,6 +254,7 @@ fn parse_and_lower_with_visible_builder_methods(
         &test_component_metadata(),
         raw_object_fields,
         current_component_reusable,
+        type_facts,
     )
 }
 
@@ -412,23 +438,6 @@ struct Foo {
     assert!(
         !out.contains("this.localBuilder.bind(this)({ routerContext: this.routerContext });"),
         "got:\n{out}"
-    );
-}
-
-#[test]
-fn wrapped_builder_dispatch_binds_this_like_hvigor_transfer_builder_call() {
-    let source = r#"@Component
-struct Foo {
-  ctx: ESObject = {}
-
-  build() {
-    this.ctx.wrappedBuilder.builder(this.ctx)
-  }
-}"#;
-    let out = parse_and_lower(source).unwrap();
-    assert!(
-        out.contains("this.ctx.wrappedBuilder.builder.bind(this)(this.ctx);"),
-        "WrappedBuilder dispatch must match ets-loader transferBuilderCall; got:\n{out}"
     );
 }
 
@@ -1561,9 +1570,30 @@ struct Foo {
       .linearGradient(this.selected ? { angle: "90deg" } : { colors: [] })
   }
 }"#;
-    let out =
-        parse_and_lower_with_raw_object_fields_and_reusable(source, &FxHashSet::default(), true)
-            .unwrap();
+    let enum_access = "VerticalAlign.Top";
+    let start = source.find(enum_access).unwrap() as u32;
+    let type_facts = ArktsFileTypeFacts {
+        member_accesses: vec![SpannedTypeIdentity {
+            span: Span::new(start, start + enum_access.len() as u32),
+            identity: ResolvedTypeIdentity {
+                is_nullable: false,
+                is_enum: true,
+                is_basic: true,
+                symbol_name: "Top".to_string(),
+                types: Vec::new(),
+            },
+        }],
+        ..ArktsFileTypeFacts::default()
+    };
+    let out = parse_and_lower_with_visible_builder_methods_and_facts(
+        source,
+        &FxHashSet::default(),
+        true,
+        &FxHashSet::default(),
+        &FxHashSet::default(),
+        Some(Arc::new(type_facts)),
+    )
+    .unwrap();
     let width = out
         .find("Row.width($r(\"app.float.card_width\"));")
         .unwrap();
@@ -1914,6 +1944,7 @@ fn parse_and_lower_with_module(
         &FxHashSet::default(),
         Some(module_name),
         false,
+        None,
     )
 }
 

@@ -752,7 +752,6 @@ impl HspInterfaceModuleJson {
                     module,
                     &[
                         "name",
-                        "packageName",
                         "type",
                         "deliveryWithInstall",
                         "deviceTypes",

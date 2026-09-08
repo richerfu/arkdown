@@ -349,7 +349,7 @@ fn empty_router_map_writes_latest_process_router_map_task_outputs() {
     let writer = IntermediateArtifactWriter::new(&temp.path().join("sdk/toolchains/restool"));
 
     writer
-        .write_empty_router_map_intermediates(temp.path(), "default")
+        .write_empty_router_map_intermediates(&module_layout)
         .expect("write empty ProcessRouterMap outputs");
 
     for output in [
@@ -361,6 +361,24 @@ fn empty_router_map_writes_latest_process_router_map_task_outputs() {
             r#"{"routerMap":[]}"#
         );
     }
+}
+
+#[test]
+fn empty_router_map_uses_local_test_build_root() {
+    let temp = TempDir::new().expect("create local-test router-map fixture root");
+    let module_layout = crate::layout::ModuleBuildLayout::for_test_product(temp.path(), "default");
+    let writer = IntermediateArtifactWriter::new(&temp.path().join("sdk/toolchains/restool"));
+
+    writer
+        .write_empty_router_map_intermediates(&module_layout)
+        .expect("write local-test ProcessRouterMap outputs");
+
+    assert!(module_layout.router_map_loader().is_file());
+    assert!(module_layout.router_map_temp().is_file());
+    assert!(!temp
+        .path()
+        .join("build/default/intermediates/router_map")
+        .exists());
 }
 
 #[test]
@@ -796,32 +814,21 @@ fn replace_unit_test_index_file_writes_pages_and_main_pages() {
 }
 
 #[test]
-fn unit_test_artifact_handoffs_use_the_typed_module_layout() {
+fn unit_test_post_compile_handoffs_use_the_typed_module_layout() {
     use crate::layout::ModuleBuildLayout;
 
     let temp = tempfile::tempdir().expect("tempdir");
     let module_root = temp.path().join("entry");
-    let compile_output = temp.path().join("compile-output");
-    std::fs::create_dir_all(&compile_output).expect("compile output");
-    let modules_abc = compile_output.join("modules.abc");
-    let source_maps = compile_output.join("sourceMaps.map");
-    std::fs::write(&modules_abc, b"abc").expect("ABC fixture");
+    let layout = ModuleBuildLayout::for_test_product(&module_root, "default");
+    std::fs::create_dir_all(layout.test_assets_ets_dir()).expect("UnitTestArkTS output");
+    std::fs::write(layout.test_assets_modules_abc(), b"abc").expect("ABC fixture");
     std::fs::write(
-        &source_maps,
+        layout.test_assets_source_maps(),
         br#"{"entry":{"sources":["src/main/ets/Index.ets"],"mappings":"old"}}"#,
     )
     .expect("source map fixture");
 
-    let layout = ModuleBuildLayout::for_test_product(&module_root, "default");
     let writer = UnitTestArtifactWriter::new(&module_root, "default");
-    writer
-        .stage_compiled_assets(&modules_abc, Some(&source_maps))
-        .expect("stage UnitTestArkTS assets");
-    assert_eq!(
-        std::fs::read(layout.test_assets_modules_abc()).expect("staged ABC"),
-        b"abc"
-    );
-    assert!(layout.test_assets_source_maps().is_file());
 
     let mock_input = layout.intermediates_mock_config_json();
     std::fs::create_dir_all(mock_input.parent().expect("mock input parent"))

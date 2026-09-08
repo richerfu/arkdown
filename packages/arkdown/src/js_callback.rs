@@ -91,6 +91,7 @@ fn js_type_name(value_type: ValueType) -> &'static str {
     ValueType::Object => "object",
     ValueType::Function => "function",
     ValueType::External => "external",
+    ValueType::BigInt => "bigint",
     ValueType::Unknown => "unknown",
   }
 }

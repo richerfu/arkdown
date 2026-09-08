@@ -799,11 +799,15 @@ fn test_loader_json_serializes_minimal_hvigor_shape() {
 fn bytecode_har_loader_serializes_marker_and_module_info_entry() {
     let temp = tempfile::tempdir().expect("create project");
     let module_root = temp.path().join("entry");
-    let source_root = module_root.join("src/main/ets");
     let module_info = module_root.join("build/default/generated/profile/default/ModuleInfo.ts");
-    fs::create_dir_all(&source_root).expect("create source root");
+    fs::create_dir_all(&module_root).expect("create module root");
     fs::create_dir_all(module_info.parent().unwrap()).expect("create generated profile root");
-    fs::write(source_root.join("Index.ets"), "export class Index {}").expect("write HAR source");
+    fs::write(module_root.join("Index.ets"), "export class Index {}").expect("write HAR source");
+    fs::write(
+        module_root.join("oh-package.json5"),
+        r#"{ name: "entry", main: "Index.ets" }"#,
+    )
+    .expect("write HAR package manifest");
     fs::write(&module_info, "export const __MODULE_NAME__ = ''\n").expect("write ModuleInfo.ts");
 
     let mut config = make_config(true);
@@ -812,17 +816,27 @@ fn bytecode_har_loader_serializes_marker_and_module_info_entry() {
     config.product.build_option.har_artifact_type = arkdown_core::HarArtifactType::Bytecode;
     let module_cfg = ModuleConfig {
         name: "entry".to_string(),
-        src_path: module_root,
+        src_path: module_root.clone(),
         module_type: OhosModuleType::Har,
     };
     let mut manifest = make_manifest();
     manifest.module_type = OhosModuleType::Har;
+    manifest.abilities.clear();
+    manifest.extension_abilities.clear();
 
     let mut loader = LoaderJson::generate(&config, &module_cfg, &manifest);
     loader.include_byte_code_har_module_info(&module_info);
 
     let value = serde_json::to_value(&loader).expect("serialize loader");
     assert_eq!(value["byteCodeHar"], true);
+    assert_eq!(
+        loader.hvigor_compile_entry,
+        [to_absolute_path_string(&module_info)],
+        "root package main is a bundler input, not a serialized loader entry"
+    );
+    assert!(loader
+        .compile_entry
+        .contains(&to_absolute_path_string(&module_root.join("Index.ets"))));
     assert_eq!(
         loader.hvigor_compile_entry.last(),
         Some(&to_absolute_path_string(&module_info))
@@ -1260,6 +1274,12 @@ fn test_loader_json_omits_patch_config_for_test_target() {
     let value = serde_json::to_value(&loader).expect("serialize loader");
 
     assert!(value.get("patchConfig").is_none());
+    assert_eq!(
+        Path::new(&loader.ace_module_build),
+        module_cfg
+            .src_path
+            .join(".test/default/intermediates/assets/default/ets")
+    );
 }
 
 #[test]

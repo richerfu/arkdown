@@ -635,10 +635,13 @@ pub struct ExpandImportPath {
 }
 
 /// TypeScript emission configuration owned by `arkOptions.tscConfig`.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
 pub struct ArkTscConfig {
     #[serde(default)]
     pub target_es_version: ArkTscTarget,
+    /// ets_checker.ts::getMaxFlowDepth accepts numbers without integer rounding.
+    #[serde(default)]
+    pub max_flow_depth: Option<f64>,
 }
 
 /// The two JavaScript targets accepted by the installed hvigor ets checker.
@@ -1091,16 +1094,16 @@ impl SdkConfig {
 
     /// Candidate directories containing `@ohos/*` API declaration files.
     ///
-    /// Returns the dynamic ETS API directory followed by `<sdk>/js/api`.
+    /// Returns the API directory owned by the selected dynamic ETS frontend.
+    ///
+    /// `developtools_ace_ets2bundle/compiler/main.js` resolves `apiDirPath`
+    /// relative to the running `ets-loader/compiler` and puts only that path
+    /// into `systemModulePathArray`. The sibling JavaScript frontend's API
+    /// tree is not part of ArkTS 1.1 TypeScript resolution.
     pub fn ets_api_dirs(&self) -> Vec<std::path::PathBuf> {
-        let Some(dynamic_ets_root) = self.dynamic_ets_root() else {
-            return vec![];
-        };
-        let mut dirs = vec![dynamic_ets_root.join("api")];
-        if let Some(sdk_root) = self.component_root() {
-            dirs.push(sdk_root.join("js").join("api"));
-        }
-        dirs
+        self.dynamic_ets_root()
+            .map(|dynamic_ets_root| vec![dynamic_ets_root.join("api")])
+            .unwrap_or_default()
     }
 
     /// Candidate API declaration roots for the selected ArkTS frontend.

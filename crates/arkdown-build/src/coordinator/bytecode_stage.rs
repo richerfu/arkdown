@@ -697,10 +697,6 @@ impl BuildCoordinator {
                     &module.src_path,
                     &module_config.product.name,
                 );
-                artifacts.stage_compiled_assets(
-                    &bundle_out.bundle_output.modules_abc_path,
-                    bundle_out.bundle_output.source_maps_path.as_deref(),
-                )?;
                 if matches!(module.module_type, OhosModuleType::Shared) {
                     artifacts.write_hsp_build_config()?;
                 }

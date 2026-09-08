@@ -1,7 +1,11 @@
 # OXC/Rolldown 替换 Hvigor：当前架构与剩余工作
 
-状态：ArkTS 1.2 构建实现完成；替换认证等待 SDK 产物与设备门禁
-更新日期：2026-09-06
+状态：ArkTS 1.1 源码定义主链与 TSGO 能力已接入；剩余为真实矩阵证据与性能收口
+更新日期：2026-09-08
+
+最新审计见 [全链路对照](AUDIT-HVIGOR-REPLACEMENT.md)。下文历史的
+build-complete 表述仅指 SDK 链路接入，不能视为 Rust/OXC 业务迁移或全行为
+等价已经完成。语言版本允许由 product 配置指定，不属于替换差异。
 
 本文档是替换工作的唯一状态文档。完成项不保留迁移流水账；历史以 Git
 提交为准。工程规则以根目录 [`AGENTS.md`](../../AGENTS.md) 为准。
@@ -46,7 +50,7 @@ packages/arkdown/js/arkdown-cli.js
                          │
              Rolldown graph + Rust plugins
                          │
-              OXC transforms and checker
+              OXC transforms + native TypeScript API checker
                          │
        resource/profile/native/ABC/obfuscation
                          │
@@ -68,9 +72,11 @@ packages/arkdown/js/arkdown-cli.js
 
 ### ArkTS 1.1
 
-ArkTS 1.1 是省略版本参数时的默认路径。只有明确传入
-`--arkts-version 1.2` 或等价 N-API 字段才进入 1.2；源码类型、manifest、
-依赖或 SDK 内容不得隐式升级版本。
+语言版本选择优先级为：显式 `--arkts-version` / 等价 N-API 字段 >
+所选 product 的 `arkTSVersion` > 默认 1.1。product 配置为 1.2 时，无需再传
+CLI 参数；check 使用 product 语言版本同样是合法行为，不得列为替换缺口。
+此规则按用户 2026-09-07 的确认取代“只能通过显式 CLI 参数启用 1.2”的旧约束。
+不得仅根据源码、依赖或 SDK 内容擅自升级配置所选版本。
 
 当前 1.1 主链已经由 Rust owner 完成项目快照、解析、OXC 变换、Rolldown
 模块图、ABC、资源、profile、native、混淆、缓存、watch、打包和签名。
@@ -94,10 +100,38 @@ files、共享状态和逐插件 cache 必须继续通过 typed bridge 持久化
 
 ### Checker
 
-`arkdown-ets-checker` 是嵌入式 OXC 项目 checker。它消费显式 roots、项目
-alias、module paths、tsconfig 和 SDK declaration roots，不启动 SDK Node
-checker，也没有 SDK checker 兼容桥。其精确能力和保守的 `Unknown` 语义见
+当前原生 TypeScript 专项仅覆盖 ArkTS 1.1，按用户确认不考虑 1.2；
+具体源码 owner、实施顺序及回归门禁见
+[ArkTS 1.1 原生 TypeScript 对齐合同](ARKTS11-NATIVE-TYPESCRIPT.md)。
+以 OH 源码为准，不移植 OXC 独有扩展。TS 只负责类型检查与推断（包括声明
+诊断），Program 固定 noEmit；代码变换、JS/声明生成及运行时 annotation
+metadata 由 Rust/OXC/Rolldown 实现，按需消费类型查询结果。
+
+`arkdown-ets-checker` 已接入 TypeScript `6126025532` 原生 API。Rust 管理
+工程输入、源码 snapshot、进程和 OXC consumer，Go 负责 parser/binder/type
+checker、OH resolver、SDK callback 选择和独立 ArkTS 1.1 linter；不启动完整
+SDK Node checker，不保留旧 isolated-declarations/Unknown checker 兜底。SDK
+配置 CommonJS function/class callback 时只启动会话级精简 Node worker 来保持公开
+JavaScript ABI，工程发现、类型推断、比较、诊断和 fallback 仍由 Go/Rust owner。
+class callback 接收与 compile-plugin 完全相同的 Rust 构建 `projectConfig` 快照；
+ArkTS linter strict checker clone 与 normal checker 共享同一 SDK callback executor；
+ESMODULE checker 的 TypeScript module kind 按源码设置为 ES2020；独立的 source
+model 在 Stage 工程使用源码定义的 `moduleJson` sentinel，在 FA 工程保留非空
+compile mode，不能混为同一个字段。
+
+annotation retention/常量、Mutable/WrappedBuilder、enum member、SDK
+crossplatform dependency 等类型事实已批量接入 OXC。SDK dependency 身份直接
+来自上游 `checkCrossplatformValue` 所在的 declaration-use 回调，Rust 不再
+重建 overload、alias 或 factory-return 推断。build/check compiler options、
+source graph、声明诊断和源码定义的诊断筛选已经贯通。三平台 clean TSGO 产物
+随 N-API 平台包发布；正常安装无需环境变量，`ARKDOWN_TYPESCRIPT_PATH` 只用于
+开发覆盖。watch 尚未长驻复用 Program，属于性能/增量生命周期优化而非单轮
+checker 能力差异。源码合同和验证说明见
 [`crates/arkdown-ets-checker/DESIGN.md`](../../crates/arkdown-ets-checker/DESIGN.md)。
+
+Arkdown 不调用 TSGO emit/transpile/printer/codegen；checker source graph 不替代
+Rust resolver/Rolldown graph，返回的 annotation/component 信息也只能作为
+Rust/OXC lowering 的 immutable semantic facts。JS 不参与上述代码处理。
 
 ### ArkGuard
 
@@ -160,13 +194,17 @@ widget 由 static UI plugin 链处理，不另造动态 widget 编译通道。
 - 用可发布 SDK 对 HAP/HSP/HAR/APP 完成结构、签名和设备/模拟器安装启动验证，
   才能把 ArkTS 1.2 状态从 build-complete 提升为 replacement-complete。
 
-### P1：1.1 长尾与架构收口
+### P1：1.1 真实矩阵与架构收口
+
+TSGO 的当前源码定义 ArkTS 1.1 能力差异为 0。OH linter 1004/1004 source case、
+native checker、build semantic、SDK CommonJS callback 与 OXC 类型消费者均已通过；
+下列项目不再是“先补 TSGO”的能力缺口。
 
 - 按 ets2bundle 源码测试继续扩充 UI transform、system API、Visual、
   ByteCode HAR、router、worker、InsightIntent 和 HSP 的边界语料。
-- 扩展 OXC checker 对复杂泛型、conditional/mapped/indexed/typeof、声明合并、
-  global augmentation、namespace、control-flow narrowing 等源码需要的语义；
-  不恢复 SDK checker。
+- 依据 ets2bundle watch 生命周期复用 TSGO `updateProgram`，减少跨轮解析和
+  checker 建图；不得改变现有单轮诊断、类型事实和失效语义，也不得恢复旧 Rust
+  子集 checker 或 SDK Node checker 兜底。
 - 将 `duplicate_check` 和 `har_dedup` 的 `Arc<Mutex>` collector 改为局部 facts
   加确定性归并，避免在 Rolldown hot path 上共享写锁。
 - 在 Rolldown 提供结构化磁盘图接口后再实现跨进程 graph cache；在此之前不
@@ -175,6 +213,10 @@ widget 由 static UI plugin 链处理，不另造动态 widget 编译通道。
   ID 排序后提交。
 - 统一剩余 SDK stderr、插件异常和阶段错误为携带 stage/module/path/span/code
   的 typed diagnostics。
+
+当前权威 ets2bundle 源码没有定义 Hvigor task/system plugin 的公开 ABI；因此
+Arkdown 只承诺并实现源码可证的 arkts-compose compile-plugin/Rollup ABI。没有
+源码 owner 的 task registry、hook facade 或 `hvigorfile.ts` 近似执行层不得实现。
 
 ## 6. 完成门槛
 

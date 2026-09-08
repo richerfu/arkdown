@@ -1,4 +1,5 @@
-//! Regression coverage for the native OXC check application.
+//! Real native TypeScript check application regression. Requires
+//! ARKDOWN_TYPESCRIPT_PATH and the configured OpenHarmony SDK.
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -36,9 +37,10 @@ fn check_reports_native_typescript_semantic_diagnostics() {
         project: Some(temp.path().to_path_buf()),
         is_crossplatform: false,
         ignore_crossplatform_check: false,
+        typescript_executable: None,
     })
     .execute()
-    .expect_err("native OXC checker must reject a TypeScript type mismatch");
+    .expect_err("native TypeScript checker must reject a TypeScript type mismatch");
     let diagnostics = format!("{error:#}");
 
     assert!(
@@ -52,7 +54,7 @@ fn check_reports_native_typescript_semantic_diagnostics() {
 }
 
 #[test]
-fn check_defaults_to_native_oxc_without_a_node_runtime() {
+fn check_defaults_to_native_typescript_without_a_node_runtime() {
     let fixture = repo_root().join("tests/fixtures/minimal-hap");
     CheckApplication::new(CheckRequest {
         target: "hap".to_string(),
@@ -60,9 +62,96 @@ fn check_defaults_to_native_oxc_without_a_node_runtime() {
         project: Some(fixture.clone()),
         is_crossplatform: false,
         ignore_crossplatform_check: false,
+        typescript_executable: None,
     })
     .execute()
-    .expect("default OXC check must not require Node");
+    .expect("native TypeScript check must accept the SDK fixture without Node");
+}
+
+#[test]
+fn check_uses_module_target_and_its_source_owned_standard_library() {
+    // ets_checker.ts::getTargetESVersionLib pairs ES2017 with ES2020. A
+    // module-level override must affect the Go program, not only OXC emit.
+    for target in ["ES2017", "ES2021"] {
+        let temp = tempfile::tempdir().expect("module target fixture");
+        copy_fixture(&repo_root().join("tests/fixtures/minimal-hap"), temp.path()).unwrap();
+        fs::write(
+            temp.path().join("oh-package.json5"),
+            r#"{"modelVersion":"6.0.0","dependencies":{},"devDependencies":{}}"#,
+        )
+        .unwrap();
+        fs::write(temp.path().join("entry/build-profile.json5"), format!(
+            r#"{{"apiType":"stageMode","buildOption":{{"arkOptions":{{"tscConfig":{{"targetESVersion":"{target}"}}}}}},"targets":[{{"name":"default"}}]}}"#
+        )).unwrap();
+        fs::write(temp.path().join("entry/src/main/ets/Target.ets"),
+            "export const value: bigint = 1n;\nexport const promise: Promise<number> = Promise.any([Promise.resolve(1)]);\n").unwrap();
+        let result = CheckApplication::new(CheckRequest {
+            target: "hap".into(),
+            module: None,
+            project: Some(temp.path().to_path_buf()),
+            is_crossplatform: false,
+            ignore_crossplatform_check: false,
+            typescript_executable: None,
+        })
+        .execute();
+        if target == "ES2017" {
+            let diagnostic = format!("{:#}", result.expect_err("ES2017 target restrictions"));
+            assert!(
+                diagnostic.contains("BigInt literals are not available"),
+                "{diagnostic}"
+            );
+            assert!(
+                diagnostic.contains("Property 'any' does not exist"),
+                "{diagnostic}"
+            );
+        } else {
+            result.expect("ES2021 supports bigint literals and Promise.any");
+        }
+    }
+}
+
+#[test]
+fn check_applies_source_owned_flow_limit_and_invalid_range_default() {
+    // ets_checker.ts::getMaxFlowDepth normalizes an out-of-range module value
+    // to 2000. Go checker.ts::getTypeAtFlowNode must consume the chosen limit.
+    for limit in [1999, 65535] {
+        let temp = tempfile::tempdir().expect("flow limit fixture");
+        copy_fixture(&repo_root().join("tests/fixtures/minimal-hap"), temp.path()).unwrap();
+        fs::write(
+            temp.path().join("oh-package.json5"),
+            r#"{"modelVersion":"6.0.0","dependencies":{},"devDependencies":{}}"#,
+        )
+        .unwrap();
+        fs::write(temp.path().join("entry/build-profile.json5"), format!(
+            r#"{{"apiType":"stageMode","buildOption":{{"arkOptions":{{"tscConfig":{{"maxFlowDepth":{limit}}}}}}},"targets":[{{"name":"default"}}]}}"#
+        )).unwrap();
+        fs::write(
+            temp.path().join("entry/src/main/ets/Flow.ets"),
+            format!(
+                "export function f(x: string | number, condition: boolean) {{\n{}return x; }}",
+                "if (condition) { x = 1; }\n".repeat(2050)
+            ),
+        )
+        .unwrap();
+        let result = CheckApplication::new(CheckRequest {
+            target: "hap".into(),
+            module: None,
+            project: Some(temp.path().to_path_buf()),
+            is_crossplatform: false,
+            ignore_crossplatform_check: false,
+            typescript_executable: None,
+        })
+        .execute();
+        if limit == 1999 {
+            let diagnostic = format!("{:#}", result.expect_err("out-of-range defaults to 2000"));
+            assert!(
+                diagnostic.contains("too large for control flow analysis"),
+                "{diagnostic}"
+            );
+        } else {
+            result.expect("configured flow depth reaches the native checker");
+        }
+    }
 }
 
 fn repo_root() -> PathBuf {

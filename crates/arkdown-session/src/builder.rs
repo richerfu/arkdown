@@ -204,6 +204,9 @@ impl BuildSessionBuilder {
         // environment. Capture it for every build mode so the OXC checker and
         // transform stages consume one immutable session snapshot.
         roots.extend(sdk.global_module_paths.iter().cloned());
+        // ets_checker.ts::readDeaclareFiles adds the loader's declarations
+        // as global roots, independently of import-resolved SDK API modules.
+        roots.insert(self.config.sdk_config.ets_loader_path.join("declarations"));
         // `ConfigResolver.collectSystemApiWhitelist` performs this inventory
         // only for an obfuscated release build. Capture the same inputs once
         // at session startup so the ArkGuard stage never walks or re-reads the

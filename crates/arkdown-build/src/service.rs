@@ -83,6 +83,9 @@ impl BuildService {
         if let Some(build_version) = request.build_version.as_ref() {
             config.product.build_version = Some(build_version.clone());
         }
+        // Language selection: explicit request > selected product > default 1.1.
+        // Product-configured 1.2 is intentional and supported without a CLI flag;
+        // do not treat this fallback as a parity gap or force it back to 1.1.
         let arkts_version = request
             .arkts_version
             .unwrap_or(config.product.arkts_version);

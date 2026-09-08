@@ -42,7 +42,7 @@ impl CrossplatformSourceCollection {
         }
     }
 
-    pub(crate) fn merge(&mut self, other: &Self) {
+    pub fn merge(&mut self, other: &Self) {
         Self::extend_unique(&mut self.modules, &other.modules);
         Self::extend_unique(&mut self.components, &other.components);
     }

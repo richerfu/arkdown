@@ -500,6 +500,7 @@ impl LoaderJson {
         if let Some(src_entry) = &manifest.src_entry {
             compile_entry.push(src_entry.clone());
         }
+        let mut package_main_entry = None;
         if compile_entry.is_empty()
             && matches!(
                 manifest.module_type,
@@ -507,7 +508,9 @@ impl LoaderJson {
             )
         {
             if let Some(main) = Self::read_package_main(&module_cfg.src_path) {
-                compile_entry.push(to_absolute_path_string(&module_cfg.src_path.join(main)));
+                let main = to_absolute_path_string(&module_cfg.src_path.join(main));
+                package_main_entry = Some(main.clone());
+                compile_entry.push(main);
             }
         }
 
@@ -780,6 +783,14 @@ impl LoaderJson {
                 } else {
                     to_absolute_path_string(&src_main_root.join(entry.trim_start_matches("./")))
                 };
+                // `GenerateLoaderJson.processByteCodeHar()` adds generated
+                // ModuleInfo.ts to the serialized compiler entries. The
+                // package `main` remains Rolldown's public input and is not
+                // copied into loader.json merely because it is a root-level
+                // file (the source fixture is `main: "Index.ets"`).
+                if module_is_bytecode_har && package_main_entry.as_ref() == Some(&absolute) {
+                    continue;
+                }
                 if !hvigor_compile_entry.contains(&absolute) {
                     hvigor_compile_entry.push(absolute);
                 }
@@ -947,8 +958,16 @@ impl LoaderJson {
             .join(&compile_mode)
             .join(&build_mode_str);
         let cache_path = Self::absolute_dir_path_string(&compile_arkts_cache);
-        let ets_loader_out = loader_out_root.join("ets");
-        let ace_module_build = Self::absolute_dir_path_string(&ets_loader_out);
+        // `UnitTestArkCompile.initDefaultArkCompileConfig()` replaces
+        // `aceModuleBuild` with `pathInfo.getInterMediatesAssetsPath()/ets`.
+        // This field is an Arkdown-only in-process handoff (it is skipped when
+        // loader.json is serialized), so model the task-specific ProjectConfig
+        // value directly instead of compiling into loader_out and copying it.
+        let ace_module_build = if matches!(config.output_target, OutputTarget::Test) {
+            Self::absolute_dir_path_string(&module_layout.test_assets_ets_dir())
+        } else {
+            Self::absolute_dir_path_string(&loader_out_root.join("ets"))
+        };
         let hsp_resources_map = {
             let _timer = LoaderTimingProbe::new(&module_cfg.name, "hsp_resources_map");
             Self::collect_hsp_resources_map(dep_graph)

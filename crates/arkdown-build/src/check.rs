@@ -6,9 +6,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use walkdir::WalkDir;
 
-use arkdown::plugins::ets_transform::{
-    ArktsSourceChecker, ComponentMetadata, SystemApiCheckOptions,
-};
+use arkdown::plugins::ets_transform::{ArktsSourceChecker, ComponentMetadata};
 use arkdown_core::{ArkdownConfig, BuildMode, ModuleConfig, OutputTarget};
 use arkdown_path::ArtifactPathSerializer;
 use arkdown_session::{BuildSession, BuildSessionBuilder, ModuleCompileContext};
@@ -29,6 +27,8 @@ pub struct CheckRequest {
     pub is_crossplatform: bool,
     /// Downgrade cross-platform API diagnostics to warnings.
     pub ignore_crossplatform_check: bool,
+    /// Native ArkTS TypeScript service resolved from the loaded N-API package.
+    pub typescript_executable: Option<PathBuf>,
 }
 
 pub struct CheckApplication {
@@ -50,6 +50,9 @@ impl CheckApplication {
             arkdown_config::load_config(&project_root, BuildMode::Debug, target, None, None)
                 .map_err(|error| anyhow::anyhow!("config error: {error}"))?,
         );
+        // Checking follows the configured product language (default 1.1).
+        // Product-configured 1.2 is supported without an explicit CLI override;
+        // selecting it here is not a parity gap in the version-selection policy.
         let session = Arc::new(
             BuildSessionBuilder::new(config.clone())
                 .with_arkts_language_version(config.product.arkts_version)
@@ -72,13 +75,21 @@ impl CheckApplication {
                     module.name
                 )
             })?;
+            let module_config = crate::planning::ModuleBuildConfiguration::resolve_build(
+                config.as_ref(),
+                session.build_options.as_ref(),
+                module,
+                None,
+                &Default::default(),
+            )?;
             let module_summary = CheckModuleRunner {
-                config: config.as_ref(),
+                config: module_config.config.as_ref(),
                 session: session.as_ref(),
                 module,
                 module_context: &module_context,
                 is_crossplatform: self.args.is_crossplatform,
                 ignore_crossplatform_check: self.args.ignore_crossplatform_check,
+                typescript_executable: self.args.typescript_executable.as_deref(),
             }
             .run()?;
             summary.merge(module_summary);
@@ -116,6 +127,7 @@ struct CheckModuleRunner<'a> {
     module_context: &'a ModuleCompileContext,
     is_crossplatform: bool,
     ignore_crossplatform_check: bool,
+    typescript_executable: Option<&'a Path>,
 }
 
 impl<'a> CheckModuleRunner<'a> {
@@ -132,20 +144,89 @@ impl<'a> CheckModuleRunner<'a> {
         let local_sources = LocalPackageSourceRootInventory::default();
         let package_resolution =
             ModulePackageResolutionPlanner::new(self.module_context, &local_sources).build()?;
+        let module_layout = crate::layout::ModuleBuildLayout::for_output_target_product(
+            &self.config.output_target,
+            &self.module_context.module.root,
+            &self.config.product.name,
+            "default",
+        );
+        let project_path = self.module_context.module.src_main.join("ets");
+        let compile_mode = self
+            .module_context
+            .module
+            .module_json
+            .as_ref()
+            .and_then(|manifest| manifest.module.compile_mode.as_deref())
+            .unwrap_or("esmodule");
         let semantic =
             ProjectSemanticChecker::new(&self.config.project_root, &sources, &package_resolution)
+                .with_typescript_executable(self.typescript_executable)
+                .with_compile_mode(compile_mode)
+                .with_sdk_options(&self.session.sdk)?
                 .with_sdk_declaration_roots(
                     &self.session.source_store,
                     self.session.sdk.global_module_paths.as_ref(),
                 )
-                .run()?;
+                .with_builtin_declarations(&self.config.sdk_config.ets_loader_path)
+                .with_module_config(
+                    self.config,
+                    self.module,
+                    self.module_context,
+                    &self.session.project.bundle_type,
+                )
+                .with_compile_inputs(
+                    &project_path,
+                    None,
+                    "ohpm",
+                    None,
+                    [
+                        self.module_context.module.src_main.clone(),
+                        module_layout
+                            .build_profile_for_module(&self.module.module_type, "default")
+                            .parent()
+                            .map(Path::to_path_buf)
+                            .unwrap_or_default(),
+                        self.module_context.module.root.join("oh_modules"),
+                        self.config.project_root.join("oh_modules"),
+                    ],
+                    std::iter::empty(),
+                );
+        let semantic = if let Some(capabilities) = self
+            .module_context
+            .module
+            .module_json
+            .as_ref()
+            .and_then(|manifest| {
+                self.session
+                    .sdk
+                    .system_capabilities
+                    .select(&manifest.module.device_types)
+            }) {
+            semantic.with_sdk_validation_context(
+                self.is_crossplatform,
+                self.ignore_crossplatform_check,
+                capabilities.intersection.into_iter().map(String::from),
+                capabilities.union.into_iter().map(String::from),
+            )
+        } else {
+            semantic.with_sdk_validation_context(
+                self.is_crossplatform,
+                self.ignore_crossplatform_check,
+                std::iter::empty(),
+                std::iter::empty(),
+            )
+        }
+        .run()?;
         for diagnostic in semantic.diagnostics {
-            tracing::error!(module = %self.module.name, diagnostic, "ArkTS OXC semantic check failed");
+            tracing::error!(module = %self.module.name, diagnostic, "ArkTS native semantic diagnostic");
             summary
                 .diagnostics
                 .push(format!("[{}] {diagnostic}", self.module.name));
         }
         summary.errors += semantic.errors;
+        for warning in semantic.warnings {
+            tracing::warn!(module = %self.module.name, diagnostic = warning, "ArkTS native checker warning");
+        }
         self.run_oxc_structural_checker(&sources, &mut summary)?;
         Ok(summary)
     }
@@ -192,55 +273,9 @@ impl<'a> CheckModuleRunner<'a> {
             .with_source_store(&self.session.source_store)
             .with_sdk_declaration_roots(&sdk_declaration_roots)
             .build()?;
-        let mut system_api = SystemApiCheckOptions::default()
-            .with_compatible_sdk_version(self.config.product.compatible_sdk_version.clone())
-            .with_compile_sdk_version(self.config.sdk_config.compile_api_version.to_string())
-            .with_runtime_os(self.config.product.runtime_os.clone())
-            .with_atomic_service(self.session.project.bundle_type == "atomicService")
-            .with_crossplatform(self.is_crossplatform, self.ignore_crossplatform_check)
-            .with_strict_api_compatibility(matches!(
-                self.config
-                    .product
-                    .build_option
-                    .strict_mode
-                    .api_compatibility_check,
-                Some(arkdown_core::ApiCompatibilityCheckLevel::Error)
-            ))
-            .with_request_permissions(
-                self.module_context
-                    .module
-                    .module_json
-                    .as_ref()
-                    .into_iter()
-                    .flat_map(|manifest| manifest.module.request_permissions.iter())
-                    .filter_map(|permission| {
-                        permission.get("name").and_then(serde_json::Value::as_str)
-                    })
-                    .map(str::to_string),
-            );
-        if let Some(capabilities) =
-            self.module_context
-                .module
-                .module_json
-                .as_ref()
-                .and_then(|manifest| {
-                    self.session
-                        .sdk
-                        .system_capabilities
-                        .select(&manifest.module.device_types)
-                })
-        {
-            system_api =
-                system_api.with_system_capabilities(capabilities.intersection, capabilities.union);
-        }
         let checker = ArktsSourceChecker::new(component_metadata)
             .with_arkts_language_version(self.session.arkts_language_version)
-            .with_project_sources(project_sources.clone(), module_roots)
-            .with_api_available_context(
-                &self.config.product.compatible_sdk_version,
-                &self.config.product.runtime_os,
-            )
-            .with_system_api_context(system_api);
+            .with_project_sources(project_sources.clone(), module_roots);
         for path in sources
             .iter()
             .filter(|path| CheckSourceInventory::is_arkts_source(path))

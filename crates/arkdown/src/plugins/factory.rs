@@ -133,6 +133,8 @@ pub struct PluginFactoryInput {
     pub system_api: SystemApiCheckOptions,
     /// Source files loaded before Rolldown hooks run for cross-file AST analysis.
     pub transform_sources: TransformSourceSnapshot,
+    /// Native TypeScript checker facts captured before Rolldown starts.
+    pub type_facts: arkdown_ets_transform::ArktsTypeFactsSnapshot,
     /// Router-map metadata indexed before transform hooks begin.
     ///
     /// This feeds the SDK-equivalent `NavigationBuilderRegister` emission for
@@ -204,11 +206,9 @@ impl PluginFactoryInput {
             resource_context: ResourceTransformContext::default(),
             component_metadata: ComponentMetadata::default(),
             insight_intent_schema_catalog: InsightIntentSchemaCatalog::default(),
-            system_api: SystemApiCheckOptions::default()
-                .with_compatible_sdk_version(plan.compatible_sdk_version.clone())
-                .with_compile_sdk_version(plan.target_api_version.to_string())
-                .with_runtime_os(plan.runtime_os.clone()),
+            system_api: SystemApiCheckOptions::default(),
             transform_sources: TransformSourceSnapshot::default(),
+            type_facts: arkdown_ets_transform::ArktsTypeFactsSnapshot::default(),
             navigation_routes: NavigationRouteMap::default(),
             package_resolution: Arc::new(PackageResolutionPlan::default()),
             source_set_overlays: vec![],
@@ -1021,6 +1021,7 @@ impl<'a> PluginFactory<'a> {
             self.input.component_metadata,
             self.input.transform_sources,
         )
+        .with_type_facts(self.input.type_facts)
         .with_form_entry_source_ids(form_entry_source_ids)
         .with_insight_intent_form_bindings(insight_intent_form_bindings)
         .with_insight_intent_schema_catalog(self.input.insight_intent_schema_catalog.clone())

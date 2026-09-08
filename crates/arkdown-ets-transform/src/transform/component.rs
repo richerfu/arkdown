@@ -24,8 +24,8 @@ use crate::transform::entry::EntryRegistrationInfo;
 use crate::transform::global_rewrite::GlobalContextCallRewriter;
 use crate::transform::local_builder::LocalBuilderRuntimeEmitter;
 use crate::transform::viewpu_emit::{
-    GeneratedViewpuName, ParamsInterfaceAstEmitter, ParamsInterfaceField, ParamsInterfaceFieldType,
-    ViewpuAstBuilder, ViewpuMemberAstEmitter,
+    GeneratedViewpuName, ParamsInterfaceAstEmitter, ParamsInterfaceField, ViewpuAstBuilder,
+    ViewpuMemberAstEmitter,
 };
 
 /// A `@Builder` method extracted from a `@Component` struct.
@@ -1010,13 +1010,10 @@ impl<'a> ViewPuClassEmitter<'a> {
             .params_fields
             .iter()
             .map(|field| {
-                let type_annotation = field
-                    .type_annotation_ast
-                    .map(ParamsInterfaceFieldType::Annotation);
                 ParamsInterfaceField::with_source(
                     field.name.as_str(),
                     true,
-                    type_annotation,
+                    field.type_annotation_ast,
                     field.source_span,
                     field.name_span,
                 )

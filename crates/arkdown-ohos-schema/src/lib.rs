@@ -12,6 +12,7 @@
 //! | [`oh_package`] | `oh-package.json5`   |
 
 pub mod app_json;
+pub mod ets_options;
 pub mod oh_package;
 
 pub use app_json::{RawAppJson5, RawAppJson5App};

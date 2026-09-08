@@ -237,7 +237,9 @@ impl BuildCoordinator {
                 widget_bundle_outs.push(None);
                 continue;
             }
-            if session.arkts_language_version == arkdown_core::ArktsLanguageVersion::V1_1 {
+            let type_facts = if session.arkts_language_version
+                == arkdown_core::ArktsLanguageVersion::V1_1
+            {
                 let ace_module_root = PathBuf::from(&loader_json.module_root_path).join("ets");
                 let checker_roots =
                     crate::compile_project_config::CompileProjectEntryCollector::new(
@@ -250,8 +252,63 @@ impl BuildCoordinator {
                     &checker_roots,
                     module_package_resolution.as_ref(),
                 )
+                .with_typescript_executable(args.typescript_executable.as_deref())
+                .with_compile_mode(&loader_json.compile_mode)
+                .with_sdk_plugin_project_config(&share.project_config)
+                .with_sdk_options(&session.sdk)?
                 .with_sdk_declaration_roots(&session.source_store, sdk_declaration_roots)
+                .with_builtin_declarations(&module_config.sdk_config.ets_loader_path)
+                .with_module_config(
+                    module_config.as_ref(),
+                    module,
+                    &module_context,
+                    &session.project.bundle_type,
+                )
+                .with_compile_inputs(
+                    &ace_module_root,
+                    Some(Path::new(&loader_json.cache_path)),
+                    &loader_json.package_manager_type,
+                    Some(&loader_json.compiler_types),
+                    [
+                        module_context.module.src_main.clone(),
+                        module_layout
+                            .build_profile_for_module(&module.module_type, module_target_name)
+                            .parent()
+                            .map(Path::to_path_buf)
+                            .unwrap_or_default(),
+                        module_context.module.root.join("oh_modules"),
+                        module_config.project_root.join("oh_modules"),
+                    ],
+                    loader_json.form_entry_sources.iter().map(PathBuf::from),
+                );
+                let semantic = if let Some(capabilities) = module_context
+                    .module
+                    .module_json
+                    .as_ref()
+                    .and_then(|manifest| {
+                        session
+                            .sdk
+                            .system_capabilities
+                            .select(&manifest.module.device_types)
+                    }) {
+                    semantic.with_sdk_validation_context(
+                        args.is_crossplatform,
+                        args.ignore_crossplatform_check,
+                        capabilities.intersection.into_iter().map(String::from),
+                        capabilities.union.into_iter().map(String::from),
+                    )
+                } else {
+                    semantic.with_sdk_validation_context(
+                        args.is_crossplatform,
+                        args.ignore_crossplatform_check,
+                        std::iter::empty(),
+                        std::iter::empty(),
+                    )
+                }
                 .run()?;
+                for warning in &semantic.warnings {
+                    tracing::warn!(module = %module.name, diagnostic = warning, "ArkTS native checker warning");
+                }
                 if semantic.errors > 0 {
                     anyhow::bail!(
                         "ARKDOWN_ETS_CHECK_FAILED: {} semantic error(s) in module '{}':\n{}",
@@ -260,7 +317,10 @@ impl BuildCoordinator {
                         semantic.diagnostics.join("\n")
                     );
                 }
-            }
+                semantic.type_facts
+            } else {
+                arkdown_ets_transform::ArktsTypeFactsSnapshot::default()
+            };
             let widget_pass = WidgetCompileArktsPass::new(
                 module_config.as_ref(),
                 module,
@@ -787,55 +847,10 @@ impl BuildCoordinator {
                 .and_then(|options| options.integrated_hsp)
                 .unwrap_or(false);
             let mut system_api = SystemApiCheckOptions::default()
-                .with_compatible_sdk_version(module_config.product.compatible_sdk_version.clone())
-                .with_compile_sdk_version(config.sdk_config.compile_api_version.to_string())
-                .with_runtime_os(module_config.product.runtime_os.clone())
-                .with_atomic_service(session.project.bundle_type == "atomicService")
-                .with_ohos_test_source(module_target_name == "ohosTest")
-                .with_crossplatform(args.is_crossplatform, args.ignore_crossplatform_check)
-                .with_crossplatform_collection(args.is_crossplatform && !args.watch)
-                .with_strict_api_compatibility(matches!(
-                    module_build_option.strict_mode.api_compatibility_check,
-                    Some(arkdown_core::ApiCompatibilityCheckLevel::Error)
-                ))
-                .with_request_permissions(
-                    module_context
-                        .module
-                        .module_json
-                        .as_ref()
-                        .into_iter()
-                        .flat_map(|manifest| manifest.module.request_permissions.iter())
-                        .filter_map(|permission| {
-                            permission.get("name").and_then(serde_json::Value::as_str)
-                        })
-                        .map(str::to_string),
-                );
+                .with_crossplatform_collection(args.is_crossplatform && !args.watch);
             if args.is_crossplatform && !args.watch {
                 system_api =
                     system_api.with_module_prefixes(session.sdk.module_prefixes.iter().cloned());
-                for dependency in session.sdk.crossplatform_dependencies.iter() {
-                    system_api = system_api.with_crossplatform_dependency(
-                        dependency.api_module.clone(),
-                        dependency.function.clone(),
-                        dependency.modules.iter().cloned(),
-                        dependency.components.iter().cloned(),
-                    );
-                }
-            }
-            if let Some(capabilities) =
-                module_context
-                    .module
-                    .module_json
-                    .as_ref()
-                    .and_then(|manifest| {
-                        session
-                            .sdk
-                            .system_capabilities
-                            .select(&manifest.module.device_types)
-                    })
-            {
-                system_api = system_api
-                    .with_system_capabilities(capabilities.intersection, capabilities.union);
             }
             let mut factory_input = PluginFactoryInput {
                 target_name: module_target_name.clone(),
@@ -889,6 +904,7 @@ impl BuildCoordinator {
                 insight_intent_schema_catalog: insight_intent_schema_catalog.clone(),
                 system_api,
                 transform_sources,
+                type_facts,
                 navigation_routes: NavigationRouteMap::from_loader_entries(&loader_json.router_map),
                 package_resolution,
                 source_set_overlays: source_set_overlays.clone(),
@@ -1074,13 +1090,15 @@ impl BuildCoordinator {
                 // source HAR. Keep that distinction in the Rust-owned handoff rather
                 // than making the packer infer it from an optional file.
                 let package_source_map_intermediate = module_layout.source_maps_intermediate();
-                let package_source_map_handoff = if module.module_type == OhosModuleType::Har
-                    && module_build_option.har_artifact_type == HarArtifactType::Bytecode
-                {
-                    SourceMapPackageHandoff::Suppress(&package_source_map_intermediate)
-                } else {
-                    SourceMapPackageHandoff::Materialize(&package_source_map_intermediate)
-                };
+                let package_source_map_handoff =
+                    if matches!(config.output_target, OutputTarget::Test)
+                        || (module.module_type == OhosModuleType::Har
+                            && module_build_option.har_artifact_type == HarArtifactType::Bytecode)
+                    {
+                        SourceMapPackageHandoff::Suppress(&package_source_map_intermediate)
+                    } else {
+                        SourceMapPackageHandoff::Materialize(&package_source_map_intermediate)
+                    };
                 let source_maps_path = intermediate_writer.stage_source_maps(
                     &source_maps_path,
                     &PathBuf::from(&loader_json.cache_path).join("sourceMaps.json"),
