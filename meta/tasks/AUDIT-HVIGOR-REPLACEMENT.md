@@ -155,10 +155,31 @@ ArkGuard 已补齐当前 `ConfigResolver` 中此前遗漏的
 实跑：默认/显式 name cache 相同，新增声明后原 identifier/property/file 映射零
 变化，调用删除与逐文件 compact 行为符合 `DisableConsoleTransformer` 和
 `ArkObfuscator.writeObfuscationResult`。显式 `-print-namecache` 不再擅自创建父目录。
+`-extra-options strip-language-default` 现在按 `ArkObfuscator.init` 切换 optimized
+语言预置。IdentifierCache 使用 `ScopeAnalyzer.Scope.loc` 的命名/匿名作用域路径，
+函数项携带经前序 source map 回溯的起止行，不再持久化 OXC `ScopeId` 或按名称后缀
+猜历史缓存。`-print-kept-names` 已按 `writeUnobfuscationContent` 输出固定
+`keptReasons`、逐文件/属性命中原因和 `whitelist.json`，合并上一轮未重编译文件并
+覆盖本轮文件；显式路径按规则文件解析并创建父目录。保留名不再扁平化：SDK、语言、
+规则、`-keep-dts`、AtKeep 与 InsightIntent 分别进入 property/global/local 集合，
+`TransformUtil.isReservedTopLevel/isReservedProperty/needToReservedLocal` 的三条决策路径
+由同一 Rust reason inventory 驱动，转换与 keptNames 不会使用两套规则。
+HAR 按 `addPropWhiteList` 保留全部枚举成员；非 HAR 按
+`ApiExtractor.shouldCollectEnum/visitEnumMembers` 在任一 initializer 含 identifier 时保留
+该枚举的全部成员，而不是保留 initializer 中引用的标识符。
 
-仍缺独立真实矩阵的是多 HAP/HSP 组成的复杂 APP、HQF 与普通产物的全部签名材料
-组合、ArkGuard `-print-kept-names` 的 reasons/whitelist 完整产物，以及真实 SDK
-PandaGuard 组合。这里缺的是对应真实工具与产物验收，不表示这些 owner 不存在。
+真实 SDK PandaGuard 组合已经从唯一 JS CLI 完成 release HAP 验收。该用例使用 SDK
+`panda_guard` 生成不同于 origin ABC 的 obf ABC；loader-out ABC 与 HAP 内
+`ets/modules.abc` 均逐字节等于 obf ABC，PandaGuard 改写后的 source map 同步到
+intermediate、mapping 和 symbol 输出，nameCache 也同步到 symbol 输出。首次实跑还
+定位并修复了生成期 `ResourceTable.ts` 被错误要求存在于启动快照的问题：上游在资源
+阶段生成后通过 `resourceTableTs` 加入 ArkGuard 输入；Rust 现在从已物化的 typed
+CompileArkTS module file 携带该源码，不做运行期兜底读盘。
+
+仍缺独立真实矩阵的是多 HAP/HSP 组成的复杂 APP，以及 HQF 与普通产物的全部签名
+材料组合。ArkGuard keptNames/whitelist 已由精确 schema、原因顺序、增量覆盖和
+HAR/非 HAR 枚举回归保护。这里缺的是对应真实工具与产物验收，不表示这些 owner
+不存在。
 每个场景加入时必须比较其上游任务实际消费和生成的结构，不可只检查
 command/config 或 `contains` 片段。
 
@@ -171,8 +192,8 @@ command/config 或 `contains` 片段。
 
 ## 下一步顺序
 
-1. 按具体 owner 扩充剩余 R3 真实矩阵；优先补齐 ArkGuard keptNames/whitelist，
-   再处理多 HAP/HSP APP 与签名，发现差异即在领域 crate 修复。
+1. 按具体 owner 扩充剩余 R3 真实矩阵；继续处理多 HAP/HSP APP 与签名，发现差异
+   即在领域 crate 修复。
 2. 功能门禁通过后处理剩余跨进程 graph cache 和依赖 wave 性能项。
 3. 只有取得当前 task/system plugin 权威源码后，才能决定是否扩展公开插件合同。
 

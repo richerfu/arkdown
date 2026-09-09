@@ -101,6 +101,7 @@ impl NativeBytecodeFixture {
             compatible_sdk_version: 13,
             compatible_sdk_version_stage: None,
             entry_package_info: "entry|1.0.0".to_string(),
+            compile_har: false,
             resource_table_path: Some(module_root.join("build/generated/r/ResourceTable.ts")),
             use_normalized: true,
             byte_code_har_info: serde_json::json!({"remote-har": {}}),
@@ -176,12 +177,14 @@ impl NativeBytecodeFixture {
                     source: Arc::from(
                         "@Entry export class PublicApi { public visibleProperty: number = 1; }",
                     ),
-                    sdk_declaration: false,
+                    kind: crate::ObfuscationSourceKind::Project,
                 },
                 ObfuscationSource {
                     path: root.join("sdk/api/global.d.ts"),
-                    source: Arc::from("declare interface SystemApi { systemMember: string; }"),
-                    sdk_declaration: true,
+                    source: Arc::from(
+                        "export declare interface SystemApi { systemMember: string; }",
+                    ),
+                    kind: crate::ObfuscationSourceKind::SdkApi,
                 },
             ],
         };

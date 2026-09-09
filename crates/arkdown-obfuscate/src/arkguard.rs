@@ -7,15 +7,19 @@ use arkdown_path::{
     canonicalize_or_owned, ArtifactPathSerializer, ModuleSpecifierText, RelPath, SpecifierKind,
 };
 use oxc_allocator::Allocator;
-use oxc_ast::ast::{
-    AccessorProperty, BindingIdentifier, ChainElement, Class, ComputedMemberExpression,
-    ExportAllDeclaration, ExportDeclaration, ExportDefaultDeclaration, ExportFromDeclaration,
-    ExportNamedDeclaration, Expression, FormalParameter, FormalParameterRest, Function,
-    IdentifierName, IdentifierReference, ImportDeclaration, ImportExpression,
-    LazyImportDeclaration, MethodDefinition, MethodDefinitionKind, ModuleExportName,
-    ObjectProperty, PrivateFieldExpression, Program, PropertyDefinition, PropertyKey, Statement,
-    StaticMemberExpression, StringLiteral, TSEnumDeclaration, TSEnumMemberName,
-    TSInterfaceDeclaration, TSMethodSignature, TSPropertySignature, VariableDeclaration,
+use oxc_ast::{
+    ast::{
+        AccessorProperty, BindingIdentifier, ChainElement, Class, ComputedMemberExpression,
+        ExportAllDeclaration, ExportDeclaration, ExportDefaultDeclaration, ExportFromDeclaration,
+        ExportNamedDeclaration, Expression, FormalParameter, FormalParameterRest, Function,
+        IdentifierName, IdentifierReference, ImportDeclaration, ImportExpression,
+        LazyImportDeclaration, MethodDefinition, MethodDefinitionKind, ModuleExportName,
+        ObjectProperty, PrivateFieldExpression, Program, PropertyDefinition, PropertyKey,
+        Statement, StaticMemberExpression, StringLiteral, TSEnumDeclaration, TSEnumMemberName,
+        TSInterfaceDeclaration, TSMethodSignature, TSPropertySignature, VariableDeclaration,
+        VariableDeclarator,
+    },
+    AstKind,
 };
 use oxc_ast_visit::{walk, walk_mut, Visit, VisitMut};
 use oxc_codegen::{Codegen, CodegenOptions, CommentOptions, IndentChar};
@@ -24,6 +28,7 @@ use oxc_semantic::{Scoping, SemanticBuilder};
 use oxc_span::{GetSpan, SourceType, Span};
 use oxc_str::{Ident, Str};
 use oxc_syntax::reference::ReferenceId;
+use oxc_syntax::scope::ScopeId;
 use oxc_syntax::symbol::{SymbolFlags, SymbolId};
 use rolldown_sourcemap::{OwnedSourceMap, SourceMapBuilder};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -39,6 +44,7 @@ impl ObfuscationRules {
             &self.keep_dts_paths,
             self,
         )?;
+        self.keep_dts_names.extend(names.iter().cloned());
         self.keep_global_names.extend(names.iter().cloned());
         self.keep_property_names.extend(names);
         Ok(())
@@ -61,6 +67,9 @@ pub struct ArkguardAdapterOptions {
     pub compatible_sdk_version: u32,
     pub compatible_sdk_version_stage: Option<String>,
     pub entry_package_info: String,
+    /// `ApiReader.readProjectPropertiesByCollectedPaths` only reserves every
+    /// enum member when the current output is a HAR.
+    pub compile_har: bool,
     pub resource_table_path: Option<PathBuf>,
     pub use_normalized: bool,
     pub byte_code_har_info: serde_json::Value,
@@ -95,11 +104,20 @@ pub struct ObfuscationModuleFile {
 
 /// Immutable source inventory used to derive ArkGuard's module-wide reserved
 /// names without reading mutable project or SDK files during execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObfuscationSourceKind {
+    Project,
+    SdkApi,
+    SdkComponent,
+    PreDefine,
+    KeepDts,
+}
+
 #[derive(Debug, Clone)]
 pub struct ObfuscationSource {
     pub path: PathBuf,
     pub source: Arc<str>,
-    pub sdk_declaration: bool,
+    pub kind: ObfuscationSourceKind,
 }
 
 #[derive(Debug, Clone)]
@@ -263,6 +281,7 @@ pub(crate) struct ArkguardModuleRunner<'a> {
     reserved_properties: FxHashSet<String>,
     reserved_file_names: FxHashSet<String>,
     obfuscated_paths: BTreeMap<String, String>,
+    kept_names: ArkguardKeptNameReport,
 }
 
 impl<'a> ArkguardModuleRunner<'a> {
@@ -271,7 +290,7 @@ impl<'a> ArkguardModuleRunner<'a> {
         rules: &'a ObfuscationRules,
         adapter: &'a ArkguardAdapterOptions,
     ) -> Result<Self, ObfuscationError> {
-        let cache = ArkguardNameCache::load(options, adapter, rules)?;
+        let cache = ArkguardNameCache::load(options, rules)?;
         let mut reserved_names = rules.keep_global_names.clone();
         let mut reserved_properties = rules.keep_property_names.clone();
         let mut reserved_file_names = FxHashSet::default();
@@ -327,6 +346,7 @@ impl<'a> ArkguardModuleRunner<'a> {
             reserved_properties,
             reserved_file_names,
             obfuscated_paths: BTreeMap::new(),
+            kept_names: ArkguardKeptNameReport::load(options, rules)?,
         })
     }
 
@@ -362,6 +382,7 @@ impl<'a> ArkguardModuleRunner<'a> {
             &input.files,
             &keep_plan.export_dependency_paths,
         )?;
+        self.kept_names.set_inventory(inventory.reasons);
         self.reserved_names.extend(inventory.names.iter().cloned());
         self.reserved_properties.extend(inventory.names);
         self.register_insight_intent_names(&input.files);
@@ -431,6 +452,7 @@ impl<'a> ArkguardModuleRunner<'a> {
             }
         }
         let name_cache_path = self.cache.write(self.options, self.adapter, self.rules)?;
+        self.kept_names.write(self.options, self.rules)?;
         Ok(ObfuscationModuleOutput {
             name_cache_path,
             files,
@@ -452,6 +474,7 @@ impl<'a> ArkguardModuleRunner<'a> {
         keep_source_paths: &FxHashSet<PathBuf>,
         record_names: &BTreeMap<String, String>,
     ) -> Result<NativeSourceOutput, ObfuscationError> {
+        self.kept_names.begin_file(&file.relative_path);
         let source = file.source.as_ref();
         let is_declaration = file.is_declaration();
         let keep_source = keep_source_paths.contains(&file.original_path);
@@ -472,6 +495,7 @@ impl<'a> ArkguardModuleRunner<'a> {
             });
         }
         let mut program = parsed.program;
+        let source_locations = ArkguardSourceLocations::new(source);
         let kept_comment_targets = if is_declaration && self.rules.remove_comments {
             DeclarationCommentTargetCollector::new(self.rules).collect(&program)
         } else {
@@ -508,8 +532,9 @@ impl<'a> ArkguardModuleRunner<'a> {
         let (symbol_plan, identifier_cache) = if keep_source {
             (Vec::new(), BTreeMap::new())
         } else {
-            self.plan_symbol_names(file, &semantic, &policy)
+            self.plan_symbol_names(file, &semantic, &policy, &source_locations)
         };
+        let identifier_cache = self.remap_cache_positions(file, identifier_cache)?;
         drop(semantic);
 
         if self.rules.keep_object_props {
@@ -527,8 +552,9 @@ impl<'a> ArkguardModuleRunner<'a> {
             self.plan_property_names(property_collector.names)
         };
         let member_method_cache =
-            MemberMethodCacheCollector::new(source, &property_map, &symbol_plan).collect(&program);
-        let member_method_cache = self.remap_member_method_cache(file, member_method_cache)?;
+            MemberMethodCacheCollector::new(&source_locations, &property_map, &symbol_plan)
+                .collect(&program);
+        let member_method_cache = self.remap_cache_positions(file, member_method_cache)?;
         NativeArkguardAstTransform::new(
             &allocator,
             &property_map,
@@ -650,9 +676,11 @@ impl<'a> ArkguardModuleRunner<'a> {
         file: &ObfuscationModuleFile,
         semantic: &oxc_semantic::Semantic<'_>,
         policy: &IdentifierPolicy,
+        source_locations: &ArkguardSourceLocations<'_>,
     ) -> (Vec<SymbolRename>, BTreeMap<String, String>) {
         let scoping = semantic.scoping();
         let root_scope = scoping.root_scope_id();
+        let scope_locations = ArkguardScopeLocations::collect(semantic);
         let symbol_ids = scoping.symbol_ids().collect::<Vec<_>>();
         let history = self.cache.identifier_history(file.source_name_cache_key());
         let mut cache = BTreeMap::new();
@@ -661,15 +689,23 @@ impl<'a> ArkguardModuleRunner<'a> {
             let original = scoping.symbol_name(symbol_id).to_string();
             let scope_id = scoping.symbol_scope_id(symbol_id);
             let is_top_level = scope_id == root_scope;
+            let key = scope_locations.cache_key(scope_id, &original);
             let flags = scoping.symbol_flags(symbol_id);
-            let keep = self.reserved_names.contains(&original)
-                || ArkguardWildcard::matches_any(&self.rules.keep_global_names, &original, false)
+            let whitelist_reasons =
+                self.kept_names
+                    .identifier_reasons(&original, is_top_level, self.rules);
+            let keep = !whitelist_reasons.is_empty()
                 || (!self.rules.enable_toplevel_obfuscation && is_top_level)
                 || (!self.rules.enable_export_obfuscation
                     && (policy.exported_names.contains(&original)
                         || flags.intersects(SymbolFlags::Import | SymbolFlags::TypeImport)))
                 || (self.rules.keep_parameter_names && policy.parameters.contains(&symbol_id));
             if keep {
+                self.kept_names.record_identifier_reasons(
+                    &file.relative_path,
+                    &key,
+                    whitelist_reasons,
+                );
                 // With export obfuscation enabled ArkGuard still runs imported
                 // bindings through its name generator. SDK-reserved imports
                 // therefore produce identity entries in IdentifierCache.
@@ -682,12 +718,7 @@ impl<'a> ArkguardModuleRunner<'a> {
                 }
                 continue;
             }
-            let key = if is_top_level {
-                format!("#{original}")
-            } else {
-                format!("{scope_id:?}#{original}")
-            };
-            let cached = Self::history_name(&history, &key, &original);
+            let cached = history.get(&key).cloned();
             let replacement = if is_top_level {
                 self.cache
                     .property_cache
@@ -717,7 +748,13 @@ impl<'a> ArkguardModuleRunner<'a> {
                     .property_cache
                     .insert(original.clone(), replacement.clone());
             }
-            cache.insert(key, replacement.clone());
+            let output_key = policy
+                .function_spans
+                .get(&symbol_id)
+                .map_or(key.clone(), |span| {
+                    format!("{key}{}", source_locations.span_suffix(*span))
+                });
+            cache.insert(output_key, replacement.clone());
             plan.push(SymbolRename {
                 declaration_start: scoping.symbol_span(symbol_id).start,
                 original,
@@ -725,23 +762,6 @@ impl<'a> ArkguardModuleRunner<'a> {
             });
         }
         (plan, cache)
-    }
-
-    fn history_name(
-        history: &BTreeMap<String, String>,
-        key: &str,
-        original: &str,
-    ) -> Option<String> {
-        if let Some(name) = history.get(key) {
-            return Some(name.clone());
-        }
-        let suffix = format!("#{original}");
-        let mut matches = history
-            .iter()
-            .filter(|(candidate, _)| candidate.ends_with(&suffix))
-            .map(|(_, name)| name);
-        let name = matches.next()?.clone();
-        matches.next().is_none().then_some(name)
     }
 
     fn apply_symbol_names(
@@ -788,9 +808,10 @@ impl<'a> ArkguardModuleRunner<'a> {
             return output;
         }
         for original in names {
-            if self.reserved_properties.contains(&original)
-                || ArkguardWildcard::matches_any(&self.rules.keep_property_names, &original, false)
-            {
+            let whitelist_reasons = self.kept_names.property_reasons(&original, self.rules);
+            if !whitelist_reasons.is_empty() {
+                self.kept_names
+                    .record_property_reasons(&original, whitelist_reasons);
                 continue;
             }
             let replacement = self
@@ -989,7 +1010,7 @@ impl<'a> ArkguardModuleRunner<'a> {
         Ok(value)
     }
 
-    fn remap_member_method_cache(
+    fn remap_cache_positions(
         &self,
         file: &ObfuscationModuleFile,
         cache: BTreeMap<String, String>,
@@ -1289,10 +1310,578 @@ struct ArkguardTracedSourceMapToken<'a> {
     name: Option<&'a str>,
 }
 
+struct ArkguardSourceLocations<'a> {
+    source: &'a str,
+    line_starts: Vec<usize>,
+}
+
+impl<'a> ArkguardSourceLocations<'a> {
+    fn new(source: &'a str) -> Self {
+        let mut line_starts = vec![0];
+        line_starts.extend(
+            source
+                .bytes()
+                .enumerate()
+                .filter_map(|(index, byte)| (byte == b'\n').then_some(index + 1)),
+        );
+        Self {
+            source,
+            line_starts,
+        }
+    }
+
+    fn line_and_column(&self, offset: u32) -> (usize, usize) {
+        let offset = usize::try_from(offset).unwrap_or(self.source.len());
+        let line = self.line_starts.partition_point(|start| *start <= offset);
+        let line_start = self.line_starts[line.saturating_sub(1)];
+        let column = self.source[line_start..offset.min(self.source.len())]
+            .encode_utf16()
+            .count()
+            + 1;
+        (line, column)
+    }
+
+    fn span_suffix(&self, span: Span) -> String {
+        let (start_line, start_column) = self.line_and_column(span.start);
+        let (end_line, end_column) = self.line_and_column(span.end);
+        format!(":{start_line}:{start_column}:{end_line}:{end_column}")
+    }
+}
+
+/// Reproduces `ScopeAnalyzer.Scope.loc`, the stable key used by ArkGuard's
+/// `IdentifierCache` and kept-name report. OXC `ScopeId`s are allocation IDs
+/// and must never escape into either persisted artifact.
+struct ArkguardScopeLocations {
+    by_scope: FxHashMap<ScopeId, String>,
+}
+
+impl ArkguardScopeLocations {
+    fn collect(semantic: &oxc_semantic::Semantic<'_>) -> Self {
+        let scoping = semantic.scoping();
+        let root = scoping.root_scope_id();
+        let mut by_scope = FxHashMap::default();
+        by_scope.insert(root, String::new());
+        let mut child_counts = BTreeMap::<String, usize>::new();
+        let mut named_children = BTreeSet::<(String, String)>::new();
+        for scope_id in scoping.scope_descendants_from_root().skip(1) {
+            let parent = scoping.scope_parent_id(scope_id).unwrap_or(root);
+            let parent_location = by_scope.get(&parent).cloned().unwrap_or_default();
+            let node_id = scoping.get_node_id(scope_id);
+            let Some(name) = Self::scope_name(semantic, node_id) else {
+                by_scope.insert(scope_id, parent_location);
+                continue;
+            };
+            let count = child_counts.entry(parent_location.clone()).or_default();
+            let anonymous = name.is_none();
+            let segment = name.unwrap_or_else(|| format!("${count}"));
+            let location = if parent_location.is_empty() {
+                segment.clone()
+            } else {
+                format!("{parent_location}#{segment}")
+            };
+            if anonymous {
+                *count += 1;
+            } else {
+                if named_children.insert((parent_location.clone(), segment)) {
+                    *count += 1;
+                }
+            }
+            by_scope.insert(scope_id, location);
+        }
+        Self { by_scope }
+    }
+
+    fn cache_key(&self, scope_id: ScopeId, original: &str) -> String {
+        format!(
+            "{}#{original}",
+            self.by_scope.get(&scope_id).map_or("", String::as_str)
+        )
+    }
+
+    fn scope_name(
+        semantic: &oxc_semantic::Semantic<'_>,
+        node_id: oxc_syntax::node::NodeId,
+    ) -> Option<Option<String>> {
+        let nodes = semantic.nodes();
+        match nodes.kind(node_id) {
+            AstKind::Function(function) => Some(Self::function_name(nodes, node_id, function)),
+            AstKind::ArrowFunctionExpression(_) => {
+                Some(Self::assigned_function_name(nodes, node_id))
+            }
+            AstKind::Class(class) => Some(class.id.as_ref().map(|id| id.name.to_string())),
+            AstKind::ObjectExpression(_)
+            | AstKind::BlockStatement(_)
+            | AstKind::ForStatement(_)
+            | AstKind::ForInStatement(_)
+            | AstKind::ForOfStatement(_)
+            | AstKind::SwitchStatement(_)
+            | AstKind::CatchClause(_)
+            | AstKind::StaticBlock(_) => Some(None),
+            AstKind::TSInterfaceDeclaration(declaration) => {
+                Some(Some(declaration.id.name.to_string()))
+            }
+            AstKind::TSTypeAliasDeclaration(declaration) => {
+                Some(Some(declaration.id.name.to_string()))
+            }
+            AstKind::TSEnumBody(_) => nodes.ancestor_kinds(node_id).find_map(|kind| match kind {
+                AstKind::TSEnumDeclaration(declaration) => {
+                    Some(Some(declaration.id.name.to_string()))
+                }
+                _ => None,
+            }),
+            AstKind::TSNamespaceDeclaration(declaration) => {
+                Some(Some(declaration.id.name.to_string()))
+            }
+            AstKind::TSExternalModuleDeclaration(declaration) => {
+                Some(Some(declaration.id.value.to_string()))
+            }
+            _ => None,
+        }
+    }
+
+    fn function_name(
+        nodes: &oxc_semantic::AstNodes<'_>,
+        node_id: oxc_syntax::node::NodeId,
+        function: &Function<'_>,
+    ) -> Option<String> {
+        if let Some(identifier) = function.id.as_ref() {
+            return Some(identifier.name.to_string());
+        }
+        match nodes.parent_kind(node_id) {
+            AstKind::MethodDefinition(method)
+                if method.kind != MethodDefinitionKind::Constructor =>
+            {
+                Self::property_key_name(&method.key).map(str::to_string)
+            }
+            AstKind::ObjectProperty(property) if property.method => {
+                Self::property_key_name(&property.key).map(str::to_string)
+            }
+            _ => Self::assigned_function_name(nodes, node_id),
+        }
+    }
+
+    fn assigned_function_name(
+        nodes: &oxc_semantic::AstNodes<'_>,
+        node_id: oxc_syntax::node::NodeId,
+    ) -> Option<String> {
+        for kind in nodes.ancestor_kinds(node_id) {
+            if let AstKind::VariableDeclarator(declaration) = kind {
+                return declaration
+                    .id
+                    .get_binding_identifiers()
+                    .first()
+                    .map(|identifier| identifier.name.to_string());
+            }
+            if matches!(
+                kind,
+                AstKind::ObjectProperty(_)
+                    | AstKind::MethodDefinition(_)
+                    | AstKind::ExpressionStatement(_)
+                    | AstKind::Program(_)
+                    | AstKind::Function(_)
+                    | AstKind::ArrowFunctionExpression(_)
+                    | AstKind::Class(_)
+            ) {
+                return None;
+            }
+        }
+        None
+    }
+
+    fn property_key_name<'key>(key: &'key PropertyKey<'_>) -> Option<&'key str> {
+        match key {
+            PropertyKey::StaticIdentifier(identifier) => Some(identifier.name.as_str()),
+            PropertyKey::StringLiteral(literal) => Some(literal.value.as_str()),
+            PropertyKey::PrivateIdentifier(identifier) => Some(identifier.name.as_str()),
+            _ => None,
+        }
+    }
+}
+
 struct SymbolRename {
     declaration_start: u32,
     original: String,
     replacement: String,
+}
+
+struct ArkguardRuleOutputPath<'a> {
+    options: &'a ObfuscationOptions,
+}
+
+impl<'a> ArkguardRuleOutputPath<'a> {
+    fn new(options: &'a ObfuscationOptions) -> Self {
+        Self { options }
+    }
+
+    fn resolve(&self, configured: &str) -> PathBuf {
+        let path = Path::new(configured);
+        if path.has_root() {
+            return path.to_path_buf();
+        }
+        self.options
+            .rule_files
+            .first()
+            .and_then(|rule| rule.parent())
+            .unwrap_or(Path::new("."))
+            .join(path)
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct ArkguardNameReasons(u16);
+
+impl ArkguardNameReasons {
+    const SDK: u16 = 1 << 0;
+    const LANG: u16 = 1 << 1;
+    const CONF: u16 = 1 << 2;
+    const STRUCT: u16 = 1 << 3;
+    const EXPORTED: u16 = 1 << 4;
+    const OBJECT: u16 = 1 << 5;
+    const STRING: u16 = 1 << 6;
+    const ENUM: u16 = 1 << 7;
+
+    fn insert(&mut self, reason: u16) {
+        self.0 |= reason;
+    }
+
+    fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    fn identifier_strings(self) -> Vec<String> {
+        self.strings(&[
+            (Self::LANG, "lang"),
+            (Self::SDK, "sdk"),
+            (Self::EXPORTED, "exported"),
+            (Self::CONF, "conf"),
+        ])
+    }
+
+    fn property_strings(self) -> Vec<String> {
+        self.strings(&[
+            (Self::SDK, "sdk"),
+            (Self::LANG, "lang"),
+            (Self::STRUCT, "struct"),
+            (Self::EXPORTED, "exported"),
+            (Self::OBJECT, "objectProp"),
+            (Self::STRING, "strProp"),
+            (Self::ENUM, "enum"),
+            (Self::CONF, "conf"),
+        ])
+    }
+
+    fn strings(self, order: &[(u16, &'static str)]) -> Vec<String> {
+        order
+            .iter()
+            .filter(|(reason, _)| self.0 & reason != 0)
+            .map(|(_, label)| (*label).to_string())
+            .collect()
+    }
+}
+
+#[derive(Default)]
+struct ArkguardKeptNameReport {
+    enabled: bool,
+    reasons: crate::bytecode::ArkguardReservedNameReasons,
+    properties: BTreeMap<String, Vec<String>>,
+    files: BTreeMap<String, BTreeMap<String, Vec<String>>>,
+}
+
+impl ArkguardKeptNameReport {
+    fn load(
+        options: &ObfuscationOptions,
+        rules: &ObfuscationRules,
+    ) -> Result<Self, ObfuscationError> {
+        if !rules.print_kept_names {
+            return Ok(Self::default());
+        }
+        let path = options.cache_dir.join("keptNames.json");
+        let mut report = Self {
+            enabled: true,
+            ..Self::default()
+        };
+        if !path.is_file() {
+            return Ok(report);
+        }
+        let value: Value = serde_json::from_slice(&fs_err::read(&path)?)?;
+        let kept_names = value
+            .get("keptNames")
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                ObfuscationError::CodegenError(format!(
+                    "ArkGuard kept-name cache {} must contain a keptNames object",
+                    path.display()
+                ))
+            })?;
+        for (file, names) in kept_names {
+            let parsed = Self::reason_map(names);
+            if file == "property" {
+                report.properties = parsed;
+            } else {
+                report.files.insert(file.clone(), parsed);
+            }
+        }
+        Ok(report)
+    }
+
+    fn reason_map(value: &Value) -> BTreeMap<String, Vec<String>> {
+        value
+            .as_object()
+            .map(|entries| {
+                entries
+                    .iter()
+                    .map(|(name, reasons)| {
+                        let reasons = reasons
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(Value::as_str)
+                            .map(str::to_string)
+                            .collect();
+                        (name.clone(), reasons)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn set_inventory(&mut self, reasons: crate::bytecode::ArkguardReservedNameReasons) {
+        self.reasons = reasons;
+    }
+
+    fn begin_file(&mut self, file: &str) {
+        if self.enabled {
+            self.files.insert(file.to_string(), BTreeMap::new());
+        }
+    }
+
+    fn record_identifier_reasons(
+        &mut self,
+        file: &str,
+        name_with_scope: &str,
+        reasons: ArkguardNameReasons,
+    ) {
+        if !self.enabled || reasons.is_empty() {
+            return;
+        }
+        self.files
+            .entry(file.to_string())
+            .or_default()
+            .insert(name_with_scope.to_string(), reasons.identifier_strings());
+    }
+
+    fn record_property_reasons(&mut self, original: &str, reasons: ArkguardNameReasons) {
+        if !self.enabled || reasons.is_empty() {
+            return;
+        }
+        self.properties
+            .insert(original.to_string(), reasons.property_strings());
+    }
+
+    fn identifier_reasons(
+        &self,
+        original: &str,
+        is_top_level: bool,
+        rules: &ObfuscationRules,
+    ) -> ArkguardNameReasons {
+        if is_top_level && rules.enable_property_obfuscation {
+            return self.property_reasons(original, rules);
+        }
+        let mut reasons = ArkguardNameReasons::default();
+        let language = if is_top_level {
+            matches!(original, "__global" | "default")
+        } else {
+            matches!(original, "this" | "__global")
+        };
+        if language {
+            reasons.insert(ArkguardNameReasons::LANG);
+        }
+        let sdk = if is_top_level {
+            self.reasons.sdk_globals.contains(original)
+        } else {
+            self.reasons.sdk_locals.contains(original)
+        };
+        if sdk {
+            reasons.insert(ArkguardNameReasons::SDK);
+        }
+        if self.reasons.export_globals.contains(original) {
+            reasons.insert(ArkguardNameReasons::EXPORTED);
+        }
+        let configured = if is_top_level {
+            self.reasons.configured_globals.contains(original)
+                || self.reasons.atkeep_globals.contains(original)
+                || self.reasons.intent_globals.contains(original)
+                || ArkguardWildcard::matches_any(&rules.keep_global_names, original, false)
+        } else {
+            self.reasons.configured_locals.contains(original)
+        };
+        if configured {
+            reasons.insert(ArkguardNameReasons::CONF);
+        }
+        reasons
+    }
+
+    fn property_reasons(&self, original: &str, rules: &ObfuscationRules) -> ArkguardNameReasons {
+        let mut reasons = ArkguardNameReasons::default();
+        if self.reasons.sdk_properties.contains(original)
+            || self.reasons.sdk_globals.contains(original)
+        {
+            reasons.insert(ArkguardNameReasons::SDK);
+        }
+        if self.reasons.language_properties.contains(original)
+            || matches!(original, "__global" | "default")
+        {
+            reasons.insert(ArkguardNameReasons::LANG);
+        }
+        if self.reasons.structs.contains(original) {
+            reasons.insert(ArkguardNameReasons::STRUCT);
+        }
+        if self.reasons.export_properties.contains(original)
+            || self.reasons.export_globals.contains(original)
+        {
+            reasons.insert(ArkguardNameReasons::EXPORTED);
+        }
+        if self.reasons.objects.contains(original) {
+            reasons.insert(ArkguardNameReasons::OBJECT);
+        }
+        if self.reasons.strings.contains(original) {
+            reasons.insert(ArkguardNameReasons::STRING);
+        }
+        if self.reasons.enums.contains(original) {
+            reasons.insert(ArkguardNameReasons::ENUM);
+        }
+        if self.reasons.configured_properties.contains(original)
+            || self.reasons.atkeep_properties.contains(original)
+            || self.reasons.intent_properties.contains(original)
+            || ArkguardWildcard::matches_any(&rules.keep_property_names, original, false)
+            || ArkguardWildcard::matches_any(&rules.keep_global_names, original, false)
+        {
+            reasons.insert(ArkguardNameReasons::CONF);
+        }
+        reasons
+    }
+
+    fn write(
+        &self,
+        options: &ObfuscationOptions,
+        rules: &ObfuscationRules,
+    ) -> Result<(), ObfuscationError> {
+        if !self.enabled {
+            return Ok(());
+        }
+        let mut kept_names = Map::new();
+        kept_names.insert(
+            "property".to_string(),
+            serde_json::to_value(&self.properties)?,
+        );
+        for (file, names) in &self.files {
+            kept_names.insert(file.clone(), serde_json::to_value(names)?);
+        }
+        let output = serde_json::json!({
+            "keptReasons": {
+                "sdk": "same as the system api names",
+                "lang": "same as the language keywords",
+                "conf": "same as the user-configured kept name",
+                "struct": "same as the ArkUI struct property",
+                "strProp": "same as the string property",
+                "objectProp": "same as the object property",
+                "exported": "same as the exported names and properties",
+                "enum": "same as the members in the enum"
+            },
+            "keptNames": Value::Object(kept_names),
+        });
+        let default_path = options.cache_dir.join("keptNames.json");
+        fs_err::create_dir_all(&options.cache_dir)?;
+        fs_err::write(&default_path, serde_json::to_vec_pretty(&output)?)?;
+
+        let whitelist = self.whitelist(rules);
+        fs_err::write(
+            options.cache_dir.join("whitelist.json"),
+            serde_json::to_vec_pretty(&whitelist)?,
+        )?;
+        if let Some(configured) = rules.print_kept_names_path.as_deref() {
+            let configured = ArkguardRuleOutputPath::new(options).resolve(configured);
+            if let Some(parent) = configured.parent() {
+                fs_err::create_dir_all(parent)?;
+            }
+            fs_err::copy(default_path, configured)?;
+        }
+        Ok(())
+    }
+
+    fn whitelist(&self, rules: &ObfuscationRules) -> Value {
+        let language = if rules.enable_property_obfuscation {
+            self.reasons
+                .language_properties
+                .iter()
+                .cloned()
+                .chain([
+                    "this".to_string(),
+                    "__global".to_string(),
+                    "default".to_string(),
+                ])
+                .collect::<BTreeSet<_>>()
+        } else {
+            BTreeSet::from(["this".to_string(), "__global".to_string()])
+        };
+        let mut configured = self.reasons.configured_locals.clone();
+        if rules.enable_property_obfuscation {
+            configured.extend(rules.keep_property_names.iter().cloned());
+        }
+        if rules.enable_toplevel_obfuscation {
+            configured.extend(rules.keep_global_names.iter().cloned());
+        }
+        if rules.enable_at_keep {
+            configured.extend(self.reasons.atkeep_globals.iter().cloned());
+            configured.extend(self.reasons.atkeep_properties.iter().cloned());
+        }
+        configured.extend(self.reasons.intent_globals.iter().cloned());
+        configured.extend(self.reasons.intent_properties.iter().cloned());
+        let empty = BTreeSet::new();
+        let structs = if rules.enable_property_obfuscation {
+            &self.reasons.structs
+        } else {
+            &empty
+        };
+        let exports = if rules.enable_property_obfuscation || rules.enable_export_obfuscation {
+            if rules.enable_property_obfuscation {
+                self.reasons
+                    .export_properties
+                    .union(&self.reasons.export_globals)
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+            } else {
+                self.reasons.export_globals.clone()
+            }
+        } else {
+            BTreeSet::new()
+        };
+        let strings =
+            if rules.enable_property_obfuscation && !rules.enable_string_property_obfuscation {
+                &self.reasons.strings
+            } else {
+                &empty
+            };
+        let objects = if rules.enable_property_obfuscation && rules.keep_object_props {
+            &self.reasons.objects
+        } else {
+            &empty
+        };
+        let enums = if rules.enable_property_obfuscation {
+            &self.reasons.enums
+        } else {
+            &empty
+        };
+        serde_json::json!({
+            "lang": language,
+            "conf": configured,
+            "struct": structs,
+            "exported": exports,
+            "strProp": strings,
+            "objectProp": objects,
+            "enum": enums,
+        })
+    }
 }
 
 #[derive(Default)]
@@ -1344,13 +1933,12 @@ struct ArkguardFileCache {
 impl ArkguardNameCache {
     fn load(
         options: &ObfuscationOptions,
-        adapter: &ArkguardAdapterOptions,
         rules: &ObfuscationRules,
     ) -> Result<Self, ObfuscationError> {
         let configured_cache = rules
             .apply_name_cache
             .as_deref()
-            .map(|configured| adapter.project_root.join(configured));
+            .map(|configured| ArkguardRuleOutputPath::new(options).resolve(configured));
         let path = configured_cache
             .clone()
             .unwrap_or_else(|| options.cache_dir.join("nameCache.json"));
@@ -1527,29 +2115,11 @@ impl ArkguardNameCache {
         let default_path = options.cache_dir.join("nameCache.json");
         fs_err::write(&default_path, &bytes)?;
         if let Some(configured) = rules.print_name_cache.as_deref() {
-            let configured_path = adapter.project_root.join(configured);
+            let configured_path = ArkguardRuleOutputPath::new(options).resolve(configured);
             // `ConfigResolver.writeObfuscationNameCache` writes an explicit
             // `-print-namecache` path directly. A missing parent is therefore
             // an IO error rather than an implicitly created directory.
             fs_err::write(configured_path, &bytes)?;
-        }
-        if rules.print_kept_names {
-            let path = rules
-                .print_kept_names_path
-                .as_deref()
-                .map(|configured| adapter.project_root.join(configured))
-                .unwrap_or_else(|| options.cache_dir.join("keptNames.json"));
-            if let Some(parent) = path.parent() {
-                fs_err::create_dir_all(parent)?;
-            }
-            fs_err::write(
-                path,
-                serde_json::to_vec_pretty(&serde_json::json!({
-                    "globalNames": rules.keep_global_names.iter().collect::<BTreeSet<_>>(),
-                    "propertyNames": rules.keep_property_names.iter().collect::<BTreeSet<_>>(),
-                    "fileNames": rules.keep_file_names.iter().collect::<BTreeSet<_>>(),
-                }))?,
-            )?;
         }
         Ok(default_path)
     }
@@ -1558,6 +2128,7 @@ impl ArkguardNameCache {
 struct IdentifierPolicy {
     exported_names: FxHashSet<String>,
     parameters: FxHashSet<oxc_syntax::symbol::SymbolId>,
+    function_spans: FxHashMap<oxc_syntax::symbol::SymbolId, Span>,
 }
 
 impl IdentifierPolicy {
@@ -1567,6 +2138,7 @@ impl IdentifierPolicy {
         Self {
             exported_names: collector.exported_names,
             parameters: collector.parameters,
+            function_spans: collector.function_spans,
         }
     }
 }
@@ -1576,6 +2148,7 @@ struct IdentifierPolicyCollector {
     export_depth: usize,
     exported_names: FxHashSet<String>,
     parameters: FxHashSet<oxc_syntax::symbol::SymbolId>,
+    function_spans: FxHashMap<oxc_syntax::symbol::SymbolId, Span>,
 }
 
 impl IdentifierPolicyCollector {
@@ -1595,6 +2168,33 @@ impl IdentifierPolicyCollector {
 }
 
 impl<'a> Visit<'a> for IdentifierPolicyCollector {
+    fn visit_function(&mut self, function: &Function<'a>, flags: oxc_syntax::scope::ScopeFlags) {
+        if let Some(identifier) = function.id.as_ref() {
+            if let Some(symbol_id) = identifier.symbol_id.get() {
+                self.function_spans.insert(symbol_id, function.span);
+            }
+        }
+        walk::walk_function(self, function, flags);
+    }
+
+    fn visit_variable_declarator(&mut self, declaration: &VariableDeclarator<'a>) {
+        let function_span = match declaration.init.as_ref() {
+            Some(Expression::FunctionExpression(function)) if function.id.is_none() => {
+                Some(function.span)
+            }
+            Some(Expression::ArrowFunctionExpression(function)) => Some(function.span),
+            _ => None,
+        };
+        if let Some(span) = function_span {
+            for identifier in declaration.id.get_binding_identifiers() {
+                if let Some(symbol_id) = identifier.symbol_id.get() {
+                    self.function_spans.insert(symbol_id, span);
+                }
+            }
+        }
+        walk::walk_variable_declarator(self, declaration);
+    }
+
     fn visit_binding_identifier(&mut self, identifier: &oxc_ast::ast::BindingIdentifier<'a>) {
         if self.export_depth > 0 {
             self.exported_names.insert(identifier.name.to_string());
@@ -1687,8 +2287,7 @@ impl<'a> Visit<'a> for ObjectPropertyKeepCollector {
 }
 
 struct MemberMethodCacheCollector<'a> {
-    source: &'a str,
-    line_starts: Vec<usize>,
+    locations: &'a ArkguardSourceLocations<'a>,
     properties: &'a FxHashMap<String, String>,
     symbols: &'a [SymbolRename],
     classes: Vec<Option<(String, String, bool)>>,
@@ -1697,20 +2296,12 @@ struct MemberMethodCacheCollector<'a> {
 
 impl<'a> MemberMethodCacheCollector<'a> {
     fn new(
-        source: &'a str,
+        locations: &'a ArkguardSourceLocations<'a>,
         properties: &'a FxHashMap<String, String>,
         symbols: &'a [SymbolRename],
     ) -> Self {
-        let mut line_starts = vec![0];
-        line_starts.extend(
-            source
-                .bytes()
-                .enumerate()
-                .filter_map(|(index, byte)| (byte == b'\n').then_some(index + 1)),
-        );
         Self {
-            source,
-            line_starts,
+            locations,
             properties,
             symbols,
             classes: Vec::new(),
@@ -1729,23 +2320,6 @@ impl<'a> MemberMethodCacheCollector<'a> {
             PropertyKey::PrivateIdentifier(identifier) => Some(identifier.name.as_str()),
             _ => None,
         }
-    }
-
-    fn line_and_column(&self, offset: u32) -> (usize, usize) {
-        let offset = usize::try_from(offset).unwrap_or(self.source.len());
-        let line = self.line_starts.partition_point(|start| *start <= offset);
-        let line_start = self.line_starts[line.saturating_sub(1)];
-        let column = self.source[line_start..offset.min(self.source.len())]
-            .encode_utf16()
-            .count()
-            + 1;
-        (line, column)
-    }
-
-    fn span_suffix(&self, span: oxc_span::Span) -> String {
-        let (start_line, start_column) = self.line_and_column(span.start);
-        let (end_line, end_column) = self.line_and_column(span.end);
-        format!(":{start_line}:{start_column}:{end_line}:{end_column}")
     }
 }
 
@@ -1795,7 +2369,7 @@ impl<'a> Visit<'a> for MemberMethodCacheCollector<'_> {
         };
         if let Some((original, replacement)) = names {
             self.cache.insert(
-                format!("{}{}", original, self.span_suffix(method.span)),
+                format!("{}{}", original, self.locations.span_suffix(method.span)),
                 replacement,
             );
         }

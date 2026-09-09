@@ -71,6 +71,11 @@ pub struct ObfuscationRules {
     pub keep_uncompact_paths: FxHashSet<String>,
     pub exclude_uncompact_paths: FxHashSet<String>,
     pub keep_dts_paths: FxHashSet<String>,
+    /// Names extracted from `-keep-dts` inputs. ArkGuard stores this same
+    /// inventory in `mReservedNames`, `mReservedProperties`, and
+    /// `mReservedToplevelNames`; retaining the origin is required because only
+    /// `mReservedNames` participates in local-variable preservation.
+    pub keep_dts_names: FxHashSet<String>,
 }
 
 /// Current `-keep-*` section being accumulated.
@@ -394,6 +399,11 @@ impl ObfuscationRules {
                 .into_iter()
                 .chain(other.keep_dts_paths)
                 .collect(),
+            keep_dts_names: self
+                .keep_dts_names
+                .into_iter()
+                .chain(other.keep_dts_names)
+                .collect(),
         }
     }
 
@@ -412,6 +422,7 @@ impl ObfuscationRules {
         self.exclude_uncompact_paths
             .extend(other.exclude_uncompact_paths);
         self.keep_dts_paths.extend(other.keep_dts_paths);
+        self.keep_dts_names.extend(other.keep_dts_names);
         self
     }
 

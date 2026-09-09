@@ -5,11 +5,13 @@ use std::process::Command;
 use arkdown_path::ArtifactPathSerializer;
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    AccessorProperty, BindingIdentifier, Class, ClassElement, Decorator, ExportDeclaration,
-    ExportDefaultDeclaration, ExportNamedDeclaration, ExportSpecifier, Expression, Function,
-    IdentifierName, IdentifierReference, MethodDefinition, ModuleExportName, PropertyDefinition,
-    PropertyKey, StringLiteral, StructStatement, TSEnumDeclaration, TSIndexSignatureName,
-    TSInterfaceDeclaration, TSSignature, VariableDeclaration,
+    AccessorProperty, ArrowFunctionExpression, BindingIdentifier, Class, ClassElement,
+    ComputedMemberExpression, Decorator, ExportDeclaration, ExportDefaultDeclaration,
+    ExportNamedDeclaration, ExportSpecifier, Expression, FormalParameter, FormalParameterRest,
+    Function, IdentifierName, IdentifierReference, MethodDefinition, ModuleExportName,
+    ObjectProperty, PropertyDefinition, PropertyKey, StringLiteral, StructElement, StructStatement,
+    TSEnumDeclaration, TSEnumMemberName, TSIndexSignatureName, TSInterfaceDeclaration, TSSignature,
+    TSTypeParameter, VariableDeclaration,
 };
 use oxc_ast_visit::{walk, Visit};
 use oxc_parser::Parser;
@@ -22,7 +24,7 @@ use serde_json::{Map, Value};
 
 use crate::{
     ArkguardAdapterOptions, ObfuscationError, ObfuscationModuleFile, ObfuscationModuleInput,
-    ObfuscationOptions, ObfuscationRules, ObfuscationSource,
+    ObfuscationOptions, ObfuscationRules, ObfuscationSource, ObfuscationSourceKind,
 };
 
 const ES_ANNOTATIONS: [&str; 3] = [
@@ -364,8 +366,30 @@ impl<'a> RuleOutputPathResolver<'a> {
     }
 }
 
+#[derive(Default)]
+pub(crate) struct ArkguardReservedNameReasons {
+    pub(crate) sdk_properties: BTreeSet<String>,
+    pub(crate) sdk_globals: BTreeSet<String>,
+    pub(crate) sdk_locals: BTreeSet<String>,
+    pub(crate) language_properties: BTreeSet<String>,
+    pub(crate) configured_properties: BTreeSet<String>,
+    pub(crate) configured_globals: BTreeSet<String>,
+    pub(crate) configured_locals: BTreeSet<String>,
+    pub(crate) atkeep_properties: BTreeSet<String>,
+    pub(crate) atkeep_globals: BTreeSet<String>,
+    pub(crate) intent_properties: BTreeSet<String>,
+    pub(crate) intent_globals: BTreeSet<String>,
+    pub(crate) structs: BTreeSet<String>,
+    pub(crate) strings: BTreeSet<String>,
+    pub(crate) objects: BTreeSet<String>,
+    pub(crate) export_properties: BTreeSet<String>,
+    pub(crate) export_globals: BTreeSet<String>,
+    pub(crate) enums: BTreeSet<String>,
+}
+
 pub(crate) struct ArkguardReservedNameInventory {
     pub(crate) names: BTreeSet<String>,
+    pub(crate) reasons: ArkguardReservedNameReasons,
 }
 
 impl ArkguardReservedNameInventory {
@@ -398,29 +422,81 @@ impl ArkguardReservedNameInventory {
                     source,
                     rules,
                     preserve_exports.contains(&source.path),
+                    adapter.compile_har,
                 )
                 .scan()
             })
             .collect::<Result<Vec<_>, _>>()?;
         let mut names = BTreeSet::new();
+        let mut reasons = ArkguardReservedNameReasons::default();
         for scan in scans {
-            names.extend(scan);
+            names.extend(scan.names);
+            reasons.sdk_properties.extend(scan.sdk_properties);
+            reasons.sdk_globals.extend(scan.sdk_globals);
+            reasons.sdk_locals.extend(scan.sdk_locals);
+            reasons.structs.extend(scan.structs);
+            reasons.strings.extend(scan.strings);
+            reasons.objects.extend(scan.objects);
+            reasons.export_properties.extend(scan.export_properties);
+            reasons.export_globals.extend(scan.export_globals);
+            reasons.enums.extend(scan.enums);
+            reasons.atkeep_properties.extend(scan.configured_properties);
+            reasons
+                .atkeep_properties
+                .extend(scan.configured_globals.iter().cloned());
+            reasons.atkeep_globals.extend(scan.configured_globals);
         }
-        names.extend(
+        reasons.configured_properties.extend(
             rules
-                .keep_global_names
+                .keep_property_names
                 .iter()
-                .chain(rules.keep_property_names.iter())
+                .chain(rules.keep_global_names.iter())
                 .filter(|name| !name.contains(['*', '?']))
                 .cloned(),
         );
+        reasons.configured_globals.extend(
+            rules
+                .keep_global_names
+                .iter()
+                .filter(|name| !name.contains(['*', '?']))
+                .cloned(),
+        );
+        reasons
+            .configured_locals
+            .extend(rules.keep_dts_names.iter().cloned());
+        names.extend(reasons.configured_properties.iter().cloned());
+        names.extend(reasons.configured_globals.iter().cloned());
+        names.extend(reasons.configured_locals.iter().cloned());
         names.extend(ES_ANNOTATIONS.into_iter().map(str::to_string));
         for file in files {
             names.extend(file.insight_intent_global_names.iter().cloned());
             names.extend(file.insight_intent_property_names.iter().cloned());
+            reasons
+                .intent_globals
+                .extend(file.insight_intent_global_names.iter().cloned());
+            reasons
+                .intent_properties
+                .extend(file.insight_intent_global_names.iter().cloned());
+            reasons
+                .intent_properties
+                .extend(file.insight_intent_property_names.iter().cloned());
         }
-        names.extend(Self::language_reserved_names(adapter)?);
-        Ok(Self { names })
+        let language = Self::language_reserved_names(adapter, rules)?;
+        names.extend(language.iter().cloned());
+        reasons.language_properties = language;
+        reasons
+            .sdk_properties
+            .extend(adapter.arkui_reserved_property_names.iter().cloned());
+        if rules.strip_system_api_args {
+            reasons.sdk_locals.clear();
+            reasons.sdk_properties.extend(
+                adapter
+                    .arkui_optimized_reserved_property_names
+                    .iter()
+                    .cloned(),
+            );
+        }
+        Ok(Self { names, reasons })
     }
 
     pub(crate) fn collect_keep_dts_names(
@@ -470,23 +546,28 @@ impl ArkguardReservedNameInventory {
                 fs_err::read_to_string(path).map(|source| ObfuscationSource {
                     path: path.clone(),
                     source: source.into(),
-                    sdk_declaration: true,
+                    kind: ObfuscationSourceKind::KeepDts,
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
         let scans = sources
             .par_iter()
-            .map(|source| ReservedNameSourceScanner::new(source, rules, false).scan())
+            .map(|source| ReservedNameSourceScanner::new(source, rules, false, false).scan())
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(scans.into_iter().flatten().collect())
+        Ok(scans.into_iter().flat_map(|scan| scan.names).collect())
     }
 
     fn language_reserved_names(
         adapter: &ArkguardAdapterOptions,
+        rules: &ObfuscationRules,
     ) -> Result<BTreeSet<String>, ObfuscationError> {
-        let path = adapter
-            .arkguard_package
-            .join("lib/configs/preset/es_reserved_properties.json");
+        let path = adapter.arkguard_package.join("lib/configs/preset").join(
+            if rules.strip_language_default {
+                "es_reserved_properties_optimized.json"
+            } else {
+                "es_reserved_properties.json"
+            },
+        );
         let source = fs_err::read(&path).map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
                 ObfuscationError::ArkguardPackageNotFound(path.clone())
@@ -509,6 +590,7 @@ struct ReservedNameSourceScanner<'a> {
     source: &'a ObfuscationSource,
     rules: &'a ObfuscationRules,
     preserve_exports: bool,
+    compile_har: bool,
 }
 
 impl<'a> ReservedNameSourceScanner<'a> {
@@ -516,20 +598,28 @@ impl<'a> ReservedNameSourceScanner<'a> {
         source: &'a ObfuscationSource,
         rules: &'a ObfuscationRules,
         preserve_exports: bool,
+        compile_har: bool,
     ) -> Self {
         Self {
             source,
             rules,
             preserve_exports,
+            compile_har,
         }
     }
 
-    fn scan(&self) -> Result<BTreeSet<String>, ObfuscationError> {
-        if self.is_pre_define() {
+    fn scan(&self) -> Result<ReservedNameSourceScan, ObfuscationError> {
+        if self.source.kind == ObfuscationSourceKind::PreDefine {
             if self.rules.strip_system_api_args {
-                return Ok(BTreeSet::new());
+                return Ok(ReservedNameSourceScan::default());
             }
-            return Ok(Self::collect_pre_define_strings(&self.source.source));
+            let sdk = Self::collect_pre_define_strings(&self.source.source);
+            return Ok(ReservedNameSourceScan {
+                names: sdk.clone(),
+                sdk_properties: sdk.clone(),
+                sdk_locals: sdk,
+                ..ReservedNameSourceScan::default()
+            });
         }
         let allocator = Allocator::default();
         let parsed = Parser::new(&allocator, &self.source.source, self.source_type()).parse();
@@ -544,22 +634,40 @@ impl<'a> ReservedNameSourceScanner<'a> {
             .and_then(|name| name.to_str())
             .is_some_and(|name| name.ends_with(".d.ts") || name.ends_with(".d.ets"));
         let mut collector = ReservedNameAstCollector::new(
-            self.source.sdk_declaration || is_declaration,
+            self.source.kind,
+            matches!(
+                self.source.kind,
+                ObfuscationSourceKind::SdkComponent | ObfuscationSourceKind::KeepDts
+            ) || (self.source.kind == ObfuscationSourceKind::Project
+                && is_declaration
+                && (!self.rules.enable_export_obfuscation || self.preserve_exports)),
             !self.rules.enable_string_property_obfuscation,
+            self.rules.keep_object_props,
             !self.rules.enable_export_obfuscation || self.preserve_exports,
+            self.compile_har,
+            self.rules.strip_system_api_args,
         );
         collector.visit_program(&parsed.program);
         if self.rules.enable_at_keep && self.supports_at_keep() {
+            let configured = AtKeepNameCollector::collect(&parsed.program);
             collector
+                .scan
                 .names
-                .extend(AtKeepNameCollector::collect(&parsed.program));
+                .extend(configured.globals.iter().cloned());
+            collector
+                .scan
+                .names
+                .extend(configured.properties.iter().cloned());
+            collector
+                .scan
+                .configured_globals
+                .extend(configured.globals.iter().cloned());
+            collector
+                .scan
+                .configured_properties
+                .extend(configured.properties);
         }
-        Ok(collector.names)
-    }
-
-    fn is_pre_define(&self) -> bool {
-        self.source.sdk_declaration
-            && self.source.path.file_name().and_then(|name| name.to_str()) == Some("pre_define.js")
+        Ok(collector.scan)
     }
 
     /// Mirrors `ApiExtractor.extractStringsFromFile`'s
@@ -597,15 +705,45 @@ impl<'a> ReservedNameSourceScanner<'a> {
     }
 }
 
+#[derive(Default)]
+struct ReservedNameSourceScan {
+    names: BTreeSet<String>,
+    sdk_properties: BTreeSet<String>,
+    sdk_globals: BTreeSet<String>,
+    sdk_locals: BTreeSet<String>,
+    structs: BTreeSet<String>,
+    strings: BTreeSet<String>,
+    objects: BTreeSet<String>,
+    export_properties: BTreeSet<String>,
+    export_globals: BTreeSet<String>,
+    enums: BTreeSet<String>,
+    configured_properties: BTreeSet<String>,
+    configured_globals: BTreeSet<String>,
+}
+
+#[derive(Default)]
+struct AtKeepNames {
+    globals: BTreeSet<String>,
+    properties: BTreeSet<String>,
+}
+
+struct AtKeepContainer {
+    name: Option<String>,
+    global: bool,
+    exported: bool,
+}
+
 struct AtKeepNameCollector<'source> {
     source: &'source str,
     targets: FxHashSet<u32>,
-    names: BTreeSet<String>,
-    class_names: Vec<Option<String>>,
+    names: AtKeepNames,
+    containers: Vec<AtKeepContainer>,
+    declaration_depth: usize,
+    export_depth: usize,
 }
 
 impl<'source> AtKeepNameCollector<'source> {
-    fn collect(program: &'source oxc_ast::ast::Program<'source>) -> BTreeSet<String> {
+    fn collect(program: &'source oxc_ast::ast::Program<'source>) -> AtKeepNames {
         let targets: FxHashSet<u32> = program
             .comments
             .iter()
@@ -624,13 +762,15 @@ impl<'source> AtKeepNameCollector<'source> {
             })
             .collect();
         if targets.is_empty() {
-            return BTreeSet::new();
+            return AtKeepNames::default();
         }
         let mut collector = Self {
             source: program.source_text,
             targets,
-            names: BTreeSet::new(),
-            class_names: Vec::new(),
+            names: AtKeepNames::default(),
+            containers: Vec::new(),
+            declaration_depth: 0,
+            export_depth: 0,
         };
         collector.visit_program(program);
         collector.names
@@ -660,13 +800,13 @@ impl<'source> AtKeepNameCollector<'source> {
     fn insert_key(&mut self, key: &PropertyKey<'_>) {
         match key {
             PropertyKey::StaticIdentifier(identifier) => {
-                self.names.insert(identifier.name.to_string());
+                self.names.properties.insert(identifier.name.to_string());
             }
             PropertyKey::StringLiteral(literal) => {
-                self.names.insert(literal.value.to_string());
+                self.names.properties.insert(literal.value.to_string());
             }
             PropertyKey::PrivateIdentifier(identifier) => {
-                self.names.insert(identifier.name.to_string());
+                self.names.properties.insert(identifier.name.to_string());
             }
             _ => {}
         }
@@ -697,10 +837,35 @@ impl<'source> AtKeepNameCollector<'source> {
         }
     }
 
-    fn insert_current_class_name(&mut self) {
-        if let Some(Some(name)) = self.class_names.last() {
-            self.names.insert(name.clone());
+    fn insert_declaration_name(&mut self, name: Option<&str>) {
+        let Some(name) = name else {
+            return;
+        };
+        if self.declaration_depth == 0 || self.export_depth > 0 {
+            self.names.globals.insert(name.to_string());
         }
+        if self.export_depth > 0 {
+            self.names.properties.insert(name.to_string());
+        }
+    }
+
+    fn insert_current_container_name(&mut self) {
+        if let Some(container) = self.containers.last() {
+            if let Some(name) = &container.name {
+                if container.global {
+                    self.names.globals.insert(name.clone());
+                }
+                if container.exported {
+                    self.names.properties.insert(name.clone());
+                }
+            }
+        }
+    }
+
+    fn with_export_scope(&mut self, visit: impl FnOnce(&mut Self)) {
+        self.export_depth += 1;
+        visit(self);
+        self.export_depth -= 1;
     }
 }
 
@@ -711,20 +876,26 @@ impl<'ast> Visit<'ast> for AtKeepNameCollector<'ast> {
             .as_ref()
             .map(|identifier| identifier.name.to_string());
         if self.is_tagged(class.span.start) {
-            self.names.extend(name.iter().cloned());
+            self.insert_declaration_name(name.as_deref());
             for member in &class.body.body {
                 self.insert_class_member(member);
             }
         }
-        self.class_names.push(name);
+        self.containers.push(AtKeepContainer {
+            name,
+            global: self.declaration_depth == 0 || self.export_depth > 0,
+            exported: self.export_depth > 0,
+        });
+        self.declaration_depth += 1;
         walk::walk_class(self, class);
-        self.class_names.pop();
+        self.declaration_depth -= 1;
+        self.containers.pop();
     }
 
     fn visit_method_definition(&mut self, method: &MethodDefinition<'ast>) {
         if self.is_tagged(method.span.start) {
             self.insert_key(&method.key);
-            self.insert_current_class_name();
+            self.insert_current_container_name();
         }
         walk::walk_method_definition(self, method);
     }
@@ -732,7 +903,7 @@ impl<'ast> Visit<'ast> for AtKeepNameCollector<'ast> {
     fn visit_property_definition(&mut self, property: &PropertyDefinition<'ast>) {
         if self.is_tagged(property.span.start) {
             self.insert_key(&property.key);
-            self.insert_current_class_name();
+            self.insert_current_container_name();
         }
         walk::walk_property_definition(self, property);
     }
@@ -740,30 +911,31 @@ impl<'ast> Visit<'ast> for AtKeepNameCollector<'ast> {
     fn visit_accessor_property(&mut self, property: &AccessorProperty<'ast>) {
         if self.is_tagged(property.span.start) {
             self.insert_key(&property.key);
-            self.insert_current_class_name();
+            self.insert_current_container_name();
         }
         walk::walk_accessor_property(self, property);
     }
 
     fn visit_function(&mut self, function: &Function<'ast>, flags: oxc_syntax::scope::ScopeFlags) {
         if self.is_tagged(function.span.start) {
-            if let Some(identifier) = function.id.as_ref() {
-                self.names.insert(identifier.name.to_string());
-            }
+            self.insert_declaration_name(
+                function
+                    .id
+                    .as_ref()
+                    .map(|identifier| identifier.name.as_str()),
+            );
         }
+        self.declaration_depth += 1;
         walk::walk_function(self, function, flags);
+        self.declaration_depth -= 1;
     }
 
     fn visit_variable_declaration(&mut self, declaration: &VariableDeclaration<'ast>) {
         if self.is_tagged(declaration.span.start) {
             for declarator in &declaration.declarations {
-                self.names.extend(
-                    declarator
-                        .id
-                        .get_binding_identifiers()
-                        .into_iter()
-                        .map(|identifier| identifier.name.to_string()),
-                );
+                for identifier in declarator.id.get_binding_identifiers() {
+                    self.insert_declaration_name(Some(identifier.name.as_str()));
+                }
             }
         }
         walk::walk_variable_declaration(self, declaration);
@@ -773,135 +945,268 @@ impl<'ast> Visit<'ast> for AtKeepNameCollector<'ast> {
         let tagged = self.is_tagged(interface.span.start);
         for member in &interface.body.body {
             if tagged || self.is_tagged(member.span().start) {
-                self.names.insert(interface.id.name.to_string());
+                self.insert_declaration_name(Some(interface.id.name.as_str()));
                 self.insert_interface_member(member);
             }
         }
+        self.declaration_depth += 1;
         walk::walk_ts_interface_declaration(self, interface);
+        self.declaration_depth -= 1;
     }
 
     fn visit_ts_enum_declaration(&mut self, declaration: &TSEnumDeclaration<'ast>) {
         let tagged = self.is_tagged(declaration.span.start);
         for member in &declaration.body.members {
             if tagged || self.is_tagged(member.span.start) {
-                self.names.insert(declaration.id.name.to_string());
+                self.insert_declaration_name(Some(declaration.id.name.as_str()));
                 match &member.id {
                     oxc_ast::ast::TSEnumMemberName::Identifier(identifier) => {
-                        self.names.insert(identifier.name.to_string());
+                        self.names.properties.insert(identifier.name.to_string());
                     }
                     oxc_ast::ast::TSEnumMemberName::String(literal)
                     | oxc_ast::ast::TSEnumMemberName::ComputedString(literal) => {
-                        self.names.insert(literal.value.to_string());
+                        self.names.properties.insert(literal.value.to_string());
                     }
                     oxc_ast::ast::TSEnumMemberName::ComputedTemplateString(_) => {}
                 }
             }
         }
+        self.declaration_depth += 1;
         walk::walk_ts_enum_declaration(self, declaration);
+        self.declaration_depth -= 1;
+    }
+
+    fn visit_export_declaration(&mut self, declaration: &ExportDeclaration<'ast>) {
+        self.with_export_scope(|collector| walk::walk_export_declaration(collector, declaration));
+    }
+
+    fn visit_export_default_declaration(&mut self, declaration: &ExportDefaultDeclaration<'ast>) {
+        self.with_export_scope(|collector| {
+            walk::walk_export_default_declaration(collector, declaration)
+        });
+    }
+
+    fn visit_export_named_declaration(&mut self, declaration: &ExportNamedDeclaration<'ast>) {
+        self.with_export_scope(|collector| {
+            walk::walk_export_named_declaration(collector, declaration)
+        });
     }
 }
 
 struct ReservedNameAstCollector {
-    names: BTreeSet<String>,
+    scan: ReservedNameSourceScan,
+    source_kind: ObfuscationSourceKind,
     collect_all_names: bool,
     export_depth: usize,
     decorator_depth: usize,
-    arkui_component_depth: usize,
     keep_string_properties: bool,
+    keep_object_properties: bool,
     collect_exports: bool,
+    collect_enum_members: bool,
+    strip_sdk_argument_names: bool,
+    sdk_argument_depth: usize,
 }
 
 impl ReservedNameAstCollector {
-    fn new(collect_all_names: bool, keep_string_properties: bool, collect_exports: bool) -> Self {
+    fn new(
+        source_kind: ObfuscationSourceKind,
+        collect_all_names: bool,
+        keep_string_properties: bool,
+        keep_object_properties: bool,
+        collect_exports: bool,
+        collect_enum_members: bool,
+        strip_sdk_argument_names: bool,
+    ) -> Self {
         Self {
-            names: BTreeSet::new(),
+            scan: ReservedNameSourceScan::default(),
+            source_kind,
             collect_all_names,
             export_depth: 0,
             decorator_depth: 0,
-            arkui_component_depth: 0,
             keep_string_properties,
+            keep_object_properties,
             collect_exports,
+            collect_enum_members,
+            strip_sdk_argument_names,
+            sdk_argument_depth: 0,
+        }
+    }
+
+    fn insert_property_name(&mut self, name: &str) {
+        self.scan.names.insert(name.to_string());
+        if matches!(
+            self.source_kind,
+            ObfuscationSourceKind::SdkApi | ObfuscationSourceKind::SdkComponent
+        ) {
+            self.scan.sdk_properties.insert(name.to_string());
+            self.scan.sdk_locals.insert(name.to_string());
+        }
+        if self.source_kind == ObfuscationSourceKind::Project
+            && (self.collect_all_names || self.export_depth > 0)
+        {
+            self.scan.export_properties.insert(name.to_string());
+        }
+    }
+
+    fn strips_current_sdk_argument(&self) -> bool {
+        self.strip_sdk_argument_names && self.sdk_argument_depth > 0 && self.is_sdk_source()
+    }
+
+    fn is_sdk_source(&self) -> bool {
+        matches!(
+            self.source_kind,
+            ObfuscationSourceKind::SdkApi | ObfuscationSourceKind::SdkComponent
+        )
+    }
+
+    fn insert_export_name(&mut self, name: &str) {
+        self.insert_property_name(name);
+        if self.source_kind == ObfuscationSourceKind::SdkApi {
+            self.scan.sdk_globals.insert(name.to_string());
+        } else if self.source_kind == ObfuscationSourceKind::Project {
+            self.scan.export_globals.insert(name.to_string());
         }
     }
 
     fn insert_module_export_name(&mut self, name: &ModuleExportName<'_>) {
         match name {
             ModuleExportName::IdentifierName(identifier) => {
-                self.names.insert(identifier.name.to_string());
+                self.insert_export_name(identifier.name.as_str());
             }
             ModuleExportName::IdentifierReference(identifier) => {
-                self.names.insert(identifier.name.to_string());
+                self.insert_export_name(identifier.name.as_str());
             }
             ModuleExportName::StringLiteral(literal) => {
-                self.names.insert(literal.value.to_string());
+                self.insert_export_name(literal.value.as_str());
             }
+        }
+    }
+
+    fn property_key_name<'key>(key: &'key PropertyKey<'_>) -> Option<&'key str> {
+        match key {
+            PropertyKey::StaticIdentifier(identifier) => Some(identifier.name.as_str()),
+            PropertyKey::StringLiteral(literal) => Some(literal.value.as_str()),
+            PropertyKey::PrivateIdentifier(identifier) => Some(identifier.name.as_str()),
+            _ => None,
         }
     }
 
     fn insert_property_key(&mut self, key: &PropertyKey<'_>) {
-        match key {
-            PropertyKey::StaticIdentifier(identifier) => {
-                self.names.insert(identifier.name.to_string());
-            }
-            PropertyKey::StringLiteral(literal) => {
-                self.names.insert(literal.value.to_string());
-            }
-            PropertyKey::PrivateIdentifier(identifier) => {
-                self.names.insert(identifier.name.to_string());
-            }
-            _ => {}
+        if let Some(name) = Self::property_key_name(key) {
+            self.insert_property_name(name);
+        }
+    }
+
+    fn insert_struct_key(&mut self, key: &PropertyKey<'_>) {
+        if let Some(name) = Self::property_key_name(key) {
+            self.insert_property_name(name);
+            self.scan.structs.insert(name.to_string());
         }
     }
 
     fn with_export_scope(&mut self, visit: impl FnOnce(&mut Self)) {
-        self.export_depth += usize::from(self.collect_exports);
+        self.export_depth +=
+            usize::from(self.collect_exports || self.source_kind == ObfuscationSourceKind::SdkApi);
         visit(self);
-        self.export_depth -= usize::from(self.collect_exports);
+        self.export_depth -=
+            usize::from(self.collect_exports || self.source_kind == ObfuscationSourceKind::SdkApi);
     }
 }
 
 impl<'a> Visit<'a> for ReservedNameAstCollector {
     fn visit_identifier_name(&mut self, identifier: &IdentifierName<'a>) {
         if self.collect_all_names || self.decorator_depth > 0 {
-            self.names.insert(identifier.name.to_string());
+            self.insert_property_name(identifier.name.as_str());
         }
     }
 
     fn visit_identifier_reference(&mut self, identifier: &IdentifierReference<'a>) {
         if self.collect_all_names || self.decorator_depth > 0 {
-            self.names.insert(identifier.name.to_string());
+            self.insert_property_name(identifier.name.as_str());
         }
     }
 
     fn visit_binding_identifier(&mut self, identifier: &BindingIdentifier<'a>) {
-        if self.collect_all_names || self.export_depth > 0 || self.decorator_depth > 0 {
-            self.names.insert(identifier.name.to_string());
+        if self.sdk_argument_depth > 0 {
+            if !self.strips_current_sdk_argument()
+                && (self.collect_all_names || self.is_sdk_source())
+            {
+                self.insert_property_name(identifier.name.as_str());
+            }
+            return;
         }
+        if self.export_depth > 0 {
+            self.insert_export_name(identifier.name.as_str());
+        } else if self.collect_all_names || self.decorator_depth > 0 {
+            self.insert_property_name(identifier.name.as_str());
+        }
+    }
+
+    fn visit_function(&mut self, function: &Function<'a>, flags: oxc_syntax::scope::ScopeFlags) {
+        if self.export_depth > 0 {
+            if let Some(identifier) = &function.id {
+                self.insert_export_name(identifier.name.as_str());
+            }
+            let export_depth = std::mem::take(&mut self.export_depth);
+            walk::walk_function(self, function, flags);
+            self.export_depth = export_depth;
+        } else {
+            walk::walk_function(self, function, flags);
+        }
+    }
+
+    fn visit_arrow_function_expression(&mut self, function: &ArrowFunctionExpression<'a>) {
+        let export_depth = std::mem::take(&mut self.export_depth);
+        walk::walk_arrow_function_expression(self, function);
+        self.export_depth = export_depth;
     }
 
     fn visit_property_key(&mut self, key: &PropertyKey<'a>) {
         let is_quoted = matches!(key, PropertyKey::StringLiteral(_));
         if self.collect_all_names
+            || self.source_kind == ObfuscationSourceKind::SdkApi
             || self.export_depth > 0
-            || self.arkui_component_depth > 0
             || (self.keep_string_properties && is_quoted)
         {
             self.insert_property_key(key);
+            if let Some(name) = Self::property_key_name(key) {
+                if self.keep_string_properties && is_quoted {
+                    self.scan.strings.insert(name.to_string());
+                }
+            }
         }
         walk::walk_property_key(self, key);
     }
 
     fn visit_string_literal(&mut self, literal: &StringLiteral<'a>) {
         if self.collect_all_names || self.decorator_depth > 0 {
-            self.names.insert(literal.value.to_string());
+            self.insert_property_name(literal.value.as_str());
         }
     }
 
     fn visit_ts_index_signature_name(&mut self, parameter: &TSIndexSignatureName<'a>) {
         if self.collect_all_names {
-            self.names.insert(parameter.name.to_string());
+            self.insert_property_name(parameter.name.as_str());
         }
         walk::walk_ts_index_signature_name(self, parameter);
+    }
+
+    fn visit_formal_parameter(&mut self, parameter: &FormalParameter<'a>) {
+        self.sdk_argument_depth += 1;
+        walk::walk_formal_parameter(self, parameter);
+        self.sdk_argument_depth -= 1;
+    }
+
+    fn visit_formal_parameter_rest(&mut self, parameter: &FormalParameterRest<'a>) {
+        self.sdk_argument_depth += 1;
+        walk::walk_formal_parameter_rest(self, parameter);
+        self.sdk_argument_depth -= 1;
+    }
+
+    fn visit_ts_type_parameter(&mut self, parameter: &TSTypeParameter<'a>) {
+        self.sdk_argument_depth += 1;
+        walk::walk_ts_type_parameter(self, parameter);
+        self.sdk_argument_depth -= 1;
     }
 
     fn visit_export_declaration(&mut self, declaration: &ExportDeclaration<'a>) {
@@ -915,20 +1220,45 @@ impl<'a> Visit<'a> for ReservedNameAstCollector {
     }
 
     fn visit_export_named_declaration(&mut self, declaration: &ExportNamedDeclaration<'a>) {
-        if self.collect_exports {
+        let collect = self.collect_exports || self.source_kind == ObfuscationSourceKind::SdkApi;
+        if collect {
+            self.export_depth += 1;
             for specifier in &declaration.specifiers {
                 self.insert_module_export_name(&specifier.local);
                 self.insert_module_export_name(&specifier.exported);
             }
+            walk::walk_export_named_declaration(self, declaration);
+            self.export_depth -= 1;
+        } else {
+            walk::walk_export_named_declaration(self, declaration);
         }
-        walk::walk_export_named_declaration(self, declaration);
     }
 
     fn visit_export_specifier(&mut self, specifier: &ExportSpecifier<'a>) {
-        if self.collect_exports {
+        if self.collect_exports || self.source_kind == ObfuscationSourceKind::SdkApi {
             self.insert_module_export_name(&specifier.local);
             self.insert_module_export_name(&specifier.exported);
         }
+    }
+
+    fn visit_computed_member_expression(&mut self, expression: &ComputedMemberExpression<'a>) {
+        if self.keep_string_properties {
+            if let Expression::StringLiteral(literal) = &expression.expression {
+                self.insert_property_name(literal.value.as_str());
+                self.scan.strings.insert(literal.value.to_string());
+            }
+        }
+        walk::walk_computed_member_expression(self, expression);
+    }
+
+    fn visit_object_property(&mut self, property: &ObjectProperty<'a>) {
+        if self.keep_object_properties {
+            if let Some(name) = Self::property_key_name(&property.key) {
+                self.insert_property_name(name);
+                self.scan.objects.insert(name.to_string());
+            }
+        }
+        walk::walk_object_property(self, property);
     }
 
     fn visit_decorator(&mut self, decorator: &Decorator<'a>) {
@@ -940,7 +1270,7 @@ impl<'a> Visit<'a> for ReservedNameAstCollector {
     fn visit_class(&mut self, class: &Class<'a>) {
         if !class.decorators.is_empty() {
             if let Some(identifier) = class.id.as_ref() {
-                self.names.insert(identifier.name.to_string());
+                self.insert_property_name(identifier.name.as_str());
             }
         }
         let is_view = class.heritage.as_ref().is_some_and(|heritage| {
@@ -951,12 +1281,21 @@ impl<'a> Visit<'a> for ReservedNameAstCollector {
             )
         });
         if is_view {
-            self.arkui_component_depth += 1;
+            for member in &class.body.body {
+                match member {
+                    ClassElement::MethodDefinition(member) => self.insert_struct_key(&member.key),
+                    ClassElement::PropertyDefinition(member) => self.insert_struct_key(&member.key),
+                    ClassElement::AccessorProperty(member) => self.insert_struct_key(&member.key),
+                    ClassElement::ETSOverloadDeclaration(member) => {
+                        self.insert_struct_key(&member.key)
+                    }
+                    ClassElement::StaticBlock(_)
+                    | ClassElement::TSIndexSignature(_)
+                    | ClassElement::TSCallSignatureDeclaration(_) => {}
+                }
+            }
         }
         walk::walk_class(self, class);
-        if is_view {
-            self.arkui_component_depth -= 1;
-        }
     }
 
     fn visit_method_definition(&mut self, method: &MethodDefinition<'a>) {
@@ -981,9 +1320,60 @@ impl<'a> Visit<'a> for ReservedNameAstCollector {
     }
 
     fn visit_struct_statement(&mut self, statement: &StructStatement<'a>) {
-        self.arkui_component_depth += 1;
+        for member in &statement.body.body {
+            match member {
+                StructElement::MethodDefinition(member) => self.insert_struct_key(&member.key),
+                StructElement::PropertyDefinition(member) => self.insert_struct_key(&member.key),
+                StructElement::AccessorProperty(member) => self.insert_struct_key(&member.key),
+                StructElement::ETSOverloadDeclaration(member) => {
+                    self.insert_struct_key(&member.key)
+                }
+                StructElement::StaticBlock(_) | StructElement::TSIndexSignature(_) => {}
+            }
+        }
         walk::walk_struct_statement(self, statement);
-        self.arkui_component_depth -= 1;
+    }
+
+    fn visit_ts_enum_declaration(&mut self, declaration: &TSEnumDeclaration<'a>) {
+        let contains_initializer_identifier = declaration.body.members.iter().any(|member| {
+            member
+                .initializer
+                .as_ref()
+                .is_some_and(|initializer| EnumInitializerIdentifierDetector::contains(initializer))
+        });
+        if self.collect_enum_members || contains_initializer_identifier {
+            for member in &declaration.body.members {
+                let name = match &member.id {
+                    TSEnumMemberName::Identifier(identifier) => Some(identifier.name.as_str()),
+                    TSEnumMemberName::String(literal)
+                    | TSEnumMemberName::ComputedString(literal) => Some(literal.value.as_str()),
+                    TSEnumMemberName::ComputedTemplateString(_) => None,
+                };
+                if let Some(name) = name {
+                    self.insert_property_name(name);
+                    self.scan.enums.insert(name.to_string());
+                }
+            }
+        }
+        walk::walk_ts_enum_declaration(self, declaration);
+    }
+}
+
+struct EnumInitializerIdentifierDetector {
+    found: bool,
+}
+
+impl EnumInitializerIdentifierDetector {
+    fn contains(expression: &Expression<'_>) -> bool {
+        let mut detector = Self { found: false };
+        detector.visit_expression(expression);
+        detector.found
+    }
+}
+
+impl<'a> Visit<'a> for EnumInitializerIdentifierDetector {
+    fn visit_identifier_reference(&mut self, _identifier: &IdentifierReference<'a>) {
+        self.found = true;
     }
 }
 

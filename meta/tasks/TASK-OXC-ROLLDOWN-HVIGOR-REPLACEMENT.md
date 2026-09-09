@@ -170,6 +170,15 @@ ObservedV2 和 Function。
 通配符和排除项决定单文件 printer。显式 `-print-namecache` 与上游一样不创建父
 目录。JS CLI 双轮 release 实跑已验证默认/显式 cache 一致，新增声明后已有
 identifier/property/file 映射零变化，未配置调用保留，选中文件保持多行。
+`strip-language-default` 按 `ArkObfuscator.init` 选择 optimized preset；HAR 枚举
+保留全部成员，普通工程在任一 enum initializer 含 identifier 时保留该枚举全部成员，
+对应 `ApiExtractor.addPropWhiteList/shouldCollectEnum/visitEnumMembers`。SDK、语言、规则、
+`-keep-dts`、AtKeep 与 InsightIntent 的 property/global/local 白名单保持独立，不允许
+再合并成内部通用兼容集合。IdentifierCache
+使用 `ScopeAnalyzer.Scope.loc` 路径并为函数项写入经前序 source map 回溯的起止行，
+禁止 OXC `ScopeId` 和模糊后缀 cache 匹配。`-print-kept-names` 直接生成上游
+`keptReasons`/`keptNames` schema 与七类 `whitelist.json`，按文件覆盖本轮结果并保留
+未重编译文件的历史项；该产物不是规则数组回显。
 
 ### Cache 和 watch
 
@@ -248,9 +257,10 @@ native checker、build semantic、SDK CommonJS callback 与 OXC 类型消费者�
   loader `patchConfig` 三个路径字段及 SDK `cachePath` 默认 changed-list，不再保留
   固定内部路径这一错误兼容分支。AOT 的空 `.an/.ai` 与当前 `gen_aot.ts` 源码一致；
   该源码没有执行其构造的 `ark_aot_compiler` 命令，Arkdown 也不得额外执行。
-- 剩余真实矩阵限定为多 HAP/HSP 复杂 APP、全部签名材料组合，以及 ArkGuard
-  `-print-kept-names` 的 reasons/whitelist 完整产物与真实 PandaGuard SDK 组合；
-  ArkGuard 规则集和 name-cache 跨轮复用已经由 JS CLI 实跑，不得继续列为缺口。
+- 真实 SDK PandaGuard 已从 JS CLI 验证 origin/obf/final HAP ABC、source map 与
+  nameCache 的完整交接，并修复生成期 `ResourceTable.ts` 不属于启动快照的生命周期
+  差异。剩余真实矩阵限定为多 HAP/HSP 复杂 APP 与全部签名材料组合；ArkGuard 规则集、
+  name-cache 跨轮复用和 keptNames/whitelist 已有源码对齐回归，不得继续列为实现缺口。
 - 在 Rolldown 提供结构化磁盘图接口后再实现跨进程 graph cache；在此之前不
   自创序列化格式。
 - 按源码补充更细粒度的 ABC invalidation 和依赖 wave；所有并发结果按 typed
