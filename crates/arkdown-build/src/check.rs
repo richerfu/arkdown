@@ -4,13 +4,18 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
-use walkdir::WalkDir;
 
 use arkdown::plugins::ets_transform::{ArktsSourceChecker, ComponentMetadata};
 use arkdown_core::{ArkdownConfig, BuildMode, ModuleConfig, OutputTarget};
+use arkdown_ets_checker::NativeOhSdkPluginHost;
 use arkdown_path::ArtifactPathSerializer;
-use arkdown_session::{BuildSession, BuildSessionBuilder, ModuleCompileContext};
+use arkdown_profile::{ProfileDependencyContext, ProfileProcessor};
+use arkdown_session::{
+    dependency_graph::snapshot::DependencyNodeType, BuildSession, BuildSessionBuilder,
+    ModuleCompileContext,
+};
 
+use crate::compile_project_config::CompileProjectEntryCollector;
 use crate::package_resolution::{LocalPackageSourceRootInventory, ModulePackageResolutionPlanner};
 use crate::project_checker::ProjectSemanticChecker;
 use crate::source_snapshot::TransformSourceSnapshotBuilder;
@@ -29,6 +34,8 @@ pub struct CheckRequest {
     pub ignore_crossplatform_check: bool,
     /// Native ArkTS TypeScript service resolved from the loaded N-API package.
     pub typescript_executable: Option<PathBuf>,
+    /// Same-process JavaScript host for SDK CommonJS checker plugins.
+    pub sdk_plugin_host: Option<Arc<dyn NativeOhSdkPluginHost>>,
 }
 
 pub struct CheckApplication {
@@ -90,6 +97,7 @@ impl CheckApplication {
                 is_crossplatform: self.args.is_crossplatform,
                 ignore_crossplatform_check: self.args.ignore_crossplatform_check,
                 typescript_executable: self.args.typescript_executable.as_deref(),
+                sdk_plugin_host: self.args.sdk_plugin_host.as_ref(),
             }
             .run()?;
             summary.merge(module_summary);
@@ -128,19 +136,11 @@ struct CheckModuleRunner<'a> {
     is_crossplatform: bool,
     ignore_crossplatform_check: bool,
     typescript_executable: Option<&'a Path>,
+    sdk_plugin_host: Option<&'a Arc<dyn NativeOhSdkPluginHost>>,
 }
 
 impl<'a> CheckModuleRunner<'a> {
     fn run(&self) -> Result<CheckSummary> {
-        let sources = CheckSourceInventory::new(
-            &self.module_context.module.source_roots,
-            &self.session.source_store,
-        )
-        .collect()?;
-        let mut summary = CheckSummary {
-            files: sources.len(),
-            ..CheckSummary::default()
-        };
         let local_sources = LocalPackageSourceRootInventory::default();
         let package_resolution =
             ModulePackageResolutionPlanner::new(self.module_context, &local_sources).build()?;
@@ -150,7 +150,43 @@ impl<'a> CheckModuleRunner<'a> {
             &self.config.product.name,
             "default",
         );
-        let project_path = self.module_context.module.src_main.join("ets");
+        let module_json = self
+            .module_context
+            .module
+            .module_json
+            .as_ref()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "check session is missing module.json5 for '{}'",
+                    self.module.name
+                )
+            })?;
+        let dependency_context = ProfileDependencyContext::from_session_graph(
+            self.config,
+            self.module,
+            Arc::clone(&self.module_context.deps),
+            self.config
+                .product
+                .version_code
+                .unwrap_or(self.session.project.version_code),
+        );
+        let (_, loader_json) = ProfileProcessor::new(Arc::new(self.config.clone()))
+            .process_module_with_dependency_context_and_target(
+                self.module,
+                module_json,
+                &dependency_context,
+                "default",
+            )
+            .map_err(|error| anyhow::anyhow!("check profile processing failed: {error}"))?;
+        let project_path = PathBuf::from(&loader_json.module_root_path).join("ets");
+        let roots = CompileProjectEntryCollector::new(&loader_json, &project_path).collect();
+        let mut summary = CheckSummary::default();
+        let component_metadata = Arc::new(
+            ComponentMetadata::from_ets_loader_path_with_external_declaration_roots(
+                &self.config.sdk_config.ets_loader_path,
+                self.session.sdk.global_module_paths.as_ref(),
+            )?,
+        );
         let compile_mode = self
             .module_context
             .module
@@ -158,39 +194,44 @@ impl<'a> CheckModuleRunner<'a> {
             .as_ref()
             .and_then(|manifest| manifest.module.compile_mode.as_deref())
             .unwrap_or("esmodule");
-        let semantic =
-            ProjectSemanticChecker::new(&self.config.project_root, &sources, &package_resolution)
-                .with_typescript_executable(self.typescript_executable)
-                .with_compile_mode(compile_mode)
-                .with_sdk_options(&self.session.sdk)?
-                .with_sdk_declaration_roots(
-                    &self.session.source_store,
-                    self.session.sdk.global_module_paths.as_ref(),
-                )
-                .with_builtin_declarations(&self.config.sdk_config.ets_loader_path)
-                .with_module_config(
-                    self.config,
-                    self.module,
-                    self.module_context,
-                    &self.session.project.bundle_type,
-                )
-                .with_compile_inputs(
-                    &project_path,
-                    None,
-                    "ohpm",
-                    None,
-                    [
-                        self.module_context.module.src_main.clone(),
-                        module_layout
-                            .build_profile_for_module(&self.module.module_type, "default")
-                            .parent()
-                            .map(Path::to_path_buf)
-                            .unwrap_or_default(),
-                        self.module_context.module.root.join("oh_modules"),
-                        self.config.project_root.join("oh_modules"),
-                    ],
-                    std::iter::empty(),
-                );
+        let semantic = ProjectSemanticChecker::new(
+            &self.config.project_root,
+            &roots,
+            &package_resolution,
+            component_metadata.as_ref(),
+        )
+        .with_typescript_executable(self.typescript_executable)
+        .with_sdk_plugin_host(self.sdk_plugin_host.cloned())
+        .with_compile_mode(compile_mode)
+        .with_sdk_options(&self.session.sdk)?
+        .with_sdk_declaration_roots(
+            &self.session.source_store,
+            self.session.sdk.global_module_paths.as_ref(),
+        )
+        .with_builtin_declarations(&self.config.sdk_config.ets_loader_path)
+        .with_module_config(
+            self.config,
+            self.module,
+            self.module_context,
+            &self.session.project.bundle_type,
+        )
+        .with_compile_inputs(
+            &project_path,
+            Some(Path::new(&loader_json.cache_path)),
+            &loader_json.package_manager_type,
+            Some(&loader_json.compiler_types),
+            [
+                self.module_context.module.src_main.clone(),
+                module_layout
+                    .build_profile_for_module(&self.module.module_type, "default")
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_default(),
+                self.module_context.module.root.join("oh_modules"),
+                self.config.project_root.join("oh_modules"),
+            ],
+            std::iter::empty(),
+        );
         let semantic = if let Some(capabilities) = self
             .module_context
             .module
@@ -217,6 +258,7 @@ impl<'a> CheckModuleRunner<'a> {
             )
         }
         .run()?;
+        summary.files = semantic.checked_sources.len();
         for diagnostic in semantic.diagnostics {
             tracing::error!(module = %self.module.name, diagnostic, "ArkTS native semantic diagnostic");
             summary
@@ -227,21 +269,24 @@ impl<'a> CheckModuleRunner<'a> {
         for warning in semantic.warnings {
             tracing::warn!(module = %self.module.name, diagnostic = warning, "ArkTS native checker warning");
         }
-        self.run_oxc_structural_checker(&sources, &mut summary)?;
+        self.run_oxc_structural_checker(
+            &semantic.checked_sources,
+            &semantic.type_facts,
+            &package_resolution,
+            &mut summary,
+            component_metadata,
+        )?;
         Ok(summary)
     }
 
     fn run_oxc_structural_checker(
         &self,
         sources: &[PathBuf],
+        type_facts: &arkdown_ets_transform::ArktsTypeFactsSnapshot,
+        package_resolution: &arkdown_resolver::PackageResolutionPlan,
         summary: &mut CheckSummary,
+        component_metadata: Arc<ComponentMetadata>,
     ) -> Result<()> {
-        let component_metadata = Arc::new(
-            ComponentMetadata::from_ets_loader_path_with_external_declaration_roots(
-                &self.config.sdk_config.ets_loader_path,
-                self.session.sdk.global_module_paths.as_ref(),
-            )?,
-        );
         let module_roots: Vec<(String, PathBuf)> = self
             .config
             .modules
@@ -269,16 +314,40 @@ impl<'a> CheckModuleRunner<'a> {
                 sdk_declaration_roots.push(root.clone());
             }
         }
-        let project_sources = TransformSourceSnapshotBuilder::new(&module_roots, &[], &[], &[])
-            .with_source_store(&self.session.source_store)
-            .with_sdk_declaration_roots(&sdk_declaration_roots)
-            .build()?;
+        let dependency_source_roots = self
+            .module_context
+            .deps
+            .nodes
+            .values()
+            .filter(|node| {
+                matches!(
+                    node.node_type,
+                    DependencyNodeType::SourceHar
+                        | DependencyNodeType::OhpmSource
+                        | DependencyNodeType::IntegratedHsp
+                )
+            })
+            .filter_map(|node| node.package_root.clone())
+            .collect::<Vec<_>>();
+        let dependency_package_roots = package_resolution
+            .sorted_entries()
+            .into_iter()
+            .filter(|(_, info)| !info.local_source)
+            .map(|(name, info)| (name.to_string(), info.pkg_root.clone()))
+            .collect::<Vec<_>>();
+        let project_sources =
+            TransformSourceSnapshotBuilder::new(&module_roots, &dependency_source_roots, &[], &[])
+                .with_source_store(&self.session.source_store)
+                .with_package_roots(&dependency_package_roots)
+                .with_sdk_declaration_roots(&sdk_declaration_roots)
+                .build()?;
         let checker = ArktsSourceChecker::new(component_metadata)
             .with_arkts_language_version(self.session.arkts_language_version)
-            .with_project_sources(project_sources.clone(), module_roots);
+            .with_project_sources(project_sources.clone(), module_roots)
+            .with_type_facts(type_facts.clone());
         for path in sources
             .iter()
-            .filter(|path| CheckSourceInventory::is_arkts_source(path))
+            .filter(|path| CheckSourceKind::is_arkts_source(path))
         {
             let Some(source) = project_sources.source_text(path) else {
                 continue;
@@ -301,73 +370,19 @@ impl<'a> CheckModuleRunner<'a> {
                     summary
                         .diagnostics
                         .push(format!("[{}] {diagnostic}", path.display()));
+                    summary.errors += 1;
                 } else {
                     tracing::warn!(path = %path.display(), diagnostic = %diagnostic, "ArkTS OXC check warning");
                 }
             }
-            summary.errors += report.error_count();
         }
         Ok(())
     }
 }
 
-struct CheckSourceInventory<'a> {
-    roots: &'a [PathBuf],
-    source_store: &'a arkdown_session::SourceStore,
-}
+struct CheckSourceKind;
 
-impl<'a> CheckSourceInventory<'a> {
-    fn new(roots: &'a [PathBuf], source_store: &'a arkdown_session::SourceStore) -> Self {
-        Self {
-            roots,
-            source_store,
-        }
-    }
-
-    fn collect(&self) -> Result<Vec<PathBuf>> {
-        let mut sources = Vec::new();
-        for root in self.roots {
-            if self.source_store.covers(root) {
-                sources.extend(
-                    self.source_store
-                        .text_sources_under(root)
-                        .into_iter()
-                        .map(|(path, _)| path)
-                        .filter(|path| Self::is_checkable_source(path))
-                        .map(Path::to_path_buf),
-                );
-                continue;
-            }
-            if !root.is_dir() {
-                continue;
-            }
-            for entry in WalkDir::new(root).follow_links(false) {
-                let entry = entry
-                    .map_err(|error| anyhow::anyhow!("ARKDOWN_ETS_CHECK_SOURCE_WALK: {}", error))?;
-                if entry.file_type().is_file() && Self::is_checkable_source(entry.path()) {
-                    sources.push(entry.path().to_path_buf());
-                }
-            }
-        }
-        sources.sort();
-        sources.dedup();
-        Ok(sources)
-    }
-
-    fn is_checkable_source(path: &Path) -> bool {
-        if path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.ends_with(".d.ts") || name.ends_with(".d.ets"))
-        {
-            return false;
-        }
-        matches!(
-            path.extension().and_then(|extension| extension.to_str()),
-            Some("ets" | "ts" | "js")
-        )
-    }
-
+impl CheckSourceKind {
     fn is_arkts_source(path: &Path) -> bool {
         matches!(
             path.extension().and_then(|extension| extension.to_str()),

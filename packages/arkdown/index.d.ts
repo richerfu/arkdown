@@ -75,40 +75,6 @@ closeBundle?: ((this: HvigorPluginContext) => void | Promise<void>) | { order?: 
 closeWatcher?: ((this: HvigorPluginContext) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext) => void | Promise<void> }
 }
 
-/**
- * Build an OHOS project from Node.js.
- *
- * Accepts a `BuildConfig` and an optional array of Rolldown-compatible
- * plugin objects. Plugins are called in the same Node.js process via
- * NAPI ThreadsafeFunction — no subprocess, no IPC overhead.
- *
- * @example
- * ```typescript
- * import { build } from '@ohos-rs/arkdown'
- *
- * const result = await build({
- *   project: './my-app',
- *   target: 'hap',
- *   mode: 'debug',
- *   plugins: [{
- *     name: 'env-replace',
- *     transform(code, id) {
- *       return code.replace(/process\.env\.NODE_ENV/g, '"production"')
- *     },
- *   }],
- * })
- * process.stdout.write(`${result.artifacts.join('
-')}
-`)
- * ```
- * Build an OHOS project from Node.js.
- *
- * Returns a Promise that resolves with the build result.
- * Plugins are wrapped synchronously before spawning the async build task,
- * so non-Send JS values (Env, Array) don't cross the tokio task boundary.
- */
-export declare function build(config: BuildConfig, plugins?: Array<ArkdownPlugin> | undefined | null): Promise<BuildResult>
-
 export interface BuildConfig {
   project?: string
   target?: string
@@ -166,9 +132,6 @@ export interface BuildResult {
   artifacts: Array<string>
   elapsedMs: number
 }
-
-/** Run the native ArkTS source checker without entering the build pipeline. */
-export declare function check(config: CheckConfig): Promise<void>
 
 export interface CheckConfig {
   project?: string

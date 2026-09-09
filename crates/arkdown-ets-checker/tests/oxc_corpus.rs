@@ -58,6 +58,7 @@ fn check_corpus(kind: &str) {
             &executable,
             project.path(),
             BTreeMap::from([(file.clone(), source)]),
+            None,
         )
         .unwrap();
         let program = session.create_program(&[file], &options).unwrap();

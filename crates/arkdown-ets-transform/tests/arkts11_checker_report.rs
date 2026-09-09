@@ -2,12 +2,13 @@ use std::{path::PathBuf, sync::Arc};
 
 use arkdown_core::ArktsLanguageVersion;
 use arkdown_ets_transform::{
-    error::EtsTransformError, transform::component_meta::ComponentMetadata, ArktsSourceChecker,
-    EtsChecker, TransformSourceSnapshot,
+    error::EtsTransformError, transform::component_meta::ComponentMetadata, ArktsFileTypeFacts,
+    ArktsSourceChecker, ArktsTypeFactsSnapshot, EtsChecker, PropertyTypeFacts,
+    ResolvedTypeIdentity, SpannedPropertyTypeFacts, TransformSourceSnapshot,
 };
 use oxc_allocator::Allocator;
 use oxc_parser::Parser;
-use oxc_span::SourceType;
+use oxc_span::{SourceType, Span};
 
 #[test]
 fn arkts12_checker_accepts_source_owned_use_static_before_imports() {
@@ -237,6 +238,24 @@ fn arkts11_source_checker_uses_sdk_component_inventory_for_name_collisions() {
 }
 
 #[test]
+fn arkts11_esmodule_imports_do_not_run_legacy_builtin_name_validation() {
+    let loader = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("ets-loader");
+    let metadata = ComponentMetadata::from_ets_loader_path(&loader).expect("component metadata");
+    let report = ArktsSourceChecker::new(Arc::new(metadata)).check(
+        "EsmoduleImport.ets",
+        "import { List } from './models';\n@Component struct Page { build() {} }",
+    );
+
+    assert!(!report.diagnostics().iter().any(|diagnostic| matches!(
+        diagnostic,
+        EtsTransformError::CodedDiagnostic { code, .. } if code == "10905235"
+    )));
+}
+
+#[test]
 fn arkts11_entry_root_uses_sdk_container_metadata() {
     let loader = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -314,4 +333,110 @@ fn arkts11_source_checker_reuses_project_export_closure_for_imported_inheritance
             EtsTransformError::CodedDiagnostic { code, .. } if code == "10905225"
         )
     }));
+}
+
+#[test]
+fn arkts11_object_link_uses_resolved_typescript_facts_after_nullable_filtering() {
+    let source_id = "ObjectLink.ets";
+    let source = r#"
+class Item {}
+@Component
+struct Child {
+  @ObjectLink item: Item | null;
+  build() {}
+}
+@Component
+struct Parent {
+  local: Item = new Item();
+  build() { Child({ item: local }) }
+}
+"#;
+    let plain = ResolvedTypeIdentity {
+        is_nullable: false,
+        is_union: false,
+        is_enum: false,
+        is_basic: false,
+        is_observed_v2: false,
+        is_function: false,
+        symbol_name: "Item".to_string(),
+        types: Vec::new(),
+    };
+    let nullable = ResolvedTypeIdentity {
+        is_nullable: true,
+        is_union: false,
+        is_enum: false,
+        is_basic: false,
+        is_observed_v2: false,
+        is_function: false,
+        symbol_name: String::new(),
+        types: Vec::new(),
+    };
+    let facts = ArktsFileTypeFacts {
+        properties: vec![SpannedPropertyTypeFacts {
+            span: Span::new(0, source.len() as u32),
+            facts: PropertyTypeFacts {
+                declared_type: Some(ResolvedTypeIdentity {
+                    is_nullable: false,
+                    is_union: true,
+                    is_enum: false,
+                    is_basic: false,
+                    is_observed_v2: false,
+                    is_function: false,
+                    symbol_name: String::new(),
+                    types: vec![plain, nullable],
+                }),
+            },
+        }],
+        ..ArktsFileTypeFacts::default()
+    };
+    let checker = ArktsSourceChecker::new(Arc::new(ComponentMetadata::default())).with_type_facts(
+        ArktsTypeFactsSnapshot::new(rustc_hash::FxHashMap::from_iter([(
+            PathBuf::from(source_id),
+            facts,
+        )])),
+    );
+    let report = checker.check(source_id, source);
+
+    assert!(
+        !report.diagnostics().iter().any(|diagnostic| matches!(
+            diagnostic,
+            EtsTransformError::CodedDiagnostic { code, .. } if code == "10905307" || code == "10905315"
+        )),
+        "{:#?}",
+        report.diagnostics()
+    );
+}
+
+#[test]
+fn arkts11_object_link_rejects_observed_v2_from_typescript_identity() {
+    let source_id = "ObservedObjectLink.ets";
+    let source = "@ObservedV2 class Model {}\n@Component struct Child { @ObjectLink model: Model; build() {} }";
+    let facts = ArktsFileTypeFacts {
+        properties: vec![SpannedPropertyTypeFacts {
+            span: Span::new(0, source.len() as u32),
+            facts: PropertyTypeFacts {
+                declared_type: Some(ResolvedTypeIdentity {
+                    is_nullable: false,
+                    is_union: false,
+                    is_enum: false,
+                    is_basic: false,
+                    is_observed_v2: true,
+                    is_function: false,
+                    symbol_name: "Model".to_string(),
+                    types: Vec::new(),
+                }),
+            },
+        }],
+        ..ArktsFileTypeFacts::default()
+    };
+    let report = ArktsSourceChecker::new(Arc::new(ComponentMetadata::default()))
+        .with_type_facts(ArktsTypeFactsSnapshot::new(
+            rustc_hash::FxHashMap::from_iter([(PathBuf::from(source_id), facts)]),
+        ))
+        .check(source_id, source);
+
+    assert!(report.diagnostics().iter().any(|diagnostic| matches!(
+        diagnostic,
+        EtsTransformError::CodedDiagnostic { code, .. } if code == "10905307"
+    )));
 }

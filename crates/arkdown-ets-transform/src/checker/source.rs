@@ -9,7 +9,9 @@ use crate::source::{ArktsSourceLanguageDetector, CompileArktsSourceType};
 use crate::transform::component_meta::ComponentMetadata;
 use crate::transform::legacy_extend::ArktsExtendSource;
 use crate::transform::static_directive::StaticDirectiveSource;
-use crate::transform::{CustomComponentSemanticInventory, ModuleExportIndex, TransformOptions};
+use crate::transform::{
+    ArktsTypeFactsSnapshot, CustomComponentSemanticInventory, ModuleExportIndex, TransformOptions,
+};
 use crate::TransformSourceSnapshot;
 
 use super::{EtsCheckReport, EtsChecker};
@@ -24,6 +26,7 @@ pub struct ArktsSourceChecker {
     arkts_language_version: ArktsLanguageVersion,
     page_context: Option<ArktsSourcePageContext>,
     project_semantics: Option<ArktsProjectSemantics>,
+    type_facts: ArktsTypeFactsSnapshot,
 }
 
 impl ArktsSourceChecker {
@@ -33,6 +36,7 @@ impl ArktsSourceChecker {
             arkts_language_version: ArktsLanguageVersion::default(),
             page_context: None,
             project_semantics: None,
+            type_facts: ArktsTypeFactsSnapshot::default(),
         }
     }
 
@@ -87,6 +91,11 @@ impl ArktsSourceChecker {
         self
     }
 
+    pub fn with_type_facts(mut self, type_facts: ArktsTypeFactsSnapshot) -> Self {
+        self.type_facts = type_facts;
+        self
+    }
+
     pub fn check(&self, source_id: &str, content: &str) -> EtsCheckReport {
         let allocator = Allocator::default();
         let parser_source = ArktsExtendSource::new(content, self.arkts_language_version);
@@ -131,7 +140,8 @@ impl ArktsSourceChecker {
         );
         let mut checker = EtsChecker::new(&parsed.program, source_id)
             .with_component_metadata(&self.component_metadata)
-            .with_custom_component_info(&custom_component_inventory.info);
+            .with_custom_component_info(&custom_component_inventory.info)
+            .with_type_facts(self.type_facts.file_facts(source_id));
         if let Some(project) = &self.project_semantics {
             checker = checker.with_imported_class_observations(
                 project.module_exports.imported_class_observations(

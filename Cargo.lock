@@ -278,6 +278,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
+ "tracing",
 ]
 
 [[package]]
@@ -324,6 +325,7 @@ dependencies = [
  "arkdown-cache",
  "arkdown-config",
  "arkdown-core",
+ "arkdown-ets-checker",
  "arkdown-path",
  "arkdown-profile",
  "arkdown-sign",

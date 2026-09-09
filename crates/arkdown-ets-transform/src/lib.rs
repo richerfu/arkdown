@@ -60,7 +60,8 @@ pub use sys_resource::SystemResourceReferenceLoader;
 pub use transform::source_emit::{HvigorTypescriptPrintOutput, HvigorTypescriptPrinter};
 pub use transform::{
     AnnotationConstant, AnnotationImportDisposition, AnnotationInfo, AnnotationProperty,
-    AnnotationUse, ArktsExtendSource, ArktsFileTypeFacts, ArktsTransformer, ArktsTypeFactsSnapshot,
+    AnnotationUse, ArktsExtendSource, ArktsFileTypeFacts, ArktsSourceSemanticCollector,
+    ArktsSourceSemanticInventory, ArktsTransformer, ArktsTypeFactsSnapshot,
     ArkuiComponentNameCollector, CheckerMode, CrossplatformSourceCollection,
     InsightIntentDeclaration, InsightIntentEntityDeclaration, InsightIntentSchemaCatalog,
     InsightIntentSourceMetadata, NavigationRoute, NavigationRouteMap, PropertyTypeFacts,

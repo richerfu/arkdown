@@ -110,6 +110,27 @@ impl ArkuiDecoratorName {
         )
     }
 
+    pub(crate) fn contributes_checker_dollar_property(name: &str) -> bool {
+        matches!(
+            name,
+            Self::STATE
+                | Self::PROP
+                | Self::LINK
+                | Self::STORAGE_PROP
+                | Self::STORAGE_LINK
+                | Self::PROVIDE
+                | Self::CONSUME
+                | Self::OBJECT_LINK
+                | Self::WATCH
+                | Self::BUILDER_PARAM
+                | Self::LOCAL_STORAGE_LINK
+                | Self::LOCAL_STORAGE_PROP
+                | Self::REQUIRE
+                | Self::ENV
+                | Self::CUSTOM_ENV
+        )
+    }
+
     pub(crate) fn has_initially_provided_value_slot(name: &str) -> bool {
         matches!(
             name,

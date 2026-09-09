@@ -20,6 +20,7 @@ pub use legacy_extend::ArktsExtendSource;
 mod local_builder;
 mod navigation;
 pub mod source_emit;
+mod source_semantic_inventory;
 mod source_text;
 pub(crate) mod static_directive;
 mod static_graph;
@@ -39,7 +40,7 @@ use rustc_hash::FxHashSet;
 use arkdown_core::{
     ArktsLanguageVersion, AutoLazyFilter, ExpandImportPath, InsightIntentFormBinding, ModuleSource,
 };
-use arkdown_path::{classify::is_inside_oh_modules, ArtifactPathSerializer, HvigorModulePath};
+use arkdown_path::{ArtifactPathSerializer, HvigorModulePath};
 use oxc_allocator::{Allocator, ArenaBox, ArenaVec, CloneIn, Vec as OxcVec};
 use oxc_ast::ast::{
     Argument, BindingPattern, BindingRestElement, Class, ClassElement, Declaration, Decorator,
@@ -110,6 +111,7 @@ pub(crate) use component_analysis::{
 };
 pub use crossplatform_collection::CrossplatformSourceCollection;
 pub use navigation::{NavigationRoute, NavigationRouteMap};
+pub use source_semantic_inventory::{ArktsSourceSemanticCollector, ArktsSourceSemanticInventory};
 use type_facts::BuilderAccessKind;
 pub use type_facts::{
     AnnotationConstant, AnnotationImportDisposition, AnnotationInfo, AnnotationProperty,
@@ -343,6 +345,8 @@ pub struct ArktsTransformer<'a> {
 
 pub struct ArktsTransformOutput {
     pub code: String,
+    /// Source compiler diagnostics demoted for dependency modules.
+    pub warnings: Vec<EtsTransformError>,
     pub source_map: Option<String>,
     pub(crate) rolldown_projection: Option<String>,
     /// Per-source InsightIntent facts consumed by the build-end profile
@@ -460,6 +464,7 @@ impl<'a> ArktsTransformer<'a> {
         {
             return Ok(ArktsTransformOutput {
                 code: source.content.clone(),
+                warnings: Vec::new(),
                 source_map: None,
                 rolldown_projection: None,
                 insight_intent: InsightIntentSourceMetadata::default(),
@@ -478,10 +483,12 @@ impl<'a> ArktsTransformer<'a> {
             }
         }
 
+        let mut checker_warnings = Vec::new();
         if matches!(options.checker_mode, CheckerMode::Oxc) {
             let report = crate::checker::EtsChecker::new(&parsed.program, &source.id.id)
                 .with_component_metadata(&options.component_metadata)
                 .with_custom_component_info(&custom_component_update_props)
+                .with_type_facts(options.type_facts.file_facts(&source.id.id))
                 .with_imported_class_observations(
                     options.module_exports.imported_class_observations(
                         &parsed.program,
@@ -499,11 +506,11 @@ impl<'a> ArktsTransformer<'a> {
             for diag in report.diagnostics() {
                 tracing::debug!(file = %source.id.id, diagnostic = ?diag, "ets checker diagnostic");
             }
-            let demote_linter_errors = is_inside_oh_modules(Path::new(&source.id.id));
-            if !demote_linter_errors {
-                if let Some(error) = report.first_error() {
-                    return Err(error.clone());
+            for diagnostic in report.diagnostics() {
+                if diagnostic.is_error() {
+                    return Err(diagnostic.clone());
                 }
+                checker_warnings.push(diagnostic.clone());
             }
         }
 
@@ -753,6 +760,7 @@ impl<'a> ArktsTransformer<'a> {
             let out = ViewpuOutputText::new(generated.code).without_extra_trailing_blank_lines();
             Ok(ArktsTransformOutput {
                 code: out,
+                warnings: checker_warnings,
                 source_map: generated.source_map,
                 rolldown_projection: None,
                 insight_intent: insight_intent.metadata,
@@ -761,6 +769,7 @@ impl<'a> ArktsTransformer<'a> {
         } else {
             Ok(ArktsTransformOutput {
                 code: content.to_string(),
+                warnings: checker_warnings,
                 source_map: None,
                 rolldown_projection: None,
                 insight_intent: insight_intent.metadata,
@@ -794,6 +803,7 @@ impl<'a> ArktsTransformer<'a> {
         let projection = StaticArktsGraphProjection::new(program).project(allocator);
         Ok(ArktsTransformOutput {
             code: self.source.content.clone(),
+            warnings: Vec::new(),
             source_map: None,
             rolldown_projection: Some(projection),
             insight_intent: InsightIntentSourceMetadata::default(),

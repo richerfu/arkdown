@@ -8,19 +8,22 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Component, Path, PathBuf},
     sync::Arc,
+    time::Instant,
 };
 
 use anyhow::Result;
 use arkdown_core::{ArkTscTarget, ArkdownConfig, HarArtifactType, ModuleConfig, OhosModuleType};
 use arkdown_ets_checker::{
     NativeAnnotationConstant, NativeAnnotationInfo, NativeAnnotationTransformInfo,
-    NativeArktsTransformTypeFacts, NativeCompilerOptions, NativeDiagnostic, NativeOhSdkCheckPlugin,
-    NativeOhSdkClassCheckPlugin, NativeOhSdkConfig, NativeProgramSourceGraph,
-    NativeResolvedTypeIdentity, NativeTypeSession,
+    NativeArktsTransformTypeFacts, NativeArktsTransformTypeQuery, NativeCompilerOptions,
+    NativeDiagnostic, NativeOhSdkCheckPlugin, NativeOhSdkClassCheckPlugin, NativeOhSdkConfig,
+    NativeOhSdkPluginHost, NativeProgramSourceGraph, NativeResolvedTypeIdentity,
+    NativeTypeQueryRange, NativeTypeSession,
 };
 use arkdown_ets_transform::{
-    AnnotationConstant, AnnotationImportDisposition, AnnotationInfo, AnnotationProperty,
-    AnnotationUse, ArktsExtendSource, ArktsFileTypeFacts, ArktsTypeFactsSnapshot,
+    transform::component_meta::ComponentMetadata, AnnotationConstant, AnnotationImportDisposition,
+    AnnotationInfo, AnnotationProperty, AnnotationUse, ArktsExtendSource, ArktsFileTypeFacts,
+    ArktsSourceSemanticCollector, ArktsSourceSemanticInventory, ArktsTypeFactsSnapshot,
     CrossplatformSourceCollection, PropertyTypeFacts, ResolvedTypeIdentity,
     SpannedAnnotationImport, SpannedAnnotationInfo, SpannedAnnotationUse, SpannedPropertyTypeFacts,
     SpannedTypeIdentity,
@@ -29,6 +32,7 @@ use arkdown_path::lexical_normalize;
 use arkdown_resolver::PackageResolutionPlan;
 use arkdown_session::{ModuleCompileContext, SdkSnapshot, SourceContent, SourceStore};
 use oxc_span::Span;
+use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use serde::Serialize;
 
@@ -49,6 +53,10 @@ pub struct ProjectSemanticCheckReport {
     pub errors: usize,
     pub diagnostics: Vec<String>,
     pub warnings: Vec<String>,
+    /// Implementation files reachable from the source-owned compiler roots.
+    /// Standalone OXC checks consume this graph instead of scanning every file
+    /// below the module directory.
+    pub checked_sources: Vec<PathBuf>,
     pub type_facts: ArktsTypeFactsSnapshot,
 }
 
@@ -56,6 +64,7 @@ pub struct ProjectSemanticChecker<'a> {
     project_root: &'a Path,
     root_files: &'a [PathBuf],
     package_resolution: &'a PackageResolutionPlan,
+    component_metadata: &'a ComponentMetadata,
     sdk_declarations: Vec<PathBuf>,
     source_store: Option<&'a SourceStore>,
     builtin_declarations: Vec<PathBuf>,
@@ -64,6 +73,7 @@ pub struct ProjectSemanticChecker<'a> {
     cache_path: Option<PathBuf>,
     check_declarations: bool,
     typescript_executable: Option<PathBuf>,
+    sdk_plugin_host: Option<Arc<dyn NativeOhSdkPluginHost>>,
     crossplatform_dependencies: FxHashMap<(String, String), CrossplatformSourceCollection>,
 }
 
@@ -130,11 +140,13 @@ impl<'a> ProjectSemanticChecker<'a> {
         project_root: &'a Path,
         root_files: &'a [PathBuf],
         package_resolution: &'a PackageResolutionPlan,
+        component_metadata: &'a ComponentMetadata,
     ) -> Self {
         Self {
             project_root,
             root_files,
             package_resolution,
+            component_metadata,
             sdk_declarations: Vec::new(),
             source_store: None,
             builtin_declarations: Vec::new(),
@@ -143,12 +155,18 @@ impl<'a> ProjectSemanticChecker<'a> {
             cache_path: None,
             check_declarations: false,
             typescript_executable: None,
+            sdk_plugin_host: None,
             crossplatform_dependencies: FxHashMap::default(),
         }
     }
 
     pub fn with_typescript_executable(mut self, executable: Option<&Path>) -> Self {
         self.typescript_executable = executable.map(Path::to_path_buf);
+        self
+    }
+
+    pub fn with_sdk_plugin_host(mut self, host: Option<Arc<dyn NativeOhSdkPluginHost>>) -> Self {
+        self.sdk_plugin_host = host;
         self
     }
 
@@ -414,6 +432,30 @@ impl<'a> ProjectSemanticChecker<'a> {
         }
 
         let options = self.compiler_options.clone();
+        tracing::info!(
+            sdk_function_plugins = options.oh_sdk_check_plugins.len(),
+            sdk_class_plugins = options.oh_sdk_class_check_plugins.len(),
+            sdk_function_plugin_paths = ?options
+                .oh_sdk_check_plugins
+                .iter()
+                .map(|plugin| plugin.path.as_path())
+                .collect::<Vec<_>>(),
+            sdk_class_plugin_paths = ?options
+                .oh_sdk_class_check_plugins
+                .iter()
+                .map(|plugin| plugin.path.as_path())
+                .collect::<Vec<_>>(),
+            "ArkTS SDK checker plugin inventory"
+        );
+        let sdk_plugin_host = if options.uses_sdk_plugin_callbacks() {
+            Some(self.sdk_plugin_host.clone().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "ARKDOWN_SDK_PLUGIN_HOST_MISSING: the SDK config declares JavaScript checker plugins but the JavaScript service entry did not provide a plugin host"
+                )
+            })?)
+        } else {
+            None
+        };
         // ets_checker.ts::getScriptFileNames includes only loader declarations
         // as global roots. SDK API modules are resolved on demand, not all
         // force-loaded (which would also parse unrelated annotation dialects).
@@ -422,42 +464,83 @@ impl<'a> ProjectSemanticChecker<'a> {
         roots.dedup();
         let mut ui_props = BTreeSet::new();
         let mut new_extend_names = BTreeSet::new();
-        let sources = self.source_store.map_or_else(BTreeMap::new, |store| {
-            store
+        let mut sources = BTreeMap::new();
+        let mut semantic_inventories = BTreeMap::new();
+        if let Some(store) = self.source_store {
+            let semantic_collector = ArktsSourceSemanticCollector::new(self.component_metadata);
+            let prepared = store
                 .source_files()
-                .into_iter()
-                .filter_map(|file| match file.cached_content() {
-                    Some(SourceContent::Text(text)) => {
-                        let processed = if Self::is_type_script_preprocess_source(&file.path) {
-                            Some(ArktsExtendSource::new(
-                                text.as_ref(),
-                                arkdown_core::ArktsLanguageVersion::V1_1,
-                            ))
-                        } else {
-                            None
-                        };
-                        if let Some(processed) = &processed {
-                            ui_props.extend(processed.legacy_names().iter().cloned());
-                            new_extend_names.extend(processed.modern_names().iter().cloned());
-                        }
-                        let content = processed.map_or_else(
-                            || Arc::clone(text),
-                            |processed| Arc::<str>::from(processed.as_str()),
-                        );
-                        Some((file.path.clone(), content))
-                    }
-                    _ => None,
+                .into_par_iter()
+                .filter_map(|file| {
+                    let Some(SourceContent::Text(text)) = file.cached_content() else {
+                        return None;
+                    };
+                    let processed = if Self::is_type_script_preprocess_source(&file.path) {
+                        Some(ArktsExtendSource::new(
+                            text.as_ref(),
+                            arkdown_core::ArktsLanguageVersion::V1_1,
+                        ))
+                    } else {
+                        None
+                    };
+                    let legacy_names = processed
+                        .as_ref()
+                        .map(|source| source.legacy_names().iter().cloned().collect::<Vec<_>>())
+                        .unwrap_or_default();
+                    let modern_names = processed
+                        .as_ref()
+                        .map(|source| source.modern_names().iter().cloned().collect::<Vec<_>>())
+                        .unwrap_or_default();
+                    let content = processed.map_or_else(
+                        || Arc::clone(text),
+                        |processed| Arc::<str>::from(processed.as_str()),
+                    );
+                    let semantic_inventory = Self::is_type_script_preprocess_source(&file.path)
+                        .then(|| {
+                            semantic_collector
+                                .collect(content.as_ref(), self.is_ui_diagnostic_source(&file.path))
+                        });
+                    Some((
+                        file.path.clone(),
+                        content,
+                        semantic_inventory,
+                        legacy_names,
+                        modern_names,
+                    ))
                 })
-                .collect()
-        });
+                .collect::<Vec<_>>();
+            for (path, content, semantic_inventory, legacy_names, modern_names) in prepared {
+                if let Some(inventory) = semantic_inventory {
+                    ui_props.extend(inventory.diagnostic_names().iter().cloned());
+                    semantic_inventories.insert(path.clone(), inventory);
+                }
+                ui_props.extend(legacy_names);
+                new_extend_names.extend(modern_names);
+                sources.insert(path, content);
+            }
+        }
         let mut session = NativeTypeSession::start(
             &NativeTypeSession::resolve_executable(self.typescript_executable.as_deref())?,
             self.project_root,
             sources.clone(),
+            sdk_plugin_host,
         )?;
         let program = session.create_program(&roots, &options)?;
         let source_graph = session.source_graph(&program)?;
+        let checked_sources = source_graph
+            .files
+            .iter()
+            .map(|file| file.file_name.clone())
+            .filter(|file| sources.contains_key(file) && Self::is_checkable_root(file))
+            .collect::<Vec<_>>();
+        let linter_started = Instant::now();
         let linter = session.arkts_linter_diagnostics(&program)?;
+        tracing::info!(
+            elapsed_ms = linter_started.elapsed().as_millis(),
+            files = source_graph.files.len(),
+            "ArkTS linter diagnostics completed"
+        );
+        let diagnostics_started = Instant::now();
         let mut result = session.diagnostics(&program)?;
         if self.check_declarations {
             let declaration_sources = source_graph
@@ -468,6 +551,11 @@ impl<'a> ProjectSemanticChecker<'a> {
                 .collect::<Vec<_>>();
             result.extend(session.declaration_diagnostics(&program, &declaration_sources)?);
         }
+        tracing::info!(
+            elapsed_ms = diagnostics_started.elapsed().as_millis(),
+            files = source_graph.files.len(),
+            "ArkTS semantic diagnostics completed"
+        );
         let annotation_files = source_graph
             .files
             .iter()
@@ -476,20 +564,46 @@ impl<'a> ProjectSemanticChecker<'a> {
                 sources.contains_key(file) && Self::is_type_script_preprocess_source(file)
             })
             .collect::<Vec<_>>();
+        let facts_started = Instant::now();
         let native_type_facts = session.annotation_transform_infos(&program, &annotation_files)?;
+        let transform_queries =
+            self.native_transform_type_queries(&annotation_files, &sources, &semantic_inventories)?;
+        let sdk_api_use_files = if options.oh_crossplatform {
+            annotation_files.as_slice()
+        } else {
+            &[]
+        };
         let native_transform_type_facts =
-            session.arkts_transform_type_facts(&program, &annotation_files)?;
+            session.arkts_transform_type_facts(&program, &transform_queries, sdk_api_use_files)?;
+        tracing::info!(
+            elapsed_ms = facts_started.elapsed().as_millis(),
+            files = transform_queries.len(),
+            property_queries = transform_queries
+                .iter()
+                .map(|query| query.properties.len())
+                .sum::<usize>(),
+            builder_queries = transform_queries
+                .iter()
+                .map(|query| query.builder_accesses.len())
+                .sum::<usize>(),
+            member_queries = transform_queries
+                .iter()
+                .map(|query| query.member_accesses.len())
+                .sum::<usize>(),
+            "ArkTS transform type facts completed"
+        );
         let type_facts =
             NativeAnnotationFactsConverter::new(&sources, &self.crossplatform_dependencies)
                 .convert(native_type_facts, native_transform_type_facts)?;
         let mut linter = self.prepare_linter_diagnostics(linter)?;
-        self.apply_ui_diagnostic_compatibility(&mut linter, &ui_props, &new_extend_names);
-        self.apply_ui_diagnostic_compatibility(&mut result, &ui_props, &new_extend_names);
+        self.apply_ui_diagnostic_rules(&mut linter, &ui_props, &new_extend_names);
+        self.apply_ui_diagnostic_rules(&mut result, &ui_props, &new_extend_names);
         let ignored = self.ignored_diagnostic_files(&source_graph);
         linter.retain(|diagnostic| self.keep_diagnostic(diagnostic, &ignored));
         result.retain(|diagnostic| self.keep_diagnostic(diagnostic, &ignored));
         session.release(program)?;
         let mut report = ProjectSemanticCheckReport {
+            checked_sources,
             type_facts,
             ..ProjectSemanticCheckReport::default()
         };
@@ -688,7 +802,7 @@ impl<'a> ProjectSemanticChecker<'a> {
     }
 
     /// Source owner: `ets_checker.ts::validateError/validateNewExtend`.
-    fn apply_ui_diagnostic_compatibility(
+    fn apply_ui_diagnostic_rules(
         &self,
         diagnostics: &mut Vec<NativeDiagnostic>,
         props: &BTreeSet<String>,
@@ -808,6 +922,60 @@ impl<'a> ProjectSemanticChecker<'a> {
                 path.extension().and_then(|extension| extension.to_str()),
                 Some("ets" | "ts")
             )
+    }
+
+    /// Build the exact checker query set selected by the OXC syntax pass.
+    ///
+    /// Source owners are documented on `ArktsSourceSemanticCollector`. Keeping
+    /// this selection out of TSGO avoids a second full-project AST traversal;
+    /// TSGO remains responsible for every returned type identity.
+    fn native_transform_type_queries(
+        &self,
+        files: &[PathBuf],
+        sources: &BTreeMap<PathBuf, Arc<str>>,
+        inventories: &BTreeMap<PathBuf, ArktsSourceSemanticInventory>,
+    ) -> Result<Vec<NativeArktsTransformTypeQuery>> {
+        files
+            .iter()
+            .filter_map(|file| {
+                inventories
+                    .get(file)
+                    .filter(|inventory| inventory.has_type_queries())
+                    .map(|inventory| (file, inventory))
+            })
+            .map(|(file, inventory)| {
+                let source = sources.get(file).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "ARKDOWN_TYPE_QUERY_SOURCE: unavailable OXC source {}",
+                        file.display()
+                    )
+                })?;
+                let offsets = Utf16OffsetMap::new(source);
+                Ok(NativeArktsTransformTypeQuery {
+                    file: file.clone(),
+                    properties: offsets.query_ranges(inventory.property_queries(), file)?,
+                    builder_accesses: offsets
+                        .query_ranges(inventory.builder_access_queries(), file)?,
+                    member_accesses: offsets
+                        .query_ranges(inventory.member_access_queries(), file)?,
+                })
+            })
+            .collect()
+    }
+
+    fn is_ui_diagnostic_source(&self, path: &Path) -> bool {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        if name.ends_with(".d.ets")
+            || path.extension().and_then(|extension| extension.to_str()) != Some("ets")
+        {
+            return false;
+        }
+        self.compiler_options.oh_compile_mode == "moduleJson"
+            || lexical_normalize(path)
+                != lexical_normalize(&self.compiler_options.oh_project_path.join("app.ets"))
     }
 
     fn is_declaration_diagnostic_source(path: &Path) -> bool {
@@ -1006,8 +1174,11 @@ impl<'a> NativeAnnotationFactsConverter<'a> {
     fn type_identity(identity: NativeResolvedTypeIdentity) -> ResolvedTypeIdentity {
         ResolvedTypeIdentity {
             is_nullable: identity.is_nullable,
+            is_union: identity.is_union,
             is_enum: identity.is_enum,
             is_basic: identity.is_basic,
+            is_observed_v2: identity.is_observed_v2,
+            is_function: identity.is_function,
             symbol_name: identity.symbol_name,
             types: identity
                 .types
@@ -1072,19 +1243,41 @@ impl<'a> NativeAnnotationFactsConverter<'a> {
 
 struct Utf16OffsetMap {
     byte_offsets: Vec<Option<usize>>,
+    utf16_offsets: Vec<Option<usize>>,
 }
 
 impl Utf16OffsetMap {
     fn new(source: &str) -> Self {
         let mut byte_offsets = Vec::with_capacity(source.len() + 1);
+        let mut utf16_offsets = vec![None; source.len() + 1];
         byte_offsets.push(Some(0));
+        utf16_offsets[0] = Some(0);
+        let mut utf16_position = 0;
         for (byte, character) in source.char_indices() {
+            utf16_offsets[byte] = Some(utf16_position);
             if character.len_utf16() == 2 {
                 byte_offsets.push(None);
             }
+            utf16_position += character.len_utf16();
             byte_offsets.push(Some(byte + character.len_utf8()));
+            utf16_offsets[byte + character.len_utf8()] = Some(utf16_position);
         }
-        Self { byte_offsets }
+        Self {
+            byte_offsets,
+            utf16_offsets,
+        }
+    }
+
+    fn query_ranges(&self, spans: &[Span], file: &Path) -> Result<Vec<NativeTypeQueryRange>> {
+        spans
+            .iter()
+            .map(|span| {
+                Ok(NativeTypeQueryRange {
+                    pos: self.utf16_position(span.start, file)?,
+                    end: self.utf16_position(span.end, file)?,
+                })
+            })
+            .collect()
     }
 
     fn span(&self, pos: usize, end: usize, file: &Path) -> Result<Span> {
@@ -1118,11 +1311,25 @@ impl Utf16OffsetMap {
                 )
             })
     }
+
+    fn utf16_position(&self, byte: u32, file: &Path) -> Result<usize> {
+        self.utf16_offsets
+            .get(byte as usize)
+            .copied()
+            .flatten()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "ARKDOWN_TYPE_QUERY_POSITION: invalid OXC byte offset {byte} in {}",
+                    file.display()
+                )
+            })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::ProjectSemanticChecker;
+    use arkdown_ets_transform::transform::component_meta::ComponentMetadata;
     use arkdown_resolver::PackageResolutionPlan;
 
     #[test]
@@ -1130,7 +1337,8 @@ mod tests {
         let project = tempfile::tempdir().unwrap();
         let roots = Vec::new();
         let packages = PackageResolutionPlan::default();
-        let checker = ProjectSemanticChecker::new(project.path(), &roots, &packages)
+        let metadata = ComponentMetadata::default();
+        let checker = ProjectSemanticChecker::new(project.path(), &roots, &packages, &metadata)
             .with_compile_mode("esmodule");
         assert_eq!(checker.compiler_options.module, 6);
         assert_eq!(checker.compiler_options.oh_compile_mode, "esmodule");

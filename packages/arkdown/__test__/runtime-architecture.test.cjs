@@ -17,19 +17,16 @@ test('public JavaScript is limited to entry, CLI, and plugin compatibility', () 
   )
   const manifest = JSON.parse(fs.readFileSync(path.join(packageRoot, 'package.json'), 'utf8'))
 
-  assert.deepEqual(Object.keys(sources), [
-    'arkdown-cli.js',
-    'plugin-adapter.js',
-    'runtime-entry.js',
-  ])
+  assert.deepEqual(Object.keys(sources), ['arkdown-cli.js', 'plugin-adapter.js', 'runtime-entry.js'])
   assert.equal(manifest.main, 'js/runtime-entry.js')
   assert.deepEqual(manifest.bin, { arkdown: 'js/arkdown-cli.js' })
   assert.equal(manifest.dependencies, undefined)
   assert.ok(Buffer.byteLength(sources['runtime-entry.js']) < 500)
-  // The adapter owns the complete TS/JS plugin ABI, including V8 structured
-  // clone for arbitrary plugin cache values. Build I/O and orchestration stay
-  // native; keep the complete source-owned ABI boundary below 40 KiB.
-  assert.ok(Buffer.byteLength(sources['plugin-adapter.js']) < 40 * 1024)
+  // The adapter owns the complete TS/JS plugin ABI, including SDK CommonJS
+  // checkers and V8 structured clone for plugin caches. Build I/O,
+  // transformations, type semantics, and orchestration stay native; keep the
+  // complete source-owned compatibility boundary below 44 KiB.
+  assert.ok(Buffer.byteLength(sources['plugin-adapter.js']) < 44 * 1024)
 
   for (const removed of [
     'runtime.js',
@@ -92,6 +89,7 @@ test('native package exposes typed services and plugin bridges, not a command ru
     'utf8',
   )
   const declarations = fs.readFileSync(path.join(packageRoot, 'index.d.ts'), 'utf8')
+  const runtimeDeclarations = fs.readFileSync(path.join(packageRoot, 'runtime-entry.d.ts'), 'utf8')
 
   for (const removed of [
     'build_script_runtime_model',
@@ -125,10 +123,7 @@ test('native package exposes typed services and plugin bridges, not a command ru
   }
 
   const nativeDomain = path.resolve(packageRoot, '../../crates/arkdown-native')
-  const buildManifest = fs.readFileSync(
-    path.resolve(packageRoot, '../../crates/arkdown-build/Cargo.toml'),
-    'utf8',
-  )
+  const buildManifest = fs.readFileSync(path.resolve(packageRoot, '../../crates/arkdown-build/Cargo.toml'), 'utf8')
   assert.equal(fs.existsSync(path.join(nativeDomain, 'Cargo.toml')), true)
   assert.equal(fs.existsSync(path.join(nativeDomain, 'src/lib.rs')), true)
   assert.match(buildManifest, /arkdown-native\s*=\s*\{\s*workspace\s*=\s*true\s*\}/)
@@ -139,26 +134,20 @@ test('native package exposes typed services and plugin bridges, not a command ru
   assert.equal(fs.existsSync(path.resolve(packageRoot, '../../crates/arkdown-build/src/clean.rs')), true)
 
   assert.doesNotMatch(napi, /run_runtime_tasks|RuntimeTaskBridgeSeed|RuntimeBuildScriptSession/)
-  assert.doesNotMatch(
-    napi,
-    /BuildTaskHook|__arkdownBuildTaskHooks|build_plugin_project_inventory/,
-  )
+  assert.doesNotMatch(napi, /BuildTaskHook|__arkdownBuildTaskHooks|build_plugin_project_inventory/)
   assert.doesNotMatch(
     coordinator,
     /BuildTaskObserver|BuildTaskEvent|BuildCycleEvent|BuildNativeCommandEvent|BuildAbcTransformEvent/,
   )
-  assert.equal(
-    fs.existsSync(path.resolve(packageRoot, '../../crates/arkdown-build/src/plugin_project.rs')),
-    false,
-  )
-  assert.equal(
-    fs.existsSync(path.resolve(packageRoot, '../../crates/arkdown-build/src/plugin_task.rs')),
-    false,
-  )
+  assert.equal(fs.existsSync(path.resolve(packageRoot, '../../crates/arkdown-build/src/plugin_project.rs')), false)
+  assert.equal(fs.existsSync(path.resolve(packageRoot, '../../crates/arkdown-build/src/plugin_task.rs')), false)
   assert.doesNotMatch(declarations, /runRuntimeTasks|RuntimeHvigor|RuntimeBuildScriptSession/)
-  assert.match(declarations, /build\(config: BuildConfig, plugins\?: Array<ArkdownPlugin>/)
+  assert.match(
+    runtimeDeclarations,
+    /build\([\s\S]*config: BuildConfig,[\s\S]*plugins\?: ArkdownPlugin \| ArkdownPlugin\[\]/,
+  )
   assert.match(declarations, /clean\(config: CleanConfig\): Promise<void>/)
-  assert.match(declarations, /check\(config: CheckConfig\): Promise<void>/)
+  assert.match(runtimeDeclarations, /check\(config: CheckConfig\): Promise<void>/)
 })
 
 test('the npm JavaScript file is the only CLI entrypoint', () => {
@@ -207,11 +196,7 @@ test('the npm JavaScript file is the only CLI entrypoint', () => {
       const rust = fs.readFileSync(path.join(rustPackage, 'src', source), 'utf8')
       assert.doesNotMatch(rust, /std::env::args(?:_os)?\s*\(|clap::/, `${rustPackage}/${source}`)
       assert.doesNotMatch(rust, /\bBuildCommand\b/, `${rustPackage}/${source}`)
-      assert.doesNotMatch(
-        rust,
-        /NativeTaskRoot|native_task_roots|BuildTaskLifecycle/,
-        `${rustPackage}/${source}`,
-      )
+      assert.doesNotMatch(rust, /NativeTaskRoot|native_task_roots|BuildTaskLifecycle/, `${rustPackage}/${source}`)
     }
   }
 })

@@ -1,9 +1,10 @@
 //! Typed build requests accepted from the JavaScript/N-API boundary.
 
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use anyhow::Result;
 use arkdown_core::ArktsLanguageVersion;
+use arkdown_ets_checker::NativeOhSdkPluginHost;
 use arkdown_watcher::WatchInvalidationBatch;
 
 /// Properties read directly by hvigor-ohos-plugin from the global Hvigor
@@ -351,6 +352,10 @@ pub struct BuildRequest {
     /// the N-API service resolves its own package layout and Rust owns the
     /// compiler process lifecycle.
     pub typescript_executable: Option<PathBuf>,
+
+    /// Same-process JavaScript host for source-owned SDK CommonJS checkers.
+    /// Rust and TSGO retain all build and type-check orchestration.
+    pub sdk_plugin_host: Option<Arc<dyn NativeOhSdkPluginHost>>,
 
     /// Project-scoped Hvigor cache directory resolved by `PathUtil` in the JS
     /// runtime. Direct package builds derive `<project>/.hvigor` at the use site.

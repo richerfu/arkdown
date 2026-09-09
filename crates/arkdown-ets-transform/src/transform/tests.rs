@@ -50,8 +50,11 @@ impl TransformHarness {
                     span: Span::new(start, start + access.len() as u32),
                     identity: ResolvedTypeIdentity {
                         is_nullable: false,
+                        is_union: false,
                         is_enum: false,
                         is_basic: false,
+                        is_observed_v2: false,
+                        is_function: false,
                         symbol_name: symbol_name.to_string(),
                         types: Vec::new(),
                     },
@@ -4908,13 +4911,17 @@ struct Page {
 }
 "#;
     let source = make_source("entry/src/main/ets/pages/Page.ets", content);
-    let identity = |is_nullable, is_enum, is_basic, types| ResolvedTypeIdentity {
-        is_nullable,
-        is_enum,
-        is_basic,
-        symbol_name: String::new(),
-        types,
-    };
+    let identity =
+        |is_nullable, is_enum, is_basic, types: Vec<ResolvedTypeIdentity>| ResolvedTypeIdentity {
+            is_nullable,
+            is_union: !types.is_empty(),
+            is_enum,
+            is_basic,
+            is_observed_v2: false,
+            is_function: false,
+            symbol_name: String::new(),
+            types,
+        };
     let basic = || identity(false, false, true, Vec::new());
     let nullable = || identity(true, false, false, Vec::new());
     let property = |name: &str, declared_type: ResolvedTypeIdentity| {
@@ -5212,10 +5219,35 @@ struct ItemRow {
   build() {}
 }
 "#;
-    let result = TransformHarness::transform(&make_source(
-        "entry/src/main/ets/components/ItemRow.ets",
-        src,
-    ))
+    let source = make_source("entry/src/main/ets/components/ItemRow.ets", src);
+    let type_facts = ArktsFileTypeFacts {
+        properties: vec![SpannedPropertyTypeFacts {
+            span: Span::new(0, src.len() as u32),
+            facts: PropertyTypeFacts {
+                declared_type: Some(ResolvedTypeIdentity {
+                    is_nullable: false,
+                    is_union: false,
+                    is_enum: false,
+                    is_basic: false,
+                    is_observed_v2: false,
+                    is_function: false,
+                    symbol_name: "Item".to_string(),
+                    types: Vec::new(),
+                }),
+            },
+        }],
+        ..ArktsFileTypeFacts::default()
+    };
+    let result = TransformHarness::transform_with_options(
+        &source,
+        &TransformOptions {
+            type_facts: ArktsTypeFactsSnapshot::new(FxHashMap::from_iter([(
+                PathBuf::from(&source.id.id),
+                type_facts,
+            )])),
+            ..TransformOptions::default()
+        },
+    )
     .unwrap();
     assert!(
         result.contains("private __item: SynchedPropertyNesedObjectPU<Item>"),

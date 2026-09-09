@@ -11,8 +11,8 @@ use crate::transform::component_meta::ComponentMetadata;
 use crate::transform::decorator::{ArkuiDecorator, ArkuiDecoratorName};
 use crate::transform::viewpu_emit::GeneratedViewpuName;
 use crate::transform::{
-    CustomComponentGeneration, CustomComponentInfo, CustomComponentPropertyKind,
-    CustomComponentUpdateProps, ImportedClassObservations,
+    ArktsFileTypeFacts, CustomComponentGeneration, CustomComponentInfo,
+    CustomComponentPropertyKind, CustomComponentUpdateProps, ImportedClassObservations,
 };
 
 use super::arkts11_monitor::Arkts11MonitorValidator;
@@ -33,6 +33,7 @@ pub(super) struct Arkts11StructValidator<'statement, 'errors> {
     component_reuse: Option<&'statement FxHashMap<String, bool>>,
     class_observations: Option<&'statement ImportedClassObservations>,
     custom_component_info: Option<&'statement CustomComponentUpdateProps>,
+    type_facts: Option<&'statement ArktsFileTypeFacts>,
     parent_v1_property_kinds: FxHashMap<String, CustomComponentPropertyKind>,
     parent_env_props: FxHashSet<String>,
     parent_computed_props: FxHashSet<String>,
@@ -55,6 +56,7 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
             component_reuse: None,
             class_observations: None,
             custom_component_info: None,
+            type_facts: None,
             parent_v1_property_kinds,
             parent_env_props,
             parent_computed_props,
@@ -157,6 +159,14 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
         custom_component_info: Option<&'statement CustomComponentUpdateProps>,
     ) -> Self {
         self.custom_component_info = custom_component_info;
+        self
+    }
+
+    pub(super) fn with_type_facts(
+        mut self,
+        type_facts: Option<&'statement ArktsFileTypeFacts>,
+    ) -> Self {
+        self.type_facts = type_facts;
         self
     }
 
@@ -1438,18 +1448,28 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
             );
         }
         if !self.has_struct_decorator(ArkuiDecoratorName::COMPONENT_V2) {
-            if let Some((parent_name, parent_kind)) = self.parent_property_reference(initializer) {
-                if !Self::v1_assignment_is_allowed(parent_kind, child_kind) {
-                    self.error(
-                        "10905315",
-                        format!(
-                            "The '{}' property '{parent_name}' cannot be assigned to the '{}' property '{property_name}'.",
-                            parent_kind.source_name(),
-                            child_kind.source_name()
-                        ),
-                        initializer.span(),
-                        &[],
-                    );
+            // process_custom_component.ts::checkFromParentToChild accepts a
+            // local identifier for @ObjectLink before applying the ordinary
+            // non-decorator assignment matrix. Resolved type validity is
+            // checked separately from TSGO facts on the child declaration.
+            let accepted_local_object_link = child_kind == CustomComponentPropertyKind::ObjectLink
+                && matches!(initializer, Expression::Identifier(identifier) if !identifier.name.starts_with('$'));
+            if !accepted_local_object_link {
+                if let Some((parent_name, parent_kind)) =
+                    self.parent_property_reference(initializer)
+                {
+                    if !Self::v1_assignment_is_allowed(parent_kind, child_kind) {
+                        self.error(
+                            "10905315",
+                            format!(
+                                "The '{}' property '{parent_name}' cannot be assigned to the '{}' property '{property_name}'.",
+                                parent_kind.source_name(),
+                                child_kind.source_name()
+                            ),
+                            initializer.span(),
+                            &[],
+                        );
+                    }
                 }
             }
         }
@@ -2344,16 +2364,21 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
                     self.error(code, message, property.span, &[]);
                 }
                 if *decorator == ArkuiDecoratorName::OBJECT_LINK
-                    && property.type_annotation.as_ref().is_some_and(|annotation| {
-                        Self::is_object_link_forbidden_type(&annotation.type_annotation)
-                    })
+                    && property.type_annotation.is_some()
                 {
-                    self.error(
-                        "10905307",
-                        "'@ObjectLink' cannot be used with this type. Apply it only to classes decorated by '@ObservedV2' or initialized using the return value of 'makeV1Observed'.",
-                        property.span,
-                        &[],
-                    );
+                    match self.object_link_type_is_valid(property.key.span()) {
+                        Some(true) => {}
+                        Some(false) => self.error(
+                            "10905307",
+                            "'@ObjectLink' cannot be used with this type. Apply it only to classes decorated by '@ObservedV2' or initialized using the return value of 'makeV1Observed'.",
+                            property.span,
+                            &[],
+                        ),
+                        None => self.errors.push(EtsTransformError::MissingTypeFacts {
+                            file: self.file.to_string(),
+                            capability: "@ObjectLink resolved declaration type",
+                        }),
+                    }
                 }
                 if Self::forbids_function_type(decorator)
                     && property.type_annotation.as_ref().is_some_and(|annotation| {
@@ -3263,35 +3288,12 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
         )
     }
 
-    fn is_object_link_forbidden_type(ty: &TSType<'_>) -> bool {
-        match ty {
-            TSType::TSUnionType(union) => union
-                .types
-                .iter()
-                .any(|member| Self::is_object_link_forbidden_type(member)),
-            TSType::TSParenthesizedType(parenthesized) => {
-                Self::is_object_link_forbidden_type(&parenthesized.type_annotation)
-            }
-            TSType::TSFunctionType(_) => true,
-            TSType::TSTypeReference(reference) => matches!(
-                &reference.type_name,
-                TSTypeName::IdentifierReference(identifier)
-                    if identifier.name == "Function"
-            ),
-            TSType::TSAnyKeyword(_)
-            | TSType::TSBigIntKeyword(_)
-            | TSType::TSBooleanKeyword(_)
-            | TSType::TSIntrinsicKeyword(_)
-            | TSType::TSNeverKeyword(_)
-            | TSType::TSNullKeyword(_)
-            | TSType::TSNumberKeyword(_)
-            | TSType::TSStringKeyword(_)
-            | TSType::TSSymbolKeyword(_)
-            | TSType::TSUndefinedKeyword(_)
-            | TSType::TSUnknownKeyword(_)
-            | TSType::TSVoidKeyword(_) => true,
-            _ => false,
-        }
+    fn object_link_type_is_valid(&self, name_span: Span) -> Option<bool> {
+        self.type_facts?
+            .property(name_span)?
+            .declared_type
+            .as_ref()
+            .map(|identity| identity.is_valid_object_link_type())
     }
 
     fn error(&mut self, code: &str, message: impl Into<String>, span: Span, solutions: &[&str]) {
