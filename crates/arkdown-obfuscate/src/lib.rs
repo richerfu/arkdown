@@ -308,6 +308,21 @@ mod tests {
     }
 
     #[test]
+    fn rule_parser_preserves_property_syntax_for_removed_calls() {
+        let rules = ObfuscationRules::parse(
+            "-enable-property-obfuscation'-remove-nosideeffects-calls class['property?']*'\
+             -enable-toplevel-obfuscation'-remove-nosideeffects-calls class.method",
+        );
+
+        assert!(rules.enable_property_obfuscation);
+        assert!(rules.enable_toplevel_obfuscation);
+        assert!(rules
+            .remove_no_side_effect_calls
+            .contains("class['property?']*"));
+        assert!(rules.remove_no_side_effect_calls.contains("class.method"));
+    }
+
+    #[test]
     fn test_disable_directive_overrides_enable() {
         let rules = ObfuscationRules::parse("-enable-property-obfuscation\n-disable-obfuscation\n");
         assert!(!rules.enable_obfuscation);

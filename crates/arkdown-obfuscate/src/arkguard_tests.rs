@@ -6,8 +6,8 @@ use arkdown_core::HvigorModuleSourceFile;
 use tempfile::TempDir;
 
 use crate::{
-    ArkguardAdapterOptions, ObfuscationModuleFile, ObfuscationModuleInput, ObfuscationOptions,
-    ObfuscationSource, Obfuscator,
+    ArkguardAdapterOptions, ObfuscationError, ObfuscationModuleFile, ObfuscationModuleInput,
+    ObfuscationOptions, ObfuscationSource, Obfuscator,
 };
 
 struct NativeArkguardFixture {
@@ -234,6 +234,73 @@ fn native_arkguard_uses_module_ordered_names_and_writes_hvigor_cache_shape() {
         fs_err::read(fixture.compile_cache.join("sourceMaps.json"))
             .expect("read mirrored source maps")
     );
+}
+
+#[test]
+fn native_arkguard_removes_only_configured_call_expression_statements() {
+    let fixture = NativeArkguardFixture::new();
+    let file = fixture.source_file(
+        "entry/src/main/ets/Index.ets",
+        r#"
+            service.method();
+            service['propertyOne']();
+            service[dynamicName]();
+            service.keep();
+            const retained = service.method();
+            if (enabled) {
+                nested.remove();
+            }
+        "#,
+    );
+    let obfuscator = fixture.obfuscator(
+        "-remove-nosideeffects-calls\nservice.method\nservice['property*']\nnested.remove\n",
+    );
+
+    let output = fixture.run(&obfuscator, vec![file]);
+    let code =
+        fs_err::read_to_string(&output.files[0].output_path).expect("read obfuscated source");
+
+    assert_eq!(code.matches("service.method();").count(), 1, "{code}");
+    assert!(!code.contains("service['propertyOne']();"), "{code}");
+    assert!(!code.contains("nested.remove();"), "{code}");
+    assert!(code.contains("service[dynamicName]();"), "{code}");
+    assert!(code.contains("service.keep();"), "{code}");
+    assert!(
+        code.contains("const retained = service.method();"),
+        "{code}"
+    );
+}
+
+#[test]
+fn native_arkguard_keeps_selected_source_multiline_when_compact_is_enabled() {
+    let fixture = NativeArkguardFixture::new();
+    let kept = fixture.source_file(
+        "entry/src/main/ets/Kept.ets",
+        "export function kept() { const value = 1; return value; }",
+    );
+    let compact = fixture.source_file(
+        "entry/src/main/ets/Compact.ets",
+        "export function compact() { const value = 2; return value; }",
+    );
+    let obfuscator = fixture.obfuscator("-compact\n-keep-uncompact\nentry/src/main/ets/Kept.ets\n");
+
+    let output = fixture.run(&obfuscator, vec![kept, compact]);
+    let kept_output = output
+        .files
+        .iter()
+        .find(|file| file.source_map_key.ends_with("Kept.ets"))
+        .expect("kept source output");
+    let compact_output = output
+        .files
+        .iter()
+        .find(|file| file.source_map_key.ends_with("Compact.ets"))
+        .expect("compact source output");
+    let kept_code = fs_err::read_to_string(&kept_output.output_path).expect("read kept source");
+    let compact_code =
+        fs_err::read_to_string(&compact_output.output_path).expect("read compact source");
+
+    assert!(kept_code.lines().count() > 1, "{kept_code}");
+    assert_eq!(compact_code.lines().count(), 1, "{compact_code}");
 }
 
 #[test]
@@ -586,6 +653,86 @@ fn incremental_name_cache_prunes_deleted_sources_and_outputs() {
     assert!(!removed_output.exists());
     assert!(cache.get("entry/src/main/ets/Removed.ets").is_none());
     assert!(cache.get("entry/src/main/ets/First.ets").is_some());
+}
+
+#[test]
+fn incremental_name_cache_reuses_identifier_property_and_file_names() {
+    let fixture = NativeArkguardFixture::new();
+    let rules = "-enable-toplevel-obfuscation\n-enable-property-obfuscation\n-enable-string-property-obfuscation\n-enable-export-obfuscation\n-enable-filename-obfuscation\n-compact\n";
+    let first = fixture.source_file(
+        "entry/src/main/ets/Index.ets",
+        "const StableBinding = { stableProperty: 1 }; export function stableFunction() { return StableBinding.stableProperty; }",
+    );
+    let first_output = fixture.run(&fixture.obfuscator(rules), vec![first]);
+    let first_cache: serde_json::Value = serde_json::from_slice(
+        &fs_err::read(&first_output.name_cache_path).expect("read first name cache"),
+    )
+    .expect("parse first name cache");
+    let first_identifier = first_cache["entry/src/main/ets/Index.ets"]["IdentifierCache"]
+        ["#StableBinding"]
+        .as_str()
+        .expect("first stable identifier")
+        .to_string();
+    let first_property = first_cache["PropertyCache"]["stableProperty"]
+        .as_str()
+        .expect("first stable property")
+        .to_string();
+    let first_file = first_cache["FileNameCache"]["Index"]
+        .as_str()
+        .expect("first stable filename")
+        .to_string();
+
+    let second = fixture.source_file(
+        "entry/src/main/ets/Index.ets",
+        "const AddedBinding = { addedProperty: 0 }; const StableBinding = { stableProperty: 2 }; export function stableFunction() { return AddedBinding.addedProperty + StableBinding.stableProperty; }",
+    );
+    let second_output = fixture.run(&fixture.obfuscator(rules), vec![second]);
+    let second_cache: serde_json::Value = serde_json::from_slice(
+        &fs_err::read(&second_output.name_cache_path).expect("read second name cache"),
+    )
+    .expect("parse second name cache");
+    let second_identifier = second_cache["entry/src/main/ets/Index.ets"]["IdentifierCache"]
+        ["#StableBinding"]
+        .as_str()
+        .expect("second stable identifier");
+
+    assert_eq!(second_identifier, first_identifier);
+    assert_eq!(
+        second_cache["PropertyCache"]["stableProperty"],
+        first_property
+    );
+    assert_eq!(second_cache["FileNameCache"]["Index"], first_file);
+    assert_ne!(
+        second_cache["PropertyCache"]["addedProperty"],
+        second_cache["PropertyCache"]["stableProperty"]
+    );
+}
+
+#[test]
+fn explicit_print_name_cache_does_not_create_its_parent_directory() {
+    let fixture = NativeArkguardFixture::new();
+    let file = fixture.source_file(
+        "entry/src/main/ets/Index.ets",
+        "export const stableName = 1;",
+    );
+    let obfuscator = fixture.obfuscator(
+        "-print-namecache\nmissing/output/nameCache.json\n-enable-toplevel-obfuscation\n",
+    );
+
+    let error = obfuscator
+        .obfuscate_module(ObfuscationModuleInput {
+            files: vec![file],
+            inventory_sources: Vec::new(),
+            module_dependencies: BTreeMap::new(),
+            preserved_source_maps: BTreeMap::new(),
+            source_maps_path: Some(fixture.compile_cache.join("sourceMaps.map")),
+            source_map_mirror_paths: Vec::new(),
+        })
+        .expect_err("missing explicit name-cache parent must fail");
+
+    assert!(
+        matches!(error, ObfuscationError::Io(error) if error.kind() == std::io::ErrorKind::NotFound)
+    );
 }
 
 #[test]

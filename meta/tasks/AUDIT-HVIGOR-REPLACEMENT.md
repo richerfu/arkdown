@@ -150,10 +150,17 @@ HSP debug、HSP release、widget 定向对比及完整 33 项 strict suite 均�
   实际 packing tool 包含 entry HAP、`pack.info` 和 `pac.json`。构建服务没有为了
   sample 隐式执行安装，缺少 `oh_modules` 时的 resolver 错误属于正确前置条件。
 
+ArkGuard 已补齐当前 `ConfigResolver` 中此前遗漏的
+`-remove-nosideeffects-calls` 与 `-keep-uncompact`，并从 JS CLI 完成双轮 release
+实跑：默认/显式 name cache 相同，新增声明后原 identifier/property/file 映射零
+变化，调用删除与逐文件 compact 行为符合 `DisableConsoleTransformer` 和
+`ArkObfuscator.writeObfuscationResult`。显式 `-print-namecache` 不再擅自创建父目录。
+
 仍缺独立真实矩阵的是多 HAP/HSP 组成的复杂 APP、HQF 与普通产物的全部签名材料
-组合，以及 ArkGuard 全规则/name-cache 跨轮复用。这里缺的是对应真实工具与产物
-验收，不表示这些 owner 不存在。每个场景加入时必须比较其上游任务实际消费和生成
-的结构，不可只检查 command/config 或 `contains` 片段。
+组合、ArkGuard `-print-kept-names` 的 reasons/whitelist 完整产物，以及真实 SDK
+PandaGuard 组合。这里缺的是对应真实工具与产物验收，不表示这些 owner 不存在。
+每个场景加入时必须比较其上游任务实际消费和生成的结构，不可只检查
+command/config 或 `contains` 片段。
 
 ## 性能项，不作为产物能力缺失
 
@@ -164,8 +171,8 @@ HSP debug、HSP release、widget 定向对比及完整 33 项 strict suite 均�
 
 ## 下一步顺序
 
-1. 按具体 owner 扩充剩余 R3 真实矩阵；优先多 HAP/HSP APP、签名与 ArkGuard
-   name-cache 复用，发现差异即在领域 crate 修复。
+1. 按具体 owner 扩充剩余 R3 真实矩阵；优先补齐 ArkGuard keptNames/whitelist，
+   再处理多 HAP/HSP APP 与签名，发现差异即在领域 crate 修复。
 2. 功能门禁通过后处理剩余跨进程 graph cache 和依赖 wave 性能项。
 3. 只有取得当前 task/system plugin 权威源码后，才能决定是否扩展公开插件合同。
 
