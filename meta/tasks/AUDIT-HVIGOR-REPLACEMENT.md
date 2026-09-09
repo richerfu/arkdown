@@ -28,7 +28,7 @@ checker 或插件结论。
 | plugin `this.parse` | Rollup 4.23.0 `ParseAst` | OXC ESTree bridge | 已按源码只消费 `allowReturnOutsideFunction`；未知 Acorn 字段忽略；错误为 `RollupError/PARSE_ERROR` |
 | SDK/native tools | ets2bundle command builders、SDK binaries | typed Rust plans | restool/ABC/linker/signer/PandaGuard 等直接调用实际工具；不是 JS 兼容层 |
 | source ArkGuard | ets2bundle obfuscation config + arkcompiler ArkGuard source | `arkdown-obfuscate` OXC implementation | Rust 原生 owner；name/file/property cache 与 consumer rules 进入 build stage |
-| cache/watch | ets2bundle cache/watch hooks | task cache、OXC facts、Rolldown retained graph、watch coordinator | 单轮行为已接；下述有性能收口 |
+| cache/watch | ets2bundle cache/watch hooks | task cache、OXC facts、Rolldown retained graph、watch coordinator | retained TSGO/Rolldown 与 HotReload 增量实跑已通过；下述仅有性能收口 |
 | HAP/HSP/HAR/APP | OHOS packaging/signing tasks | `arkdown-pack`、`arkdown-sign`、app coordinator | 现有 1.1 strict fixtures 进入真实产物链 |
 
 TSGO 完成矩阵、发布方式和回归见
@@ -128,10 +128,32 @@ HSP debug、HSP release、widget 定向对比及完整 33 项 strict suite 均�
 
 ### R3：缺少独立真实矩阵的 1.1 路径
 
-当前 strict fixture 没有分别触发 AOT、reload/QuickFix 执行、复杂多模块 APP、
-所有签名材料组合和 ArkGuard 全规则/name-cache 复用。这里缺的是对应真实工具与
-产物验收，不表示这些 owner 不存在。每个场景加入时必须比较其上游任务实际消费
-和生成的结构，不可只检查 command/config 或 `contains` 片段。
+本轮已经从 JS CLI 补做以下真实执行验证：
+
+- AOT `hostPGO + apPath` 生成 `anBuildMode=partial`、复制模块 `.ap`，并将零字节
+  `.an/.ai` 打入 HAP。该结果不是 placeholder：当前
+  `compiler/src/gen_aot.ts::generateAot` 只构造 `ark_aot_compiler` 命令文本，随后
+  以 `openSync(..., 'w')` 创建这两个空文件，并未执行该二进制；Arkdown 不得擅自
+  增加上游没有的执行步骤。
+- HotReload 首轮由真实 es2abc 生成 `symbolMap.map`；同一 JS CLI 进程收到 `.ets`
+  watcher 事件后写出 `modifiedFiles`，并以 `--input-symbol-table --hot-reload`
+  生成 patch `modules.abc` 与 `sourceMaps.map`。macOS FSEvents 验证必须在允许文件
+  事件送达的运行环境执行，沙箱内无事件不属于编译行为差异。
+- ColdReload 审计定位并修复了真实差异：旧实现忽略 loader
+  `patchConfig.oldMapFilePath/changedFileList/patchAbcPath`，错误使用内部固定目录。
+  现在按 `main.js::readPatchConfig` 与 `module_coldreload_mode.ts` 消费字段，并在
+  `changedFileList` 缺失时使用 `<cachePath>/changedFileList.json`。真实 es2abc 已在
+  指定目录生成 cold patch ABC/sourcemap；`PackageQuickfix` 随后通过 SDK
+  `app_packing_tool --mode hqf` 产出 HQF，归档包含 `patch.json`、
+  `ets/modules.abc`、`ets/sourceMaps.map`。
+- 已物化 `file:` Source HAR 依赖的多模块 fixture 能由 JS CLI 生成 APP；APP 通过
+  实际 packing tool 包含 entry HAP、`pack.info` 和 `pac.json`。构建服务没有为了
+  sample 隐式执行安装，缺少 `oh_modules` 时的 resolver 错误属于正确前置条件。
+
+仍缺独立真实矩阵的是多 HAP/HSP 组成的复杂 APP、HQF 与普通产物的全部签名材料
+组合，以及 ArkGuard 全规则/name-cache 跨轮复用。这里缺的是对应真实工具与产物
+验收，不表示这些 owner 不存在。每个场景加入时必须比较其上游任务实际消费和生成
+的结构，不可只检查 command/config 或 `contains` 片段。
 
 ## 性能项，不作为产物能力缺失
 
@@ -142,7 +164,8 @@ HSP debug、HSP release、widget 定向对比及完整 33 项 strict suite 均�
 
 ## 下一步顺序
 
-1. 按具体 owner 扩充 R3 真实矩阵；发现差异即在领域 crate 修复。
+1. 按具体 owner 扩充剩余 R3 真实矩阵；优先多 HAP/HSP APP、签名与 ArkGuard
+   name-cache 复用，发现差异即在领域 crate 修复。
 2. 功能门禁通过后处理剩余跨进程 graph cache 和依赖 wave 性能项。
 3. 只有取得当前 task/system plugin 权威源码后，才能决定是否扩展公开插件合同。
 

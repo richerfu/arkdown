@@ -47,6 +47,7 @@ fn quickfix_task_plan_promotes_transitive_hqf_roots_to_the_full_boundary() {
 fn cold_reload_selects_only_modified_ets_and_writes_patch_source_maps() {
     let temp = tempfile::tempdir().expect("tempdir");
     let layout = ModuleBuildLayout::for_target_product(temp.path(), "free", "release");
+    let cache_dir = temp.path().join("cache");
     let ets_root = temp.path().join("src").join("main").join("ets");
     let changed_source = ets_root.join("pages").join("Index.ets");
     let unchanged_source = ets_root.join("pages").join("About.ets");
@@ -56,11 +57,14 @@ fn cold_reload_selects_only_modified_ets_and_writes_patch_source_maps() {
     write_file(&unchanged_source, b"export default 2");
     write_file(&changed_output, b"export default 1");
     write_file(&unchanged_output, b"export default 2");
+    let changed_file_list = temp.path().join("ide").join("changed.json");
     write_file(
-        &layout.patch_changed_file_list(),
+        &changed_file_list,
         serde_json::to_vec(&json!({ "modifiedFiles": ["pages/Index.ets"] })).expect("changed list"),
     );
-    write_file(&layout.symbol_map(), b"base-symbol-map");
+    let old_map_dir = temp.path().join("ide").join("old-map");
+    write_file(&old_map_dir.join("symbolMap.map"), b"base-symbol-map");
+    let patch_abc_dir = temp.path().join("ide").join("patch-abc");
     let source_maps = temp.path().join("sourceMaps.map");
     write_file(
         &source_maps,
@@ -79,9 +83,14 @@ fn cold_reload_selects_only_modified_ets_and_writes_patch_source_maps() {
         ),
     ];
 
-    let plan = ColdReloadProcessor::new(&layout)
+    let plan = ColdReloadProcessor::new(&layout, &cache_dir)
         .compile_plan(
-            Some(&json!({ "mode": "coldReload" })),
+            Some(&json!({
+                "mode": "coldReload",
+                "oldMapFilePath": old_map_dir,
+                "changedFileList": changed_file_list,
+                "patchAbcPath": patch_abc_dir,
+            })),
             &sources,
             Some(&source_maps),
         )
@@ -89,16 +98,57 @@ fn cold_reload_selects_only_modified_ets_and_writes_patch_source_maps() {
         .expect("modified source");
 
     assert_eq!(plan.module_source_files, vec![sources[0].clone()]);
-    assert_eq!(plan.modules_abc_path, layout.patch_modules_abc());
-    assert_eq!(plan.reload.symbol_table_path, layout.symbol_map());
+    assert_eq!(plan.modules_abc_path, patch_abc_dir.join("modules.abc"));
+    assert_eq!(
+        plan.reload.symbol_table_path,
+        old_map_dir.join("symbolMap.map")
+    );
     let filtered: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(layout.patch_source_maps()).expect("patch source maps"),
+        &std::fs::read(patch_abc_dir.join("sourceMaps.map")).expect("patch source maps"),
     )
     .expect("valid patch source maps");
     assert_eq!(
         filtered,
         json!({ "entry|pages/Index.ets": { "map": "changed" } })
     );
+}
+
+#[test]
+fn cold_reload_uses_sdk_cache_default_for_missing_changed_file_list() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let layout = ModuleBuildLayout::for_target_product(temp.path(), "free", "release");
+    let cache_dir = temp.path().join("compile-cache");
+    write_file(
+        &cache_dir.join("changedFileList.json"),
+        serde_json::to_vec(&json!({ "modifiedFiles": [] })).expect("changed list"),
+    );
+    let old_map_dir = temp.path().join("old-map");
+
+    let plan = ColdReloadProcessor::new(&layout, &cache_dir)
+        .compile_plan(
+            Some(&json!({
+                "mode": "coldReload",
+                "oldMapFilePath": old_map_dir,
+                "changedFileList": "",
+            })),
+            &[],
+            None,
+        )
+        .expect("missing changedFileList uses the SDK cache default");
+
+    assert!(plan.is_none());
+}
+
+#[test]
+fn cold_reload_does_not_select_the_sdk_hot_reload_mode() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let layout = ModuleBuildLayout::for_target_product(temp.path(), "free", "release");
+
+    let plan = ColdReloadProcessor::new(&layout, &temp.path().join("cache"))
+        .compile_plan(Some(&json!({ "mode": "hotReload" })), &[], None)
+        .expect("hot reload is handled by ModuleHotreloadMode");
+
+    assert!(plan.is_none());
 }
 
 #[test]

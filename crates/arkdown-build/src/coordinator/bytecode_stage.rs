@@ -218,7 +218,7 @@ impl BuildCoordinator {
                 .as_ref()
                 .and_then(|options| options.transform_lib.clone());
             let cold_reload_plan = if quickfix_task_plan.is_some() {
-                ColdReloadProcessor::new(&module_layout).compile_plan(
+                ColdReloadProcessor::new(&module_layout, &bytecode_cache_dir).compile_plan(
                     loader_json.patch_config.as_ref(),
                     &bundle_out.bundle_output.module_source_files,
                     bundle_out.bundle_output.source_maps_path.as_deref(),
