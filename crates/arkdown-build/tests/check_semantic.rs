@@ -3,9 +3,29 @@
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use arkdown_build::check::{CheckApplication, CheckRequest};
+use arkdown_ets_checker::{
+    NativeCheckError, NativeOhSdkPluginHost, NativeOhSdkPluginRequest, NativeOhSdkPluginResponse,
+};
 use walkdir::WalkDir;
+
+#[derive(Debug)]
+struct UnavailableSdkPluginHost;
+
+impl NativeOhSdkPluginHost for UnavailableSdkPluginHost {
+    fn invoke(
+        &self,
+        _request: NativeOhSdkPluginRequest,
+    ) -> Result<NativeOhSdkPluginResponse, NativeCheckError> {
+        Ok(NativeOhSdkPluginResponse::default())
+    }
+}
+
+fn sdk_plugin_host() -> Option<Arc<dyn NativeOhSdkPluginHost>> {
+    Some(Arc::new(UnavailableSdkPluginHost))
+}
 
 #[test]
 fn check_reports_native_typescript_semantic_diagnostics() {
@@ -38,6 +58,7 @@ fn check_reports_native_typescript_semantic_diagnostics() {
         is_crossplatform: false,
         ignore_crossplatform_check: false,
         typescript_executable: None,
+        sdk_plugin_host: sdk_plugin_host(),
     })
     .execute()
     .expect_err("native TypeScript checker must reject a TypeScript type mismatch");
@@ -63,6 +84,7 @@ fn check_defaults_to_native_typescript_without_a_node_runtime() {
         is_crossplatform: false,
         ignore_crossplatform_check: false,
         typescript_executable: None,
+        sdk_plugin_host: sdk_plugin_host(),
     })
     .execute()
     .expect("native TypeScript check must accept the SDK fixture without Node");
@@ -85,6 +107,7 @@ fn check_uses_module_target_and_its_source_owned_standard_library() {
         )).unwrap();
         fs::write(temp.path().join("entry/src/main/ets/Target.ets"),
             "export const value: bigint = 1n;\nexport const promise: Promise<number> = Promise.any([Promise.resolve(1)]);\n").unwrap();
+        prepend_entry_import(temp.path(), "../Target");
         let result = CheckApplication::new(CheckRequest {
             target: "hap".into(),
             module: None,
@@ -92,6 +115,7 @@ fn check_uses_module_target_and_its_source_owned_standard_library() {
             is_crossplatform: false,
             ignore_crossplatform_check: false,
             typescript_executable: None,
+            sdk_plugin_host: sdk_plugin_host(),
         })
         .execute();
         if target == "ES2017" {
@@ -133,6 +157,7 @@ fn check_applies_source_owned_flow_limit_and_invalid_range_default() {
             ),
         )
         .unwrap();
+        prepend_entry_import(temp.path(), "../Flow");
         let result = CheckApplication::new(CheckRequest {
             target: "hap".into(),
             module: None,
@@ -140,6 +165,7 @@ fn check_applies_source_owned_flow_limit_and_invalid_range_default() {
             is_crossplatform: false,
             ignore_crossplatform_check: false,
             typescript_executable: None,
+            sdk_plugin_host: sdk_plugin_host(),
         })
         .execute();
         if limit == 1999 {
@@ -161,6 +187,13 @@ fn repo_root() -> PathBuf {
         .parent()
         .expect("repository root")
         .to_path_buf()
+}
+
+fn prepend_entry_import(project: &Path, specifier: &str) {
+    let entry = project.join("entry/src/main/ets/pages/Index.ets");
+    let source = fs::read_to_string(&entry).expect("read entry source");
+    fs::write(&entry, format!("import \"{specifier}\";\n{source}"))
+        .expect("make test source reachable from the configured page entry");
 }
 
 fn copy_fixture(source: &Path, destination: &Path) -> std::io::Result<()> {

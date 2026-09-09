@@ -34,10 +34,12 @@ mod runtime_observe;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 
 use napi::bindgen_prelude::*;
-use napi::threadsafe_function::ThreadsafeCallContext;
+use napi::threadsafe_function::{
+  ThreadsafeCallContext, ThreadsafeFunction, ThreadsafeFunctionCallMode,
+};
 use napi_derive::napi;
 use rustc_hash::FxHashMap;
 
@@ -65,6 +67,9 @@ use arkdown::plugins::hvigor_compile::{
   HvigorCompilePluginSourceFile, HvigorNativePluginSlot, HvigorWatchChange,
 };
 use arkdown::PluginCacheModule;
+use arkdown_ets_checker::{
+  NativeCheckError, NativeOhSdkPluginHost, NativeOhSdkPluginRequest, NativeOhSdkPluginResponse,
+};
 
 #[napi(object)]
 pub struct CleanConfig {
@@ -78,6 +83,93 @@ pub struct CheckConfig {
   pub module: Option<String>,
   pub is_crossplatform: Option<bool>,
   pub ignore_crossplatform_check: Option<bool>,
+}
+
+type SdkPluginDispatchTsfn =
+  Arc<ThreadsafeFunction<String, String, FnArgs<(String,)>, Status, false, false>>;
+
+struct NapiSdkPluginHost {
+  dispatch: SdkPluginDispatchTsfn,
+}
+
+impl std::fmt::Debug for NapiSdkPluginHost {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    formatter.write_str("NapiSdkPluginHost")
+  }
+}
+
+impl NapiSdkPluginHost {
+  fn from_dispatch(
+    dispatch: Function<'_, (String,), String>,
+  ) -> napi::Result<Arc<dyn NativeOhSdkPluginHost>> {
+    let dispatch = Arc::new(
+      dispatch
+        .build_threadsafe_function::<String>()
+        .build_callback(|ctx: ThreadsafeCallContext<String>| Ok(FnArgs { data: (ctx.value,) }))?,
+    );
+    Ok(Arc::new(Self { dispatch }))
+  }
+
+  fn dispatch_batch(
+    &self,
+    requests: Vec<NativeOhSdkPluginRequest>,
+  ) -> std::result::Result<Vec<NativeOhSdkPluginResponse>, NativeCheckError> {
+    let request = serde_json::to_string(&requests).map_err(|error| {
+      NativeCheckError::Protocol(format!(
+        "cannot serialize OH SDK plugin request batch for JavaScript: {error}"
+      ))
+    })?;
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let status = self.dispatch.call_with_return_value(
+      request,
+      ThreadsafeFunctionCallMode::NonBlocking,
+      move |result, _env| {
+        let result = result.map_err(|error| error.to_string());
+        let _ = sender.send(result);
+        Ok(())
+      },
+    );
+    if status != Status::Ok {
+      return Err(NativeCheckError::Protocol(format!(
+        "failed to schedule OH SDK plugin callback batch: {status:?}"
+      )));
+    }
+    let response = receiver.recv().map_err(|error| {
+      NativeCheckError::Protocol(format!(
+        "OH SDK plugin callback batch did not respond: {error}"
+      ))
+    })?;
+    let response = response.map_err(|error| {
+      NativeCheckError::Protocol(format!("OH SDK plugin callback batch threw: {error}"))
+    })?;
+    serde_json::from_str(&response).map_err(|error| {
+      NativeCheckError::Protocol(format!(
+        "invalid OH SDK plugin batch response from JavaScript: {error}"
+      ))
+    })
+  }
+}
+
+impl NativeOhSdkPluginHost for NapiSdkPluginHost {
+  fn invoke(
+    &self,
+    request: NativeOhSdkPluginRequest,
+  ) -> std::result::Result<NativeOhSdkPluginResponse, NativeCheckError> {
+    self
+      .dispatch_batch(vec![request])?
+      .into_iter()
+      .next()
+      .ok_or_else(|| {
+        NativeCheckError::Protocol("OH SDK plugin callback returned no response".into())
+      })
+  }
+
+  fn invoke_batch(
+    &self,
+    requests: Vec<NativeOhSdkPluginRequest>,
+  ) -> std::result::Result<Vec<NativeOhSdkPluginResponse>, NativeCheckError> {
+    self.dispatch_batch(requests)
+  }
 }
 
 /// Remove project, module, unit-test, preview, and active native build outputs.
@@ -96,10 +188,15 @@ pub async fn clean(config: CleanConfig) -> napi::Result<()> {
 }
 
 /// Run the native ArkTS source checker without entering the build pipeline.
-#[napi(ts_return_type = "Promise<void>")]
-pub fn check<'a>(env: Env, config: CheckConfig) -> napi::Result<Object<'a>> {
+#[napi(skip_typescript)]
+pub fn check<'a>(
+  env: Env,
+  config: CheckConfig,
+  sdk_plugin_dispatch: Function<'a, (String,), String>,
+) -> napi::Result<Object<'a>> {
   let typescript_executable =
     NapiPackageLayout::from_env(&env)?.packaged_typescript_executable()?;
+  let sdk_plugin_host = Some(NapiSdkPluginHost::from_dispatch(sdk_plugin_dispatch)?);
   let args = arkdown_build::check::CheckRequest {
     target: config.target.unwrap_or_else(|| "hap".to_string()),
     module: config.module,
@@ -107,6 +204,7 @@ pub fn check<'a>(env: Env, config: CheckConfig) -> napi::Result<Object<'a>> {
     is_crossplatform: config.is_crossplatform.unwrap_or(false),
     ignore_crossplatform_check: config.ignore_crossplatform_check.unwrap_or(false),
     typescript_executable,
+    sdk_plugin_host,
   };
   let raw_promise = napi::bindgen_prelude::execute_tokio_future(
     env.raw(),
@@ -2270,16 +2368,18 @@ pub struct BuildResult {
 /// Returns a Promise that resolves with the build result.
 /// Plugins are wrapped synchronously before spawning the async build task,
 /// so non-Send JS values (Env, Array) don't cross the tokio task boundary.
-#[napi(ts_return_type = "Promise<BuildResult>")]
+#[napi(skip_typescript)]
 pub fn build<'a>(
   env: Env,
   config: BuildConfig,
   #[napi(ts_arg_type = "Array<ArkdownPlugin> | undefined | null")] plugins: Option<Array<'a>>,
+  sdk_plugin_dispatch: Function<'a, (String,), String>,
 ) -> napi::Result<Object<'a>> {
   runtime_observe::RuntimeObservability::install_build_safety_net(&config)
     .map_err(|error| napi::Error::from_reason(error.to_string()))?;
   let typescript_executable =
     NapiPackageLayout::from_env(&env)?.packaged_typescript_executable()?;
+  let sdk_plugin_host = Some(NapiSdkPluginHost::from_dispatch(sdk_plugin_dispatch)?);
 
   // 1. Wrap JS plugins synchronously (Env + Array are not Send).
   let mut js_plugins: Vec<PackagePlugin> = Vec::new();
@@ -2398,6 +2498,7 @@ pub fn build<'a>(
     cache: cache.unwrap_or(true),
     node_executable: node_executable.map(std::path::PathBuf::from),
     typescript_executable,
+    sdk_plugin_host,
   };
 
   // 2. Spawn the async build and return a JS Promise.
@@ -2467,6 +2568,7 @@ struct PackageBuildArgs {
   cache: bool,
   node_executable: Option<std::path::PathBuf>,
   typescript_executable: Option<std::path::PathBuf>,
+  sdk_plugin_host: Option<Arc<dyn NativeOhSdkPluginHost>>,
 }
 
 async fn run_build(
@@ -2532,6 +2634,7 @@ async fn run_build(
     parameter_file_override: None,
     node_executable: package_args.node_executable,
     typescript_executable: package_args.typescript_executable,
+    sdk_plugin_host: package_args.sdk_plugin_host,
     hvigor_cache_dir: Some(project_path.join(".hvigor")),
   };
 

@@ -590,9 +590,11 @@ impl RolldownEtsTransformer {
 
         if let Some(projection) = transformed.rolldown_projection.as_deref() {
             let projection = pipeline.finalize_source(projection)?;
+            let mut warnings = transformed.warnings.clone();
+            warnings.extend(projection.warnings);
             return Ok(Some(RolldownEtsTransformOutput {
                 code: projection.code.into_owned(),
-                warnings: projection.warnings,
+                warnings,
                 module_source_code: Some(Arc::from(transformed.code)),
                 source_map: None,
                 record_module_source_code: false,
@@ -621,8 +623,10 @@ impl RolldownEtsTransformer {
         let HvigorSourceFinalization {
             code: finalized_code,
             source_map: finalization_source_map,
-            warnings,
+            warnings: finalization_warnings,
         } = finalization;
+        let mut warnings = transformed.warnings.clone();
+        warnings.extend(finalization_warnings);
         let final_source = match crate::transform::apply_auto_lazy_import(
             finalized_code.as_ref(),
             id,

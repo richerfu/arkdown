@@ -6,7 +6,9 @@ use oxc_ast::ast::{
 use crate::error::{DiagnosticSeverity, EtsTransformError};
 use crate::transform::component_meta::ComponentMetadata;
 use crate::transform::decorator::{ArkuiDecorator, ArkuiDecoratorName};
-use crate::transform::{ClassObservation, CustomComponentUpdateProps, ImportedClassObservations};
+use crate::transform::{
+    ArktsFileTypeFacts, ClassObservation, CustomComponentUpdateProps, ImportedClassObservations,
+};
 use crate::ModuleExportNameText;
 use rustc_hash::FxHashMap;
 
@@ -60,6 +62,7 @@ pub struct EtsChecker<'program, 'alloc, 'file> {
     component_metadata: Option<&'program ComponentMetadata>,
     imported_class_observations: ImportedClassObservations,
     custom_component_info: Option<&'program CustomComponentUpdateProps>,
+    type_facts: Option<&'program ArktsFileTypeFacts>,
 }
 
 impl<'program, 'alloc, 'file> EtsChecker<'program, 'alloc, 'file> {
@@ -71,6 +74,7 @@ impl<'program, 'alloc, 'file> EtsChecker<'program, 'alloc, 'file> {
             component_metadata: None,
             imported_class_observations: ImportedClassObservations::default(),
             custom_component_info: None,
+            type_facts: None,
         }
     }
 
@@ -112,6 +116,14 @@ impl<'program, 'alloc, 'file> EtsChecker<'program, 'alloc, 'file> {
         self
     }
 
+    pub(crate) fn with_type_facts(
+        mut self,
+        type_facts: Option<&'program ArktsFileTypeFacts>,
+    ) -> Self {
+        self.type_facts = type_facts;
+        self
+    }
+
     pub fn check(&self) -> EtsCheckReport {
         let mut report = EtsCheckReport::default();
         let mut page_decorators = PageDecoratorCounts::default();
@@ -121,9 +133,6 @@ impl<'program, 'alloc, 'file> EtsChecker<'program, 'alloc, 'file> {
 
         for statement in &self.program.body {
             match statement {
-                Statement::ImportDeclaration(import) => {
-                    self.check_import_names(import, &mut report.diagnostics);
-                }
                 Statement::StructStatement(structure) => {
                     self.check_struct(
                         structure,
@@ -203,38 +212,6 @@ impl<'program, 'alloc, 'file> EtsChecker<'program, 'alloc, 'file> {
         report
     }
 
-    fn check_import_names(
-        &self,
-        import: &oxc_ast::ast::ImportDeclaration<'_>,
-        diagnostics: &mut Vec<EtsTransformError>,
-    ) {
-        let Some(metadata) = self.component_metadata else {
-            return;
-        };
-        let Some(specifiers) = import.specifiers.as_ref() else {
-            return;
-        };
-        for specifier in specifiers {
-            let ImportDeclarationSpecifier::ImportSpecifier(specifier) = specifier else {
-                continue;
-            };
-            let name = specifier.local.name.as_str();
-            if !metadata.is_builtin_component_name(name) {
-                continue;
-            }
-            diagnostics.push(EtsTransformError::CodedDiagnostic {
-                file: self.file.to_string(),
-                code: "10905235".to_string(),
-                message: format!(
-                    "The module name '{name}' can not be the same as the inner component name."
-                ),
-                severity: DiagnosticSeverity::Error,
-                span: Some(specifier.local.span),
-                solutions: Vec::new(),
-            });
-        }
-    }
-
     fn sdk_type_bindings(&self) -> rustc_hash::FxHashSet<String> {
         let mut bindings = rustc_hash::FxHashSet::default();
         for statement in &self.program.body {
@@ -278,6 +255,7 @@ impl<'program, 'alloc, 'file> EtsChecker<'program, 'alloc, 'file> {
             .with_component_reuse_inventory(component_reuse)
             .with_class_observation_inventory(class_observations)
             .with_custom_component_info(self.custom_component_info)
+            .with_type_facts(self.type_facts)
             .check();
     }
 

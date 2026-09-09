@@ -24,6 +24,11 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use arkdown_ets_checker::{
+  NativeCheckError, NativeOhSdkPluginHost, NativeOhSdkPluginRequest, NativeOhSdkPluginResponse,
+};
 
 // ---------------------------------------------------------------------------
 // SHA-256 fingerprint helper (no extra dep — uses sha2 which is already in
@@ -170,6 +175,22 @@ impl DiffReport {
 /// 3. Assert `report.identical`.
 pub struct SelfConsistencyOracle;
 
+/// The self-consistency fixture enters `BuildService` directly and therefore
+/// has no JavaScript runtime. Model the source-defined plugin-load failure for
+/// that isolated test boundary; production build/check can only obtain the
+/// real host through `js/runtime-entry.js`.
+#[derive(Debug)]
+struct UnavailableTestSdkPluginHost;
+
+impl NativeOhSdkPluginHost for UnavailableTestSdkPluginHost {
+  fn invoke(
+    &self,
+    _request: NativeOhSdkPluginRequest,
+  ) -> Result<NativeOhSdkPluginResponse, NativeCheckError> {
+    Ok(NativeOhSdkPluginResponse::default())
+  }
+}
+
 impl SelfConsistencyOracle {
   /// Run an arkdown build inside `project_path` and return a snapshot of all
   /// files produced under `<project_path>/build/`.
@@ -231,6 +252,7 @@ impl SelfConsistencyOracle {
         build_version: None,
         node_executable: None,
         typescript_executable: None,
+        sdk_plugin_host: Some(Arc::new(UnavailableTestSdkPluginHost)),
         hvigor_cache_dir: None,
         hvigor_properties: Default::default(),
       })

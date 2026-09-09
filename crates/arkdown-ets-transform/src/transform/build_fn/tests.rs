@@ -1577,8 +1577,11 @@ struct Foo {
             span: Span::new(start, start + enum_access.len() as u32),
             identity: ResolvedTypeIdentity {
                 is_nullable: false,
+                is_union: false,
                 is_enum: true,
                 is_basic: true,
+                is_observed_v2: false,
+                is_function: false,
                 symbol_name: "Top".to_string(),
                 types: Vec::new(),
             },

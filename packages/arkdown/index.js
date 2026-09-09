@@ -587,8 +587,6 @@ if (!nativeBinding) {
 
 module.exports = nativeBinding
 module.exports.ArkdownRolldownPluginContext = nativeBinding.ArkdownRolldownPluginContext
-module.exports.build = nativeBinding.build
-module.exports.check = nativeBinding.check
 module.exports.clean = nativeBinding.clean
 module.exports.compilePluginModule = nativeBinding.compilePluginModule
 module.exports.compilePluginModuleSync = nativeBinding.compilePluginModuleSync

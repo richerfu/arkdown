@@ -7,13 +7,19 @@ use std::{
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
-    sync::{Arc, mpsc},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
     thread::JoinHandle,
     time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
+
+static SDK_PLUGIN_SESSION_SCOPE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, thiserror::Error)]
 pub enum NativeCheckError {
@@ -142,6 +148,55 @@ pub struct NativeOhSdkClassCheckPlugin {
     pub class_name: String,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeOhSdkPluginRequest {
+    pub session_id: u64,
+    pub path: PathBuf,
+    pub function_name: String,
+    #[serde(default)]
+    pub class_name: String,
+    pub operation: String,
+    #[serde(default)]
+    pub args: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct NativeOhSdkPluginResponse {
+    pub found: bool,
+    pub result: bool,
+    pub message: String,
+    pub valid: bool,
+    pub version: String,
+    pub matched: bool,
+    pub groups: Vec<String>,
+    pub phase: String,
+    pub error: String,
+    pub check_result: bool,
+    pub check_message: String,
+}
+
+/// JavaScript owns only the source-observed SDK CommonJS plugin ABI. TSGO
+/// decides when callbacks participate in type diagnostics; Rust routes the
+/// typed request without loading or interpreting plugin code.
+pub trait NativeOhSdkPluginHost: Send + Sync + std::fmt::Debug {
+    fn invoke(
+        &self,
+        request: NativeOhSdkPluginRequest,
+    ) -> Result<NativeOhSdkPluginResponse, NativeCheckError>;
+
+    fn invoke_batch(
+        &self,
+        requests: Vec<NativeOhSdkPluginRequest>,
+    ) -> Result<Vec<NativeOhSdkPluginResponse>, NativeCheckError> {
+        requests
+            .into_iter()
+            .map(|request| self.invoke(request))
+            .collect()
+    }
+}
+
 impl NativeCompilerOptions {
     /// ets2bundle/compiler/tsconfig.json compiler options. Module resolution
     /// Node10 is passed verbatim; the native compiler owns its interpretation.
@@ -225,6 +280,10 @@ impl NativeCompilerOptions {
             oh_sdk_plugin_project_config: None,
         }
     }
+
+    pub fn uses_sdk_plugin_callbacks(&self) -> bool {
+        !self.oh_sdk_check_plugins.is_empty() || !self.oh_sdk_class_check_plugins.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -232,8 +291,10 @@ impl NativeCompilerOptions {
 pub struct NativeDiagnostic {
     #[serde(default)]
     pub file_name: Option<PathBuf>,
-    pub pos: u32,
-    pub end: u32,
+    /// TSGO `DiagnosticResponse` uses Go `int`, and diagnostics without a
+    /// source file may retain the compiler's negative sentinel range.
+    pub pos: i64,
+    pub end: i64,
     pub code: i32,
     pub category: u8,
     #[serde(default)]
@@ -389,6 +450,23 @@ pub struct NativeArktsTransformTypeFacts {
     pub sdk_api_uses: Vec<NativeSdkApiUse>,
 }
 
+/// UTF-16 source range used by the JSON protocol. Rust/OXC selects the
+/// transform-owned syntax; TSGO resolves only the requested type identities.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct NativeTypeQueryRange {
+    pub pos: usize,
+    pub end: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeArktsTransformTypeQuery {
+    pub file: PathBuf,
+    pub properties: Vec<NativeTypeQueryRange>,
+    pub builder_accesses: Vec<NativeTypeQueryRange>,
+    pub member_accesses: Vec<NativeTypeQueryRange>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeSdkApiUse {
@@ -424,8 +502,11 @@ pub struct NativeArktsExpressionTypeFacts {
 #[serde(rename_all = "camelCase")]
 pub struct NativeResolvedTypeIdentity {
     pub is_nullable: bool,
+    pub is_union: bool,
     pub is_enum: bool,
     pub is_basic: bool,
+    pub is_observed_v2: bool,
+    pub is_function: bool,
     pub symbol_name: String,
     pub types: Vec<NativeResolvedTypeIdentity>,
 }
@@ -466,6 +547,8 @@ pub struct NativeTypeSession {
     next_id: u64,
     sources: BTreeMap<PathBuf, Arc<str>>,
     deleted: BTreeSet<PathBuf>,
+    sdk_plugin_host: Option<Arc<dyn NativeOhSdkPluginHost>>,
+    sdk_plugin_session_scope: u64,
 }
 
 impl NativeTypeSession {
@@ -500,22 +583,17 @@ impl NativeTypeSession {
         executable: &Path,
         project_root: &Path,
         sources: BTreeMap<PathBuf, Arc<str>>,
+        sdk_plugin_host: Option<Arc<dyn NativeOhSdkPluginHost>>,
     ) -> Result<Self, NativeCheckError> {
-        let node_executable = std::env::current_exe()
-            .ok()
-            .filter(|path| {
-                path.file_stem()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.eq_ignore_ascii_case("node"))
-            })
-            .unwrap_or_else(|| PathBuf::from("node"));
-        let mut child = Command::new(executable)
+        let mut command = Command::new(executable);
+        command
             .args(["--api", "--async", "--cwd"])
             .arg(project_root)
-            .args(["--callbacks", "readFile,fileExists"])
-            .arg("--runExternalCode")
-            .arg("--nodeExecutable")
-            .arg(node_executable)
+            .args(["--callbacks", "readFile,fileExists"]);
+        if sdk_plugin_host.is_some() {
+            command.arg("--sdkPluginCallbacks");
+        }
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -558,6 +636,12 @@ impl NativeTypeSession {
             next_id: 0,
             sources,
             deleted: BTreeSet::new(),
+            sdk_plugin_host,
+            // The Go API session counter is process-local, while one JS plugin
+            // host is shared by every module in a build. Give each child
+            // process a host-global scope so interned source/config IDs cannot
+            // collide when modules are checked concurrently.
+            sdk_plugin_session_scope: SDK_PLUGIN_SESSION_SCOPE.fetch_add(1, Ordering::Relaxed),
         };
         let _: Value = session.request("initialize", json!({}))?;
         Ok(session)
@@ -693,14 +777,16 @@ impl NativeTypeSession {
     pub fn arkts_transform_type_facts(
         &mut self,
         program: &NativeProgram,
-        files: &[PathBuf],
+        queries: &[NativeArktsTransformTypeQuery],
+        sdk_api_use_files: &[PathBuf],
     ) -> Result<Vec<NativeArktsTransformTypeFacts>, NativeCheckError> {
         self.request(
             "getArkTSTransformTypeFacts",
             json!({
                 "snapshot": program.snapshot,
                 "project": program.project,
-                "files": files,
+                "queries": queries,
+                "sdkApiUseFiles": sdk_api_use_files,
             }),
         )
     }
@@ -764,13 +850,15 @@ impl NativeTypeSession {
     ) -> Result<T, NativeCheckError> {
         self.next_id += 1;
         let id = self.next_id;
-        let deadline = Instant::now() + Duration::from_secs(120);
-        self.write(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))?;
+        let request_started = Instant::now();
+        let mut sdk_plugin_callbacks = 0_u64;
+        let mut sdk_plugin_callback_time = Duration::ZERO;
+        self.write(
+            &json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }),
+            &format!("{method} request"),
+        )?;
         loop {
-            let response = match self
-                .messages
-                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-            {
+            let response = match self.messages.recv() {
                 Ok(Ok(response)) => response,
                 failure => {
                     let _ = self.child.kill();
@@ -787,26 +875,69 @@ impl NativeTypeSession {
                 }
             };
             if let Some(method) = response.get("method").and_then(Value::as_str) {
-                let path = response
-                    .get("params")
-                    .and_then(Value::as_str)
-                    .map(Path::new);
-                let source = path.and_then(|path| self.sources.get(path));
-                let deleted = path.is_some_and(|path| self.deleted.contains(path));
-                // callbackfs.go: null delegates to the compiler's bundled/disk FS;
-                // {content: null} instead means a definitive missing file.
                 let result = match method {
-                    "readFile" if deleted => json!({"content": null}),
-                    "fileExists" if deleted => Value::Bool(false),
-                    "readFile" => source.map_or(Value::Null, |text| json!({"content": &**text})),
-                    "fileExists" => source.map_or(Value::Null, |_| Value::Bool(true)),
+                    "ohSdkPluginBatch" => {
+                        let callback_started = Instant::now();
+                        let requests = response.get("params").cloned().ok_or_else(|| {
+                            NativeCheckError::Protocol(
+                                "OH SDK plugin callback has no params".into(),
+                            )
+                        })?;
+                        let mut requests: Vec<NativeOhSdkPluginRequest> =
+                            serde_json::from_value(requests).map_err(|error| {
+                                NativeCheckError::Protocol(format!(
+                                    "{method}: invalid OH SDK plugin callback batch: {error}"
+                                ))
+                            })?;
+                        for request in &mut requests {
+                            request.session_id = self.sdk_plugin_session_scope;
+                        }
+                        let callback_count = requests.len() as u64;
+                        let host = self.sdk_plugin_host.as_ref().ok_or_else(|| {
+                            NativeCheckError::Protocol(
+                                "OH SDK plugin callback has no JavaScript host".into(),
+                            )
+                        })?;
+                        let response = serde_json::to_value(host.invoke_batch(requests)?).map_err(
+                            |error| {
+                                NativeCheckError::Protocol(format!(
+                                    "{method}: cannot serialize OH SDK plugin callback batch response: {error}"
+                                ))
+                            },
+                        )?;
+                        sdk_plugin_callbacks += callback_count;
+                        sdk_plugin_callback_time += callback_started.elapsed();
+                        response
+                    }
+                    "readFile" | "fileExists" => {
+                        let path = response
+                            .get("params")
+                            .and_then(Value::as_str)
+                            .map(Path::new);
+                        let source = path.and_then(|path| self.sources.get(path));
+                        let deleted = path.is_some_and(|path| self.deleted.contains(path));
+                        // callbackfs.go: null delegates to the compiler's bundled/disk FS;
+                        // {content: null} instead means a definitive missing file.
+                        match method {
+                            "readFile" if deleted => json!({"content": null}),
+                            "fileExists" if deleted => Value::Bool(false),
+                            "readFile" => {
+                                source.map_or(Value::Null, |text| json!({"content": &**text}))
+                            }
+                            "fileExists" => source.map_or(Value::Null, |_| Value::Bool(true)),
+                            _ => unreachable!(),
+                        }
+                    }
                     _ => {
                         return Err(NativeCheckError::Protocol(format!(
                             "unexpected callback {method}"
                         )));
                     }
                 };
-                self.write(&json!({"jsonrpc": "2.0", "id": response["id"], "result": result}))?;
+                self.write(
+                    &json!({"jsonrpc": "2.0", "id": response["id"], "result": result}),
+                    &format!("{method} callback response"),
+                )?;
                 continue;
             }
             if response.get("id").and_then(Value::as_u64) != Some(id) {
@@ -818,12 +949,27 @@ impl NativeTypeSession {
             let result = response
                 .get("result")
                 .ok_or_else(|| NativeCheckError::Protocol("missing response result".into()))?;
-            return Ok(serde_json::from_value(result.clone())?);
+            tracing::info!(
+                request = method,
+                elapsed_ms = request_started.elapsed().as_millis(),
+                sdk_plugin_callbacks,
+                sdk_plugin_callback_ms = sdk_plugin_callback_time.as_millis(),
+                "native TypeScript request completed"
+            );
+            return serde_json::from_value(result.clone()).map_err(|error| {
+                NativeCheckError::Protocol(format!(
+                    "{method}: invalid compiler response payload: {error}"
+                ))
+            });
         }
     }
 
-    fn write(&mut self, message: &Value) -> Result<(), NativeCheckError> {
-        let bytes = serde_json::to_vec(message)?;
+    fn write(&mut self, message: &Value, phase: &str) -> Result<(), NativeCheckError> {
+        let bytes = serde_json::to_vec(message).map_err(|error| {
+            NativeCheckError::Protocol(format!(
+                "{phase}: cannot serialize protocol message: {error}"
+            ))
+        })?;
         let input = self
             .input
             .as_mut()

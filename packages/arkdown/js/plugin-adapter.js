@@ -8,7 +8,9 @@ const v8 = require('node:v8')
 const nativeBinding = require('../index.js')
 
 const ESMODULE_DORMANT_HOOKS = Object.freeze(
-  'renderStart banner footer intro outro renderDynamicImport resolveFileUrl resolveImportMeta renderChunk augmentChunkHash renderError generateBundle writeBundle closeBundle closeWatcher'.split(' '),
+  'renderStart banner footer intro outro renderDynamicImport resolveFileUrl resolveImportMeta renderChunk augmentChunkHash renderError generateBundle writeBundle closeBundle closeWatcher'.split(
+    ' ',
+  ),
 )
 const PLUGIN_HOOKS = Object.freeze(
   'beforeBuild buildStart afterBuildStart resolveId load transform moduleParsed resolveDynamicImport watchChange beforeBuildEnd buildEnd afterBuildEnd bundleEnd cleanUp shouldInvalidCache'
@@ -32,9 +34,7 @@ const RESULT_FIELDS = Object.freeze({
 })
 const TYPESCRIPT_EXTENSIONS = new Set(['.ts', '.mts', '.cts'])
 const JAVASCRIPT_EXTENSIONS = new Set(['.js', '.mjs', '.cjs'])
-const UNSUPPORTED_ROLLUP_HOOKS = new Set(
-  'options outputOptions shouldTransformCachedModule'.split(' '),
-)
+const UNSUPPORTED_ROLLUP_HOOKS = new Set('options outputOptions shouldTransformCachedModule'.split(' '))
 const REMOVED_HVIGOR_CONFIG_KEYS = new Set(
   'tasks task executionMode prop configOverrides hvigorProperties extParams sync typeCheck enableBuildScriptTypeCheck parallel daemon'.split(
     ' ',
@@ -90,6 +90,228 @@ function requireDefaultExport(value, file) {
   })
 }
 
+// main.js::collectExternalApiCheckPlugin/collectExternalApiChecker: TSGO owns
+// diagnostic decisions; this build-scoped host preserves only the CommonJS ABI.
+class SdkPluginHost {
+  constructor() {
+    this.classInstances = new Map()
+    this.typeScriptModules = new Map()
+    this.sourceSnapshots = new Map()
+    this.sourceFiles = new WeakMap()
+    this.projectConfigs = new Map()
+  }
+
+  loadTypeScript(etsLoaderPath) {
+    if (!etsLoaderPath) throw new Error('SDK checker project config has no etsLoaderPath')
+    const key = etsLoaderPath
+    if (this.typeScriptModules.has(key)) return this.typeScriptModules.get(key)
+    const typescript = require(path.join(etsLoaderPath, 'node_modules', 'typescript'))
+    this.typeScriptModules.set(key, typescript)
+    return typescript
+  }
+
+  materializeSnapshot(sessionId, snapshot) {
+    const key = `${sessionId}:${snapshot.sourceId}`
+    if (snapshot.source !== undefined) {
+      this.sourceSnapshots.set(key, { fileName: snapshot.fileName, source: snapshot.source })
+      return snapshot
+    }
+    const cached = this.sourceSnapshots.get(key)
+    if (!cached || cached.fileName !== snapshot.fileName) {
+      throw new Error(`SDK checker source ${key} is not registered`)
+    }
+    return { ...snapshot, source: cached.source }
+  }
+
+  materializeProjectConfig(sessionId, payload) {
+    const key = `${sessionId}:${payload.projectConfigId}`
+    if (payload.projectConfig !== undefined) {
+      const projectConfig = { ...payload.projectConfig }
+      projectConfig.syscapIntersectionSet = new Set(
+        projectConfig.syscapIntersectionSet || projectConfig.syscapIntersection || [],
+      )
+      projectConfig.syscapUnionSet = new Set(projectConfig.syscapUnionSet || projectConfig.syscapUnion || [])
+      this.projectConfigs.set(key, projectConfig)
+      return projectConfig
+    }
+    const projectConfig = this.projectConfigs.get(key)
+    if (!projectConfig) throw new Error(`SDK checker project config ${key} is not registered`)
+    return projectConfig
+  }
+
+  locateNode(typescript, sessionId, snapshot) {
+    snapshot = this.materializeSnapshot(sessionId, snapshot)
+    const scriptKind =
+      snapshot.fileName.endsWith('.ets') && typescript.ScriptKind.ETS !== undefined
+        ? typescript.ScriptKind.ETS
+        : typescript.ScriptKind.TS
+    let files = this.sourceFiles.get(typescript)
+    if (!files) {
+      files = new Map()
+      this.sourceFiles.set(typescript, files)
+    }
+    let source = files.get(snapshot.fileName)
+    if (!source || source.text !== snapshot.source || source.scriptKind !== scriptKind) {
+      source = {
+        text: snapshot.source,
+        scriptKind,
+        sourceFile: typescript.createSourceFile(
+          snapshot.fileName,
+          snapshot.source,
+          typescript.ScriptTarget.Latest,
+          true,
+          scriptKind,
+        ),
+        nodes: new Map(),
+        children: new WeakMap(),
+      }
+      files.set(snapshot.fileName, source)
+    }
+    const nodeKey = `${snapshot.pos}:${snapshot.end}`
+    const cached = source.nodes.get(nodeKey)
+    if (cached?.text === snapshot.text) return cached.node
+
+    const sourceFile = source.sourceFile
+    const childNodes = (node) => {
+      let children = source.children.get(node)
+      if (children) return children
+      children = []
+      typescript.forEachChild(node, (child) => {
+        children.push(child)
+      })
+      children.sort((left, right) => left.pos - right.pos || left.end - right.end)
+      source.children.set(node, children)
+      return children
+    }
+    const locate = (node) => {
+      if (node.pos > snapshot.pos || node.end < snapshot.end) return undefined
+      let exact
+      if (
+        (node.pos === snapshot.pos || node.getStart(sourceFile) === snapshot.pos) &&
+        node.end === snapshot.end &&
+        node.getText(sourceFile) === snapshot.text
+      ) {
+        exact = node
+      }
+
+      // SDK SyscapChecker receives the original TypeScript nodes. The N-API
+      // boundary recreates those nodes from the same source and span, so walk
+      // only the containing AST branch. A full forEachChild scan per API use
+      // turns large declaration files into quadratic work.
+      const children = childNodes(node)
+      let low = 0
+      let high = children.length
+      while (low < high) {
+        const middle = (low + high) >>> 1
+        if (children[middle].pos <= snapshot.pos) low = middle + 1
+        else high = middle
+      }
+      for (let index = low - 1; index >= 0; index -= 1) {
+        const child = children[index]
+        if (child.end < snapshot.end) continue
+        const nested = locate(child)
+        if (nested) return nested
+      }
+      return exact
+    }
+    const exact = locate(sourceFile)
+    if (exact) source.nodes.set(nodeKey, { text: snapshot.text, node: exact })
+    return exact
+  }
+
+  classChecker(request) {
+    const key = `${request.path}\0${request.className}`
+    if (this.classInstances.has(key)) return this.classInstances.get(key)
+    const Checker = require(request.path)[request.className]
+    if (typeof Checker !== 'function') return undefined
+    const checker = new Checker()
+    this.classInstances.set(key, checker)
+    return checker
+  }
+
+  dispatch(request) {
+    if (request.operation === 'prepareClass' || request.operation === 'syscap') {
+      let checker
+      try {
+        checker = this.classChecker(request)
+      } catch (error) {
+        return { found: false, phase: 'load', error: String(error?.stack || error) }
+      }
+      if (!checker) return { found: false }
+      if (request.operation === 'prepareClass') return { found: true }
+      try {
+        if (typeof checker.check !== 'function') return { found: true, checkResult: false, checkMessage: '' }
+        const payload = request.args[0]
+        const projectConfig = this.materializeProjectConfig(request.sessionId, payload)
+        const typescript = this.loadTypeScript(projectConfig.etsLoaderPath)
+        const node = this.locateNode(typescript, request.sessionId, payload.node)
+        const declaration = this.locateNode(typescript, request.sessionId, payload.declaration)
+        if (!node || !declaration) {
+          const missing = !node ? payload.node : payload.declaration
+          throw new Error(
+            `Unable to recreate SDK checker source node ${missing.fileName}:${missing.pos}-${missing.end} ${JSON.stringify(missing.text)}`,
+          )
+        }
+        const value = checker.check(node, declaration, projectConfig)
+        return {
+          found: true,
+          checkResult: Boolean(value?.checkResult),
+          checkMessage: value?.checkMessage == null ? '' : String(value.checkMessage),
+        }
+      } catch (error) {
+        return { found: true, phase: 'invoke', error: String(error?.stack || error) }
+      }
+    }
+
+    let callback
+    try {
+      callback = require(request.path)[request.functionName]
+    } catch (error) {
+      return { found: false, phase: 'load', error: String(error?.stack || error) }
+    }
+    if (typeof callback !== 'function') return { found: false }
+    try {
+      if (request.operation === 'regex') {
+        const regex = callback()
+        if (!(regex instanceof RegExp)) return { found: true, matched: false }
+        regex.lastIndex = 0
+        const match = regex.exec(request.args[0])
+        return {
+          found: true,
+          matched: match !== null,
+          groups: match === null ? [] : Array.from(match, (value) => (value === undefined ? '' : String(value))),
+        }
+      }
+      const value = callback(...request.args)
+      if (request.operation === 'distribution') {
+        return {
+          found: true,
+          valid: Boolean(value?.valid),
+          version: value?.version == null ? '' : String(value.version),
+          message: value?.message == null ? '' : String(value.message),
+        }
+      }
+      return {
+        found: true,
+        result: Boolean(value?.result),
+        message: value?.message == null ? '' : String(value.message),
+      }
+    } catch (error) {
+      return { found: true, phase: 'invoke', error: String(error?.stack || error) }
+    }
+  }
+}
+
+function createSdkPluginHost() {
+  const host = new SdkPluginHost()
+  return (request) => host.dispatch(request)
+}
+
+function createSdkPluginDispatch() {
+  const invoke = createSdkPluginHost()
+  return (request) => JSON.stringify(JSON.parse(request).map(invoke))
+}
+
 const asArray = (value) => (value === undefined || value === null ? [] : Array.isArray(value) ? value : [value])
 
 function validateHookSurface(plugin, hookNames, pluginFile, compilePlugin = false) {
@@ -118,7 +340,13 @@ function validateHookSurface(plugin, hookNames, pluginFile, compilePlugin = fals
         { hookName, pluginFile },
       )
     }
-    if (!compilePlugin && typeof hook === 'object' && hook.order !== undefined && hook.order !== 'pre' && hook.order !== 'post') {
+    if (
+      !compilePlugin &&
+      typeof hook === 'object' &&
+      hook.order !== undefined &&
+      hook.order !== 'pre' &&
+      hook.order !== 'post'
+    ) {
       throw arkdownError(
         'ARKDOWN_PLUGIN_HOOK_ORDER_INVALID',
         `Plugin "${String(plugin.name || '<anonymous>')}" hook "${hookName}" order must be "pre" or "post"`,
@@ -141,8 +369,7 @@ function reviveOxcAst(envelope) {
     } else if (node.regex) {
       try {
         node.value = new RegExp(node.regex.pattern, node.regex.flags)
-      } catch {
-      }
+      } catch {}
     }
   }
   return program
@@ -387,13 +614,7 @@ function hydrateHvigorShare(rawShare, binding) {
     if (existing) return existing
   }
   const handle = share.__arkdownNativeShare
-  const nativeGetHash = nativeShareMethod(
-    share,
-    binding,
-    handle,
-    'getHashByFilePath',
-    'hvigorShareGetHashByFilePath',
-  )
+  const nativeGetHash = nativeShareMethod(share, binding, handle, 'getHashByFilePath', 'hvigorShareGetHashByFilePath')
   const nativeGetFileInfo = nativeShareMethod(
     share,
     binding,
@@ -447,13 +668,7 @@ function hydrateHvigorShare(rawShare, binding) {
     getHvigorConsoleLogger: (prefix) => createHvigorLogger(String(prefix), state.errorFileIds),
     getHookEventFactory(pluginName, hookName) {
       if (projectConfig.perf !== 1 && projectConfig.perf !== 3) return undefined
-      return createHookEventFactory(
-        nativeRecordHookEvent,
-        state,
-        buildInstanceId,
-        pluginName,
-        hookName,
-      )
+      return createHookEventFactory(nativeRecordHookEvent, state, buildInstanceId, pluginName, hookName)
     },
     throwArkTsCompilerError(value) {
       const error = value instanceof Error ? value : new Error(pluginLogMessage(value))
@@ -464,9 +679,7 @@ function hydrateHvigorShare(rawShare, binding) {
       if (id) state.errorFileIds.add(String(id))
     },
     depInfo:
-      share.depInfo && typeof share.depInfo === 'object'
-        ? share.depInfo
-        : { enableIncre: false, changedDeps: [] },
+      share.depInfo && typeof share.depInfo === 'object' ? share.depInfo : { enableIncre: false, changedDeps: [] },
   })
   if (buildInstanceId !== undefined && buildInstanceId !== null) {
     hvigorShareByBuildInstance.set(String(buildInstanceId), share)
@@ -492,9 +705,10 @@ function moduleInfoWithOptions(share, info) {
   return {
     ...info,
     meta: options?.meta || info.meta || {},
-    moduleSideEffects: options && Object.hasOwn(options, 'moduleSideEffects')
-      ? options.moduleSideEffects
-      : info.moduleSideEffects ?? null,
+    moduleSideEffects:
+      options && Object.hasOwn(options, 'moduleSideEffects')
+        ? options.moduleSideEffects
+        : (info.moduleSideEffects ?? null),
     ...(options && Object.hasOwn(options, 'description') ? { description: options.description } : {}),
     ...(options && Object.hasOwn(options, 'packageJsonPath') ? { packageJsonPath: options.packageJsonPath } : {}),
   }
@@ -514,9 +728,7 @@ function pluginContext(request, share, binding, cache, asyncTracker, pluginName,
     else process[level === 'debug' ? 'stderr' : 'stdout'].write(`${message}\n`)
   }
   const getModuleIds = () =>
-    context?.getModuleIds().values() ??
-    state?.moduleInfos.keys() ??
-    (moduleInfo?.id ? [moduleInfo.id] : []).values()
+    context?.getModuleIds().values() ?? state?.moduleInfos.keys() ?? (moduleInfo?.id ? [moduleInfo.id] : []).values()
   const getModuleInfo = (id) =>
     moduleInfoWithOptions(
       share,
@@ -726,11 +938,7 @@ function normalizePlugin(plugin, binding, options = {}) {
             hvigorShareByBuildInstance.delete(String(buildInstanceId))
           }
         }
-        if (
-          compilePlugin &&
-          hookName === 'buildEnd' &&
-          (request.buildEndContext?.errors?.length ?? 0) > 0
-        ) {
+        if (compilePlugin && hookName === 'buildEnd' && (request.buildEndContext?.errors?.length ?? 0) > 0) {
           const buildInstanceId = share.__arkdownBuildInstanceId
           if (buildInstanceId !== undefined && buildInstanceId !== null) {
             hvigorShareByBuildInstance.delete(String(buildInstanceId))
@@ -745,9 +953,10 @@ function normalizePlugin(plugin, binding, options = {}) {
       if (compilePlugin && hookName === 'shouldInvalidCache' && typeof value !== 'boolean') {
         return { shouldInvalidCache: false }
       }
-      const id = (hookName === 'resolveId' || hookName === 'resolveDynamicImport') && typeof value === 'object'
-        ? value.id
-        : request.id
+      const id =
+        (hookName === 'resolveId' || hookName === 'resolveDynamicImport') && typeof value === 'object'
+          ? value.id
+          : request.id
       updateModuleOptions(share, id, value)
       if (typeof value !== 'object' || !Object.hasOwn(value, 'meta')) return { [field]: value }
       const nativeValue = { ...value }
@@ -791,10 +1000,12 @@ function normalizePluginList(value, binding = nativeBinding) {
       throw arkdownError('ARKDOWN_PLUGIN_EXPORT_INVALID', `Expected a plugin object, got ${typeof plugin}`)
     }
     validateHookSurface(plugin, PLUGIN_HOOKS)
-    if (!PLUGIN_HOOKS.some((name) => {
-      const hook = plugin[name]
-      return typeof hook === 'function' || (hook && typeof hook === 'object' && typeof hook.handler === 'function')
-    })) {
+    if (
+      !PLUGIN_HOOKS.some((name) => {
+        const hook = plugin[name]
+        return typeof hook === 'function' || (hook && typeof hook === 'object' && typeof hook.handler === 'function')
+      })
+    ) {
       throw arkdownError(
         'ARKDOWN_PLUGIN_EXPORT_INVALID',
         `Plugin "${String(plugin.name || '<anonymous>')}" does not declare a supported hook`,
@@ -838,10 +1049,14 @@ class PluginModuleLoader {
       const pluginPath = path.isAbsolute(candidate) ? candidate : path.resolve(baseDir, candidate)
       return require.resolve(pluginPath)
     } catch (cause) {
-      throw arkdownError('ARKDOWN_PLUGIN_MODULE_NOT_FOUND', `Cannot resolve plugin module "${candidate}" from ${baseDir}`, {
-        cause,
-        pluginPath: candidate,
-      })
+      throw arkdownError(
+        'ARKDOWN_PLUGIN_MODULE_NOT_FOUND',
+        `Cannot resolve plugin module "${candidate}" from ${baseDir}`,
+        {
+          cause,
+          pluginPath: candidate,
+        },
+      )
     }
   }
 
@@ -962,8 +1177,12 @@ class PluginAdapter {
 function createBuild(nativeBuild = nativeBinding.build, binding = nativeBinding) {
   return async (config = {}, plugins) => {
     const prepared = await new PluginAdapter(binding).prepare(config, plugins)
-    return nativeBuild(prepared.config, prepared.plugins)
+    return nativeBuild(prepared.config, prepared.plugins, createSdkPluginDispatch())
   }
+}
+
+function createCheck(nativeCheck = nativeBinding.check) {
+  return (config = {}) => nativeCheck(config, createSdkPluginDispatch())
 }
 
 module.exports = {
@@ -973,6 +1192,9 @@ module.exports = {
   PluginAdapter,
   PluginModuleLoader,
   createBuild,
+  createCheck,
+  createSdkPluginDispatch,
+  createSdkPluginHost,
   normalizePlugin,
   normalizePluginList,
   parsePluginAst,

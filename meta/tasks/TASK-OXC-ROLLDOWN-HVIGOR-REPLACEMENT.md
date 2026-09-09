@@ -107,12 +107,17 @@ files、共享状态和逐插件 cache 必须继续通过 typed bridge 持久化
 诊断），Program 固定 noEmit；代码变换、JS/声明生成及运行时 annotation
 metadata 由 Rust/OXC/Rolldown 实现，按需消费类型查询结果。
 
-`arkdown-ets-checker` 已接入 TypeScript `6126025532` 原生 API。Rust 管理
+`arkdown-ets-checker` 已接入 TypeScript
+`94e2465a5f92c50eb86a000eb1c4fb95adac3fd0` 原生 API。Rust 管理
 工程输入、源码 snapshot、进程和 OXC consumer，Go 负责 parser/binder/type
-checker、OH resolver、SDK callback 选择和独立 ArkTS 1.1 linter；不启动完整
-SDK Node checker，不保留旧 isolated-declarations/Unknown checker 兜底。SDK
-配置 CommonJS function/class callback 时只启动会话级精简 Node worker 来保持公开
-JavaScript ABI，工程发现、类型推断、比较、诊断和 fallback 仍由 Go/Rust owner。
+checker、OH resolver、SDK callback 选择和独立 ArkTS 1.1 linter；TSGO 不启动
+Node、不嵌入 JS，也不保留旧 isolated-declarations/Unknown checker 兜底。SDK
+配置 CommonJS function/class callback 时，TSGO 经双向 API 请求、Rust typed route
+调用 JS CLI 进程内的 build-scoped 插件宿主；工程发现、类型推断、比较、诊断和
+fallback 仍由 Go/Rust owner。
+双向 SDK callback 允许合并 transport frame，但禁止省略、去重或缓存源码定义的插件
+调用；每个 TSGO 子进程必须映射到独立的 JS host scope，避免多模块并发复用进程本地
+session id。
 class callback 接收与 compile-plugin 完全相同的 Rust 构建 `projectConfig` 快照；
 ArkTS linter strict checker clone 与 normal checker 共享同一 SDK callback executor；
 ESMODULE checker 的 TypeScript module kind 按源码设置为 ES2020；独立的 source
@@ -129,9 +134,28 @@ source graph、声明诊断和源码定义的诊断筛选已经贯通。三平�
 checker 能力差异。源码合同和验证说明见
 [`crates/arkdown-ets-checker/DESIGN.md`](../../crates/arkdown-ets-checker/DESIGN.md)。
 
+当前 clean TSGO revision `94e2465a5f92c50eb86a000eb1c4fb95adac3fd0`
+已经生成 macOS arm64、Linux x64 GNU 和 Windows x64 MSVC 发行件并通过 archive
+hash；macOS 平台包 dry-run 验证 `tsc` 和元数据会实际进入 npm tarball，且 JS CLI
+在清除开发覆盖环境变量后能从本地平台包完成 `check`。Linux/Windows 只完成交叉
+构建与元数据校验，不把它们记录为目标平台运行验证。
+
+compiler roots 与 ets2bundle 保持同一所有权：Rust 从 loader 的
+`entryObj + ohExports` 收集 roots，TSGO 只展开和检查其可达 source graph；不得恢复
+全模块目录扫描。TSGO 的 OH 4.9 generic inference、common-supertype、signature
+relation 与 subtype-union allocation-order 语义已经补齐，Rust/OXC 只消费查询事实。
+
 Arkdown 不调用 TSGO emit/transpile/printer/codegen；checker source graph 不替代
 Rust resolver/Rolldown graph，返回的 annotation/component 信息也只能作为
 Rust/OXC lowering 的 immutable semantic facts。JS 不参与上述代码处理。
+
+ESMODULE 的 `processImportModule` 不执行 legacy `validateModuleName`，OXC checker
+不得为 resolved ESMODULE import 添加内置组件同名错误。UI transform 诊断按
+`emitLogInfo` 保留原始 `LogType`；仅独立 ArkTS linter 和 TypeScript checker 使用
+各自源码定义的 `oh_modules` 筛选规则，不能把该规则扩大到 OXC transform 诊断。
+ObjectLink 严格消费 TSGO resolved type identity，并按
+`findNonNullType/checkObjectLinkType/checkTypes` 处理 nullable union、basic、
+ObservedV2 和 Function。
 
 ### ArkGuard
 

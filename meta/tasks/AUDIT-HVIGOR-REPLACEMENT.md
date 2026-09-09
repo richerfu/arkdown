@@ -1,6 +1,6 @@
 # Hvigor 替换全链路审计
 
-审计日期：2026-09-08。Arkdown 起始基线：
+审计日期：2026-09-09。Arkdown 起始基线：
 `9915ed8971dfb6d60fb0072792084dfce492963c`。
 
 ## 证据和判定规则
@@ -22,7 +22,7 @@ checker 或插件结论。
 | 唯一入口 | Hvigor wrapper 的 argv/stdio/exit 生命周期 | `packages/arkdown/js/arkdown-cli.js` + typed N-API | 已对齐目标架构；Rust 无 CLI |
 | 项目/模块/target 计划 | OHOS task 组装 loader、resource、compile、package、sign DAG | `arkdown-build` 与领域 crate | Rust 直接拥有，不保留 task facade |
 | 依赖解析 | loader config、OH resolver、package graph | `arkdown-session`、`arkdown-resolver`、TSGO OH resolver | 已接入已物化依赖；构建不隐式安装 |
-| ArkTS 1.1 checker | OH TypeScript parser/binder/checker/linter；ets2bundle `ets_checker.ts` | packaged TSGO `6126025532` + `ProjectSemanticChecker` | 源码定义能力差异为 0；固定 `noEmit`，ESMODULE 使用 ES2020 module，Stage/FA 使用源码的 `moduleJson` 分界，normal/strict checker 共享 SDK callback executor，SDK class callback 接收同一份完整 compile `projectConfig`，旧 Rust subset checker 已删除 |
+| ArkTS 1.1 checker | OH TypeScript parser/binder/checker/linter；ets2bundle `ets_checker.ts` | packaged TSGO + `ProjectSemanticChecker` | 源码定义能力差异为 0；固定 `noEmit`，ESMODULE 使用 ES2020 module，Stage/FA 使用源码的 `moduleJson` 分界，normal/strict checker 共享 callback executor；TSGO 经双向 API 回调 JS CLI 进程内的 SDK plugin host，自身不启动 Node；SDK class callback 接收同一份完整 compile `projectConfig`，旧 Rust subset checker 已删除 |
 | checker-driven transform | `ohApi.ts`、component transforms、`checkCrossplatformValue` | TSGO batched facts + OXC consumers | annotation、builder、enum、SDK dependency 已接通；Rust 不重做类型推断 |
 | compile-plugin | arkts-compose `getPlugins/doWrapper/getCompilePluginContext` | JS function ABI + N-API + Rolldown adapter | hook、顺序、share、cache、watch、TS/JS module loading 已接通 |
 | plugin `this.parse` | Rollup 4.23.0 `ParseAst` | OXC ESTree bridge | 已按源码只消费 `allowReturnOutsideFunction`；未知 Acorn 字段忽略；错误为 `RollupError/PARSE_ERROR` |
@@ -34,11 +34,17 @@ checker 或插件结论。
 TSGO 完成矩阵、发布方式和回归见
 [ArkTS 1.1 原生 TypeScript 对齐合同](ARKTS11-NATIVE-TYPESCRIPT.md)。
 
+本轮发行门禁已通过：N-API release 构建、JS 28/28、Rust workspace test、
+Clippy `-D warnings`、rustfmt 和 diff check 均成功；不设置
+`ARKDOWN_TYPESCRIPT_PATH` 的 JS CLI `check` 能从本地平台包发现 TSGO，npm
+platform package dry-run 同时包含原生绑定、`tsc`、clean revision 构建清单、
+许可证与 NOTICE。Linux/Windows 仅声明交叉构建和 hash 验证，不声明对应平台运行。
+
 ## 已删除的多余实现
 
 - Rust isolated-declarations surface/IR/link/infer/relate/print checker；
 - Rust/OXC SDK declaration symbol、overload、alias、factory-return 伪推断；
-- SDK Node checker fallback、双 checker 路径和 annotation 文本改写；
+- SDK Node checker fallback、TSGO 内嵌 Node worker、双 checker 路径和 annotation 文本改写；
 - Acorn 旧版 `sourceType/ranges/locations/onComment/onToken/program/ecmaVersion`
   等 `PluginContext.parse` 兼容层。当前 Rollup 4.23 `ParseAst` 不消费这些字段；
 - 失去生产 caller 的 plugin crate、facade、wrapper 和旧文档状态。
@@ -47,7 +53,7 @@ TSGO 完成矩阵、发布方式和回归见
 
 ### TSGO：源码定义能力差异为 0
 
-当前 TSGO 提交 `6126025532b10e68ee2f710ef288c34ecd034669` 已覆盖 OH parser、
+当前适配后的 TSGO 提交 `94e2465a5f92c50eb86a000eb1c4fb95adac3fd0` 已覆盖 OH parser、
 binder、checker、ArkTS 1.1 linter、OH resolver、SDK function/class callback、
 诊断筛选、retention 与 Rust/OXC 所需类型消费者。OH linter 当前源码语料共
 1004 个 source case，1004/1004 执行且无跳过；两份只承载 JSON 数据、没有
@@ -61,6 +67,23 @@ executor；native boundary 与 JS/N-API 真实构建都只保留 SDK 插件判�
 
 TSGO 只负责类型检查、推断、诊断和只读 semantic facts，不负责 JS/声明生成或
 代码改写。watch 尚未复用长驻 Program 是性能差异，不是单轮能力差异。
+
+checker roots 已按 ets2bundle `loadEntryObj/getEntryObj/rootFileNamesCollect` 改为
+loader 的 `entryObj + ohExports`，由 TSGO 扩展为可达 source graph；递归扫描模块
+目录并把未被入口引用的文件送入 checker 的旧路径已经删除。TSGO 同时补齐 OH 4.9
+generic candidate/constraint、common-supertype、signature relation 和 union subtype
+reduction 顺序，真实业务 `Map<string, ICanvasDraw<any>>` 构造不再被错误收窄。
+含计算成员的 numeric enum 同样按 OH 4.9 建模，不会触发新版 enum-union 的错误
+穷举。ObjectLink 的 nullable/basic/ObservedV2/Function 身份由 TSGO 返回，Rust
+不再从类型语法猜测。
+
+SDK function/class 回调现在由 TSGO checker workers 聚合成有序 transport batch，
+Rust typed boundary 转发给 JS runtime；batch 不去重、不缓存结果，每个源码调用仍按序
+执行。Source/projectConfig 只做 wire interning，并由 Rust 为每个 TSGO 进程分配唯一
+host scope，避免多模块并行构建中进程本地 session id 重复。真实 12333-source 工程
+在不可变 SDK/project 文件分类缓存后以 214.21 秒完成，旧路径超过 735 秒仍未完成；
+剩余耗时采样集中于正常类型关系、表达式和签名检查，不再是路径归一化或 JS transport
+阻塞。
 
 ### 当前源码未定义：Hvigor task/system plugin ABI
 

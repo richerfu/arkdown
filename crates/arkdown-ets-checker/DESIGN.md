@@ -4,12 +4,13 @@
 
 ArkTS 1.1 的解析、绑定、类型推断、语义诊断、OH resolver、SDK JSDoc 回调和
 独立 linter 由适配后的原生 TSGO 提供。当前发行基线是 TypeScript 提交
-`6126025532b10e68ee2f710ef288c34ecd034669`。Arkdown 通过
+`94e2465a5f92c50eb86a000eb1c4fb95adac3fd0`。Arkdown 通过
 `--api --async` JSON-RPC 启动它，不调用 tsgolint，也不解析 `tsc` 控制台文字。
 只有 SDK 明确配置 CommonJS `apiCheckPlugin`、`annotationCheckPlugin` 或
-`apiCheckPlugins` 时，TSGO 才在同一 API session 内启动精简 Node worker，保持
-源码的 `require()`、RegExp、class 实例和模块缓存 ABI；Node 不承担 checker、
-resolver、工程发现或构建编排。
+`apiCheckPlugins` 时，TSGO 才通过同一双向 JSON-RPC session 发出类型检查回调。
+Rust 只路由强类型请求；npm 的 JS 入口进程负责 `require()`、RegExp、class 实例
+和模块缓存 ABI。TSGO 不启动 Node、不嵌入 JS 源码，JS 也不承担 checker、resolver、
+工程发现、代码转换或构建编排。
 
 TSGO 只做类型检查和推断。Program 固定 `noEmit`，该字段不向调用者开放；
 JavaScript、声明、annotation metadata 和 ArkUI lowering 仍由
@@ -55,22 +56,37 @@ module compile-plugin 构造的完整快照，不能在 checker 层重建较小�
 ## 所有权和数据流
 
 `NativeTypeSession` 拥有子进程、管道、请求编号、Arc 源快照、响应线程和有界
-stderr 尾部。请求有超时；Drop 关闭 stdin、终止并回收子进程和线程。Go 拥有
+stderr 尾部。与 ets2bundle 的 checker await 一致，单次类型检查不施加人为时限；
+EOF/协议错误会终止请求，Drop 关闭 stdin、终止并回收子进程和线程。Go 拥有
 AST、symbol、type 和 Program；Rust 不持有 Go 指针，也不跨 IPC 复制完整 AST。
+TSGO 发出的 `ohSdkPluginBatch` 请求由 session 在等待原请求期间同步转交 N-API
+`ThreadsafeFunction`，响应沿原 JSON-RPC 连接返回；SDK 同步插件调用同样不增加
+非源码定义的超时，没有第二个 worker 或协议。
+同一 TSGO session 内的源码快照和 `projectConfig` 使用 dense ID，只在首次回调传输
+完整值；N-API 内部用 JSON string 穿越 V8 边界，Rust 两端仍反序列化为强类型请求和
+响应。Batch 只合并 transport frame，不省略、不去重也不缓存插件结果；JS 按 Rust
+分配的进程唯一 host scope 复用 SDK TypeScript SourceFile、Node range 与同一配置
+对象，避免多个 TSGO 进程重复使用本地 session ID，对应 Hvigor 在同一个 Program
+中直接传递对象引用的行为。
 
 `ProjectSemanticChecker` 为 build/check 构造同一份工程 roots、SDK/loader
-声明、package resolution、SDK 配置和 compiler options。源码优先通过 callback
+声明、package resolution、SDK 配置和 compiler options。工程 roots 来自上游
+`loadEntryObj/getEntryObj/rootFileNamesCollect` 的 `entryObj + ohExports`，再由 TSGO
+解析出可达 source graph；不得用模块目录递归扫描扩大 checker 输入。源码优先通过 callback
 snapshot 读取，后端磁盘/内嵌 lib 只处理 snapshot 未拥有的文件。TSGO 返回：
 
 - syntactic、semantic、declaration 和独立 ArkTS linter diagnostics；
 - compiler-owned resolved source graph 与 type-reference files；
 - annotation 声明、使用、import disposition、retention 与常量事实；
 - property type、`.builder` receiver 和 enum member 的语义身份；
+- ObjectLink 所需的 nullable/basic/ObservedV2/Function type identity；
 - 在 SDK callback 处已经解析 overload/alias/return type 后得到的
   `(apiModule, function)` 依赖事实。
 
 诊断保留 code/category、UTF-16 范围、行列、message chain 和 related
-information。Rust 将 UTF-16 offset 显式转换为 OXC UTF-8 span。SDK dependency
+information。`DiagnosticResponse.pos/end` 按 TSGO 的有符号 `int` 保留，因此无源码
+compiler diagnostic 的 `UndefinedTextRange(-1, -1)` 不会在协议边界被误判为非法数字。
+Rust 将有源码的 UTF-16 offset 显式转换为 OXC UTF-8 span。SDK dependency
 只在 Rust 中查询 SDK `depsModuleConfig` 并合并最终 module/component inventory；
 Rust/OXC 不再重做 TypeScript symbol 或返回类型推断。
 
@@ -81,12 +97,18 @@ Rust/OXC 不再重做 TypeScript symbol 或返回类型推断。
   crossplatform/atomic-service/FA/Stage、`apiAvailable` 和 `@throws` 回调语义。
 - SDK function-style value/format/distribution/regex 回调，以及 class-style
   syscap `check(node, declaration, projectConfig)` 回调；AST 由 SDK 自带 OH
-  TypeScript 按 TSGO 的源码 range 重建，callback 选择和诊断仍由 Go owner 处理。
+  TypeScript 按 TSGO 转换后的 UTF-16 source range 重建，callback 选择和诊断仍由
+  Go owner 处理，插件加载与 build-scoped 实例缓存只存在于 JS ABI 边界。
 - `oh_modules`、`oh-package.json5`、kit、oh-exports、SDK fallback、`.so`、
   TS-to-ETS/Sendable 解析检查。
 - 独立 ArkTS 1.1 linter、strictCheckerOnly、路径/OH module/Sendable/mix-compile
   筛选；OH runner 的 1004 个 source case 全部按消息和位置对比，无跳过。
 - build/check compiler options、声明诊断、上游诊断筛选及 OXC 类型消费者。
+- OH 4.9 的 generic candidate/constraint、common-supertype 与 subtype-union
+  allocation-order 语义；修复了 ArkTS `Map<string, ICanvasDraw<any>>` 等真实泛型
+  构造调用被新版结构排序错误收窄的问题。
+- OH 4.9 computed numeric enum 的普通 enum 建模；不会被新版 member-literal union
+  控制流错误穷举。ObjectLink 仅消费 TSGO resolved type facts，Rust 不推断类型。
 - create/update/release Program、内存回调、批量查询和 deterministic facts。
 
 旧 Rust isolated-declarations checker、SDK 伪类型推断和双 checker fallback 已

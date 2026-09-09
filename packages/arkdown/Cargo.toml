@@ -18,6 +18,7 @@ napi-derive = { workspace = true }
 arkdown = { workspace = true }
 arkdown-build = { workspace = true }
 arkdown-core = { workspace = true }
+arkdown-ets-checker = { workspace = true }
 arkdown-path = { workspace = true }
 
 rolldown_plugin = { workspace = true }

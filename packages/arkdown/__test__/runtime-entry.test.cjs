@@ -12,9 +12,12 @@ test('runtime entry forwards native config and a normalized plugin ABI', async (
   const previousEntry = require.cache[entryPath]
   const calls = []
   const nativeBinding = {
-    async build(config, plugins) {
-      calls.push({ config, plugins })
+    async build(config, plugins, sdkPluginDispatch) {
+      calls.push({ operation: 'build', config, plugins, sdkPluginDispatch })
       return { artifacts: ['entry.hap'], elapsedMs: 1 }
+    },
+    async check(config, sdkPluginDispatch) {
+      calls.push({ operation: 'check', config, sdkPluginDispatch })
     },
     planRolldownPackagePlugins(plugins) {
       return { placements: plugins.map((_, pluginIndex) => ({ pluginIndex })) }
@@ -52,6 +55,10 @@ test('runtime entry forwards native config and a normalized plugin ABI', async (
   assert.equal(calls[0].plugins.length, 1)
   assert.deepEqual(calls[0].plugins[0].__arkdownPluginHooks, ['transform'])
   assert.equal(typeof calls[0].plugins[0].__arkdownDispatchPluginHook, 'function')
+  assert.equal(typeof calls[0].sdkPluginDispatch, 'function')
+  await runtime.check({ project: '/tmp/app' })
+  assert.equal(calls[1].operation, 'check')
+  assert.equal(typeof calls[1].sdkPluginDispatch, 'function')
   assert.equal(runtime.runHvigorCommand, undefined)
   assert.equal(runtime.hvigorVersion, undefined)
 })

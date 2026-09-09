@@ -150,15 +150,18 @@ impl HasFactSpan for SpannedTypeIdentity {
 #[derive(Debug, Clone)]
 pub struct ResolvedTypeIdentity {
     pub is_nullable: bool,
+    pub is_union: bool,
     pub is_enum: bool,
     pub is_basic: bool,
+    pub is_observed_v2: bool,
+    pub is_function: bool,
     pub symbol_name: String,
     pub types: Vec<ResolvedTypeIdentity>,
 }
 
 impl ResolvedTypeIdentity {
     fn non_nullable(&self) -> Vec<&Self> {
-        if self.types.is_empty() {
+        if !self.is_union || self.types.is_empty() {
             return vec![self];
         }
         self.types
@@ -186,6 +189,25 @@ impl ResolvedTypeIdentity {
     pub(crate) fn non_nullable_symbol_is(&self, expected: &str) -> bool {
         let types = self.non_nullable();
         types.len() == 1 && types[0].symbol_name == expected
+    }
+
+    /// Source owner: ets2bundle
+    /// `process_component_member.ts::{checkObjectLinkType,checkTypes}`.
+    /// Nullable union members are removed first; every remaining resolved
+    /// constituent must be a non-basic, non-ObservedV2, non-Function type.
+    pub(crate) fn is_valid_object_link_type(&self) -> bool {
+        self.non_nullable()
+            .into_iter()
+            .all(Self::is_valid_object_link_constituent)
+    }
+
+    fn is_valid_object_link_constituent(&self) -> bool {
+        if !self.types.is_empty() {
+            return self.types.iter().all(|identity| {
+                !identity.is_basic && !identity.is_observed_v2 && !identity.is_function
+            });
+        }
+        !self.is_basic && !self.is_observed_v2 && !self.is_function
     }
 }
 

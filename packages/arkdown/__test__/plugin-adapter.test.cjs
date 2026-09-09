@@ -12,6 +12,8 @@ const {
   PLUGIN_HOOKS,
   PluginAdapter,
   PluginModuleLoader,
+  createSdkPluginDispatch,
+  createSdkPluginHost,
   normalizePlugin,
   normalizePluginList,
   parsePluginAst,
@@ -19,7 +21,8 @@ const {
 
 function fakeBinding() {
   return {
-    compilePluginModule: async (file) => `module.exports = { default: { name: ${JSON.stringify(path.basename(file))}, transform(code) { return code } } }`,
+    compilePluginModule: async (file) =>
+      `module.exports = { default: { name: ${JSON.stringify(path.basename(file))}, transform(code) { return code } } }`,
     compilePluginModuleSync: (file) =>
       `module.exports = { value: ${JSON.stringify(path.basename(file))}, default: { name: 'nested' } }`,
     parsePluginAst: () => ({ ast: { node: { type: 'Program', body: [] }, fixes: [] }, comments: [] }),
@@ -38,6 +41,131 @@ function fakeBinding() {
 function dispatch(plugin, hookName, request = {}) {
   return plugin.__arkdownDispatchPluginHook({ hookName, ...request })
 }
+
+test('SDK checker plugins run in the build-scoped JavaScript compatibility host', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'arkdown-sdk-plugin-'))
+  const typescriptRoot = path.join(root, 'node_modules', 'typescript')
+  fs.mkdirSync(typescriptRoot, { recursive: true })
+  fs.writeFileSync(
+    path.join(typescriptRoot, 'index.js'),
+    `let sourceFileCreations = 0
+exports.ScriptKind = { TS: 3, ETS: 99 }
+exports.ScriptTarget = { Latest: 99 }
+exports.createSourceFile = (fileName, source) => {
+  sourceFileCreations += 1
+  return ({
+  fileName, source, pos: 0, end: source.length,
+  getStart() { return 0 }, getText() { return source }
+  })
+}
+exports.sourceFileCreations = () => sourceFileCreations
+exports.forEachChild = () => {}`,
+  )
+  const plugin = path.join(root, 'checker.cjs')
+  fs.writeFileSync(
+    plugin,
+    `let constructions = 0
+exports.value = (required, target, scene) => ({ result: required === '11' && target === '17' && scene === 0, message: 'value' })
+exports.regex = () => /^(\\d+)\\.(\\d+)$/
+exports.SyscapChecker = class {
+  constructor() { constructions += 1 }
+  check(node, declaration, config) {
+    return { checkResult: constructions === 1 && node.getText() === 'current' &&
+      declaration.getText() === 'declare current' && config.syscapIntersectionSet.has('base') &&
+      config.syscapUnionSet.has('extension'), checkMessage: 'syscap' }
+  }
+}`,
+  )
+  const invoke = createSdkPluginHost()
+  assert.deepEqual(invoke({ path: plugin, functionName: 'value', operation: 'value', args: ['11', '17', 0] }), {
+    found: true,
+    result: true,
+    message: 'value',
+  })
+  assert.deepEqual(invoke({ path: plugin, functionName: 'regex', operation: 'regex', args: ['5.17'] }), {
+    found: true,
+    matched: true,
+    groups: ['5.17', '5', '17'],
+  })
+  const classRequest = { path: plugin, functionName: 'SyscapChecker', className: 'SyscapChecker' }
+  assert.deepEqual(invoke({ ...classRequest, operation: 'prepareClass', args: [] }), { found: true })
+  assert.deepEqual(invoke({ ...classRequest, operation: 'prepareClass', args: [] }), { found: true })
+  const syscapRequest = {
+    ...classRequest,
+    sessionId: 7,
+    operation: 'syscap',
+    args: [
+      {
+        node: { sourceId: 1, fileName: 'input.ets', source: 'current', pos: 0, end: 7, text: 'current' },
+        declaration: {
+          sourceId: 2,
+          fileName: 'api.d.ets',
+          source: 'declare current',
+          pos: 0,
+          end: 15,
+          text: 'declare current',
+        },
+        projectConfigId: 1,
+        projectConfig: {
+          etsLoaderPath: root,
+          syscapIntersectionSet: ['base'],
+          syscapUnionSet: ['extension'],
+        },
+      },
+    ],
+  }
+  assert.deepEqual(invoke(syscapRequest), { found: true, checkResult: true, checkMessage: 'syscap' })
+  const unmatchedNode = invoke({
+    ...syscapRequest,
+    args: [
+      {
+        ...syscapRequest.args[0],
+        node: { sourceId: 1, fileName: 'input.ets', pos: 1, end: 7, text: 'urrent' },
+      },
+    ],
+  })
+  assert.equal(unmatchedNode.found, true)
+  assert.equal(unmatchedNode.phase, 'invoke')
+  assert.match(unmatchedNode.error, /Unable to recreate SDK checker source node/)
+  assert.deepEqual(
+    invoke({
+      ...syscapRequest,
+      args: [
+        {
+          node: { sourceId: 1, fileName: 'input.ets', pos: 0, end: 7, text: 'current' },
+          declaration: {
+            sourceId: 2,
+            fileName: 'api.d.ets',
+            pos: 0,
+            end: 15,
+            text: 'declare current',
+          },
+          projectConfigId: 1,
+        },
+      ],
+    }),
+    { found: true, checkResult: true, checkMessage: 'syscap' },
+  )
+  assert.equal(require(typescriptRoot).sourceFileCreations(), 2)
+  assert.deepEqual(
+    JSON.parse(
+      createSdkPluginDispatch()(
+        JSON.stringify([
+          { path: plugin, functionName: 'value', operation: 'value', args: ['11', '17', 0] },
+          { path: plugin, functionName: 'regex', operation: 'regex', args: ['5.17'] },
+        ]),
+      ),
+    ),
+    [
+      { found: true, result: true, message: 'value' },
+      { found: true, matched: true, groups: ['5.17', '5', '17'] },
+    ],
+  )
+  assert.equal(
+    invoke({ path: path.join(root, 'missing.cjs'), functionName: 'value', operation: 'value', args: [] }).phase,
+    'load',
+  )
+})
 
 test('plugin parse follows Rollup 4.23 ParseAst options and error shape', () => {
   let observedOptions
@@ -179,7 +307,7 @@ test('explicit Rolldown plugins preserve the complete Arkdown hook surface', asy
     },
   ])
   assert.deepEqual(await dispatch(normalized, 'beforeBuild'), {})
-  assert.deepEqual((await dispatch(normalized, 'buildStart', { buildStartOptions: { input: 'index.ets' } })), {})
+  assert.deepEqual(await dispatch(normalized, 'buildStart', { buildStartOptions: { input: 'index.ets' } }), {})
   assert.deepEqual(await dispatch(normalized, 'afterBuildStart'), {})
   assert.deepEqual(dispatch(normalized, 'resolveId', { id: 'dep', importer: 'index.ets', resolveOptions: {} }), {
     resolveId: './resolved.js',
@@ -192,10 +320,7 @@ test('explicit Rolldown plugins preserve the complete Arkdown hook surface', asy
     transform: { code: 'let a = 1\n// transformed' },
   })
   assert.deepEqual(dispatch(normalized, 'moduleParsed', { moduleInfo: { id: 'index.ets' } }), {})
-  assert.deepEqual(
-    dispatch(normalized, 'watchChange', { id: '/project/Index.ets', watchEvent: 'update' }),
-    {},
-  )
+  assert.deepEqual(dispatch(normalized, 'watchChange', { id: '/project/Index.ets', watchEvent: 'update' }), {})
   assert.deepEqual(dispatch(normalized, 'beforeBuildEnd'), {})
   assert.deepEqual(dispatch(normalized, 'buildEnd', { buildEndContext: { errors: [] } }), {})
   assert.deepEqual(dispatch(normalized, 'afterBuildEnd'), {})
@@ -220,7 +345,10 @@ test('explicit Rolldown plugins preserve the complete Arkdown hook surface', asy
     )
   }
   assert.equal(calls.length, PLUGIN_HOOKS.length)
-  assert.equal(calls.every((call) => call.share === share), true)
+  assert.equal(
+    calls.every((call) => call.share === share),
+    true,
+  )
   assert.deepEqual(calls.find((call) => call.hookName === 'watchChange').args, [
     '/project/Index.ets',
     { event: 'update' },
@@ -364,10 +492,7 @@ test('ordered hook objects retain handler receiver and native order metadata', (
     transform: 'export {}\n// ordered',
   })
   assert.deepEqual(dispatch(plugin, 'beforeBuildEnd'), {})
-  assert.deepEqual(calls, [
-    { name: 'entry', id: 'Index.ets' },
-    { name: 'beforeBuildEnd' },
-  ])
+  assert.deepEqual(calls, [{ name: 'entry', id: 'Index.ets' }, { name: 'beforeBuildEnd' }])
 })
 
 test('explicit plugin context delegates graph operations to Rolldown and retains cache/async state', async () => {
@@ -420,10 +545,12 @@ test('explicit plugin context delegates graph operations to Rolldown and retains
       },
       transform(code, id, options) {
         const pluginContext = this
-        this.async(() => setImmediate(() => {
-          calls.push(['async-complete'])
-          pluginContext.signal()
-        }))
+        this.async(() =>
+          setImmediate(() => {
+            calls.push(['async-complete'])
+            pluginContext.signal()
+          }),
+        )
         calls.push(['transformContext', id, options, this.getCombinedSourcemap()])
         return code
       },
@@ -472,25 +599,31 @@ test('module metadata returned by plugins is merged for later hooks and context 
     getModuleInfo: () => nativeModule,
     load: async () => nativeModule,
   }
-  const producer = normalizePlugin({
-    name: 'metadata-producer',
-    transform(code) {
-      return { code, meta: { producer: () => 'live' }, moduleSideEffects: false }
+  const producer = normalizePlugin(
+    {
+      name: 'metadata-producer',
+      transform(code) {
+        return { code, meta: { producer: () => 'live' }, moduleSideEffects: false }
+      },
     },
-  }, fakeBinding())
+    fakeBinding(),
+  )
   let observed
-  const consumer = normalizePlugin({
-    name: 'metadata-consumer',
-    async transform(code, id) {
-      const loaded = await this.load({ id, meta: { loaded: true }, moduleSideEffects: 'no-treeshake' })
-      const info = this.getModuleInfo(id)
-      observed = { loaded, info }
-      return { code, meta: { consumer: true } }
+  const consumer = normalizePlugin(
+    {
+      name: 'metadata-consumer',
+      async transform(code, id) {
+        const loaded = await this.load({ id, meta: { loaded: true }, moduleSideEffects: 'no-treeshake' })
+        const info = this.getModuleInfo(id)
+        observed = { loaded, info }
+        return { code, meta: { consumer: true } }
+      },
+      moduleParsed(info) {
+        observed.parsed = info
+      },
     },
-    moduleParsed(info) {
-      observed.parsed = info
-    },
-  }, fakeBinding())
+    fakeBinding(),
+  )
   const share = { __arkdownBuildInstanceId: 'metadata-build', projectConfig: {} }
   await dispatch(producer, 'seedContext', { share })
   await dispatch(consumer, 'seedContext', { share })
@@ -525,10 +658,7 @@ test('explicit plugin factories and nested arrays retain deterministic native or
     placements: [1, 0].map((pluginIndex) => ({ pluginIndex })),
   })
   const plugins = normalizePluginList(
-    () => [
-      { name: 'last', transform: (code) => code },
-      [{ name: 'first', load: () => null }],
-    ],
+    () => [{ name: 'last', transform: (code) => code }, [{ name: 'first', load: () => null }]],
     binding,
   )
 

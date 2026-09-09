@@ -3,8 +3,14 @@ use std::path::PathBuf;
 use arkdown_core::{ArktsLanguageVersion, ModuleSource, ModuleType, ResolvedId};
 use arkdown_ets_transform::{
     error::EtsTransformError,
-    transform::{component_meta::ComponentMetadata, ArktsTransformer, TransformOptions},
+    transform::{
+        component_meta::ComponentMetadata, ArktsFileTypeFacts, ArktsTransformer,
+        ArktsTypeFactsSnapshot, PropertyTypeFacts, ResolvedTypeIdentity, SpannedPropertyTypeFacts,
+        TransformOptions,
+    },
 };
+use oxc_span::Span;
+use rustc_hash::FxHashMap;
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -21,7 +27,17 @@ struct SourceContractCase {
     owner: String,
     file: String,
     source: String,
+    #[serde(default, rename = "typeFacts")]
+    type_facts: Vec<SourceContractPropertyTypeFact>,
     expect: SourceContractExpectation,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SourceContractPropertyTypeFact {
+    property: String,
+    #[serde(default)]
+    is_basic: bool,
 }
 
 #[derive(Deserialize)]
@@ -84,6 +100,45 @@ impl SourceContractRunner {
     }
 
     fn run_case(options: &TransformOptions, case: SourceContractCase) {
+        let mut options = options.clone();
+        if !case.type_facts.is_empty() {
+            let properties = case
+                .type_facts
+                .iter()
+                .map(|fact| {
+                    let start = case.source.find(&fact.property).unwrap_or_else(|| {
+                        panic!(
+                            "source contract {} type fact property {:?} is absent",
+                            case.id, fact.property
+                        )
+                    }) as u32;
+                    SpannedPropertyTypeFacts {
+                        span: Span::new(start, start + fact.property.len() as u32),
+                        facts: PropertyTypeFacts {
+                            declared_type: Some(ResolvedTypeIdentity {
+                                is_nullable: false,
+                                is_union: false,
+                                is_enum: false,
+                                is_basic: fact.is_basic,
+                                is_observed_v2: false,
+                                is_function: false,
+                                symbol_name: String::new(),
+                                types: Vec::new(),
+                            }),
+                        },
+                    }
+                })
+                .collect();
+            let mut files = FxHashMap::default();
+            files.insert(
+                PathBuf::from(&case.file),
+                ArktsFileTypeFacts {
+                    properties,
+                    ..ArktsFileTypeFacts::default()
+                },
+            );
+            options.type_facts = ArktsTypeFactsSnapshot::new(files);
+        }
         let source = ModuleSource {
             id: ResolvedId {
                 id: case.file,
@@ -94,7 +149,7 @@ impl SourceContractRunner {
             content: case.source,
             source_map: None,
         };
-        let result = ArktsTransformer::with_options(&source, options).transform();
+        let result = ArktsTransformer::with_options(&source, &options).transform();
         if let Some(expected_code) = case.expect.error_code {
             match result {
                 Err(EtsTransformError::CodedDiagnostic { code, .. }) => assert_eq!(

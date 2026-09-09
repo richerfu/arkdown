@@ -7,8 +7,9 @@ pub use native::{
     DiagnosticPosition, NativeAnnotationConstant, NativeAnnotationInfo, NativeAnnotationProperty,
     NativeAnnotationTransformImport, NativeAnnotationTransformInfo, NativeAnnotationTransformNode,
     NativeArktsBuilderReceiverTypeFacts, NativeArktsPropertyTypeFacts,
-    NativeArktsTransformTypeFacts, NativeCheckError, NativeCompilerOptions, NativeDiagnostic,
-    NativeOhSdkCheckPlugin, NativeOhSdkClassCheckPlugin, NativeOhSdkConfig, NativeProgram,
-    NativeProgramSourceGraph, NativeProgramSourceGraphFile, NativeResolvedTypeIdentity,
-    NativeSymbol, NativeType, NativeTypeSession,
+    NativeArktsTransformTypeFacts, NativeArktsTransformTypeQuery, NativeCheckError,
+    NativeCompilerOptions, NativeDiagnostic, NativeOhSdkCheckPlugin, NativeOhSdkClassCheckPlugin,
+    NativeOhSdkConfig, NativeOhSdkPluginHost, NativeOhSdkPluginRequest, NativeOhSdkPluginResponse,
+    NativeProgram, NativeProgramSourceGraph, NativeProgramSourceGraphFile,
+    NativeResolvedTypeIdentity, NativeSymbol, NativeType, NativeTypeQueryRange, NativeTypeSession,
 };

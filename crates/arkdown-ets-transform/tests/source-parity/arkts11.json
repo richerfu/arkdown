@@ -175,6 +175,7 @@
       "owner": "compiler/src/process_component_member.ts::updateSynchedPropertyNesedObjectPU",
       "file": "ObjectLinkBasic.ets",
       "source": "@Component struct ObjectLinkBasic { @ObjectLink value: number; build() {} }",
+      "typeFacts": [{ "property": "value", "isBasic": true }],
       "expect": { "errorCode": "10905307" }
     },
     {
@@ -800,11 +801,11 @@
       "expect": { "errorCode": "10905206" }
     },
     {
-      "id": "named-import-cannot-shadow-builtin-component",
-      "owner": "compiler/src/process_import.ts::validateModuleName",
+      "id": "esmodule-named-import-may-shadow-builtin-component",
+      "owner": "compiler/src/process_import.ts::processImportModule",
       "file": "BuiltinImportCollision.ets",
       "source": "import { helper as Text } from './helper'; @Component struct Parent { build() {} }",
-      "expect": { "errorCode": "10905235" }
+      "expect": { "contains": ["import { helper as Text } from './helper';"] }
     },
     {
       "id": "state-styles-rejects-nonstandard-value",
