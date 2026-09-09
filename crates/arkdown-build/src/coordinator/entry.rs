@@ -476,16 +476,18 @@ impl BuildCoordinator {
         self.execute_targets().await
     }
 
-    pub(crate) async fn execute_with_bundle_runtime(
+    pub(crate) async fn execute_with_runtimes(
         self,
-        runtime: &mut BundleRuntime,
+        bundle_runtime: &mut BundleRuntime,
+        semantic_runtime: &mut ProjectSemanticRuntime,
     ) -> Result<BuildOutput> {
         if self.args.action == crate::request::BuildAction::DeviceTest
             && !matches!(self.config.output_target, OutputTarget::Hap)
         {
             anyhow::bail!("ARKDOWN_DEVICE_TEST_TARGET: action=device-test requires target=hap");
         }
-        self.execute_targets_with_runtime(runtime).await
+        self.execute_targets_with_runtimes(bundle_runtime, semantic_runtime)
+            .await
     }
 
     async fn execute_targets(self) -> Result<BuildOutput> {
@@ -495,7 +497,7 @@ impl BuildCoordinator {
             &self.args,
         );
         if target_plan.target_names.len() <= 1 || self.args.build_target_name.is_some() {
-            return self.execute_impl(None).await;
+            return self.execute_impl(None, None).await;
         }
 
         tracing::info!(
@@ -514,16 +516,17 @@ impl BuildCoordinator {
                 package_plugins: self.package_plugins.clone(),
                 owns_task_cycle: false,
             }
-            .execute_impl(None)
+            .execute_impl(None, None)
             .await?;
             artifact_paths.extend(output.artifact_paths);
         }
         Ok(BuildOutput { artifact_paths })
     }
 
-    async fn execute_targets_with_runtime(
+    async fn execute_targets_with_runtimes(
         self,
-        runtime: &mut BundleRuntime,
+        bundle_runtime: &mut BundleRuntime,
+        semantic_runtime: &mut ProjectSemanticRuntime,
     ) -> Result<BuildOutput> {
         let target_plan = TargetBuildExecutionPlan::new(
             self.config.as_ref(),
@@ -531,7 +534,9 @@ impl BuildCoordinator {
             &self.args,
         );
         if target_plan.target_names.len() <= 1 || self.args.build_target_name.is_some() {
-            return self.execute_impl(Some(runtime)).await;
+            return self
+                .execute_impl(Some(bundle_runtime), Some(semantic_runtime))
+                .await;
         }
 
         let mut artifact_paths = Vec::new();
@@ -545,7 +550,7 @@ impl BuildCoordinator {
                 package_plugins: self.package_plugins.clone(),
                 owns_task_cycle: false,
             }
-            .execute_impl(Some(&mut *runtime))
+            .execute_impl(Some(&mut *bundle_runtime), Some(&mut *semantic_runtime))
             .await?;
             artifact_paths.extend(output.artifact_paths);
         }

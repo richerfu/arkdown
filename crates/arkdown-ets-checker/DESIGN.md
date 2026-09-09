@@ -112,9 +112,11 @@ Rust/OXC 不再重做 TypeScript symbol 或返回类型推断。
 - create/update/release Program、内存回调、批量查询和 deterministic facts。
 
 旧 Rust isolated-declarations checker、SDK 伪类型推断和双 checker fallback 已
-删除。它们不是兼容层，也不再作为备用路径存在。watch 目前仍按 build 调用创建
-session；若要复用长驻 Program，必须以 ets2bundle watch 生命周期源码为依据，
-不能改变当前诊断或失效语义。
+删除。它们不是兼容层，也不再作为备用路径存在。watch 按 ets2bundle
+`etsChecker` 生命周期由 Rust 长驻每个模块/目标的 session，后续 source snapshot
+通过 old Program 与 modified/created/deleted file changes 更新；新 Program 创建后
+释放旧 snapshot。每轮完整重取 linter、diagnostics、source graph 和 facts，JS 只
+继续承载 SDK CommonJS callback ABI。
 
 ## 发行与验证
 

@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use crate::bundle_plan::BundleRuntime;
 use crate::coordinator::BuildOutput;
+use crate::project_checker::ProjectSemanticRuntime;
 use crate::request::BuildRequest;
 use anyhow::Result;
 use arkdown::plugins::factory::PackagePlugin;
@@ -34,30 +35,39 @@ impl BuildService {
             || self.request.preview
             || (self.request.action.is_hot_reload() && self.request.watch_invalidation.is_none());
         if retain_bundle_graph {
-            let mut runtime = BundleRuntime::default();
+            let mut bundle_runtime = BundleRuntime::default();
+            let mut semantic_runtime = ProjectSemanticRuntime::default();
             // Erase the coordinator future here so the public N-API build
             // future does not recursively embed the complete stage/watch
             // state machine in its layout.
-            let result = Box::pin(self.execute_inner(Some(&mut runtime))).await;
-            let close_result = runtime.close().await;
+            let result = Box::pin(
+                self.execute_inner(Some(&mut bundle_runtime), Some(&mut semantic_runtime)),
+            )
+            .await;
+            let semantic_close_result = semantic_runtime.close();
+            let bundle_close_result = bundle_runtime.close().await;
             let output = result?;
-            close_result?;
+            semantic_close_result?;
+            bundle_close_result?;
             Ok(output)
         } else {
-            Box::pin(self.execute_inner(None)).await
+            Box::pin(self.execute_inner(None, None)).await
         }
     }
 
-    pub(crate) async fn execute_with_bundle_runtime(
+    pub(crate) async fn execute_with_runtimes(
         self,
-        runtime: &mut BundleRuntime,
+        bundle_runtime: &mut BundleRuntime,
+        semantic_runtime: &mut ProjectSemanticRuntime,
     ) -> Result<BuildOutput> {
-        self.execute_inner(Some(runtime)).await
+        self.execute_inner(Some(bundle_runtime), Some(semantic_runtime))
+            .await
     }
 
     async fn execute_inner(
         self,
         bundle_runtime: Option<&mut BundleRuntime>,
+        semantic_runtime: Option<&mut ProjectSemanticRuntime>,
     ) -> Result<BuildOutput> {
         use arkdown_config::ArkdownConfigLoader;
         use arkdown_session::BuildSessionBuilder;
@@ -115,7 +125,14 @@ impl BuildService {
         let coordinator = super::coordinator::BuildCoordinator::new(session, config, request)
             .with_package_plugins(package_plugins);
         let output = match bundle_runtime {
-            Some(runtime) => coordinator.execute_with_bundle_runtime(runtime).await?,
+            Some(bundle_runtime) => {
+                coordinator
+                    .execute_with_runtimes(
+                        bundle_runtime,
+                        semantic_runtime.expect("bundle and semantic runtimes are paired"),
+                    )
+                    .await?
+            }
             None => coordinator.execute().await?,
         };
         tracing::debug!(artifacts = output.artifact_paths.len(), "build completed");

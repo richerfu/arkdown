@@ -130,8 +130,8 @@ crossplatform dependency 等类型事实已批量接入 OXC。SDK dependency 身
 重建 overload、alias 或 factory-return 推断。build/check compiler options、
 source graph、声明诊断和源码定义的诊断筛选已经贯通。三平台 clean TSGO 产物
 随 N-API 平台包发布；正常安装无需环境变量，`ARKDOWN_TYPESCRIPT_PATH` 只用于
-开发覆盖。watch 尚未长驻复用 Program，属于性能/增量生命周期优化而非单轮
-checker 能力差异。源码合同和验证说明见
+开发覆盖。watch 已按 ets2bundle 生命周期长驻复用 Program，并保留原有诊断、
+linter、type-facts 和 source-graph 刷新顺序。源码合同和验证说明见
 [`crates/arkdown-ets-checker/DESIGN.md`](../../crates/arkdown-ets-checker/DESIGN.md)。
 
 当前 clean TSGO revision `94e2465a5f92c50eb86a000eb1c4fb95adac3fd0`
@@ -166,7 +166,9 @@ ObservedV2 和 Function。
 ### Cache 和 watch
 
 当前已有版本化的跨进程 OXC transform/fact cache，以及同一 JS CLI watch
-进程内的 Rolldown retained graph。Rolldown 目前没有供 arkdown 使用的安全
+进程内的 Rolldown retained graph 和 TSGO retained Program。TSGO 更新直接消费
+watcher 的 modified/created/deleted 事件及新 immutable source snapshot，不经过
+JS 或独立 checker 兼容层。Rolldown 目前没有供 arkdown 使用的安全
 磁盘 graph deserialize API，因此新进程仍需 resolve/parse/scan。这是明确的
 上游能力边界，不得用空 `rollup_cache.json` 或伪图文件冒充命中。
 
@@ -226,9 +228,10 @@ native checker、build semantic、SDK CommonJS callback 与 OXC 类型消费者�
 
 - 按 ets2bundle 源码测试继续扩充 UI transform、system API、Visual、
   ByteCode HAR、router、worker、InsightIntent 和 HSP 的边界语料。
-- 依据 ets2bundle watch 生命周期复用 TSGO `updateProgram`，减少跨轮解析和
-  checker 建图；不得改变现有单轮诊断、类型事实和失效语义，也不得恢复旧 Rust
-  子集 checker 或 SDK Node checker 兜底。
+- TSGO `updateProgram` 已按 ets2bundle watch 生命周期接入：首轮和增量轮次共享
+  模块/目标 session，旧 snapshot 在新 Program 创建后释放；每轮仍重新获取完整
+  diagnostics、linter、source graph 和类型事实，不恢复旧 Rust 子集 checker 或
+  SDK Node checker 兜底。
 - `duplicate_check` 已用 Rolldown 分片 facts 取代全局 `Arc<Mutex>`，并在告警边界
   确定性归并；`har_dedup` 已按 `hsp-collect-har-files.js::buildEnd` 直接读取最终
   module graph，删除 `moduleParsed` 共享 collector 和无调用的 `HarDedupFact` facade。

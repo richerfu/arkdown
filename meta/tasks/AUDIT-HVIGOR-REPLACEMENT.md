@@ -66,7 +66,11 @@ executor；native boundary 与 JS/N-API 真实构建都只保留 SDK 插件判�
 告警。
 
 TSGO 只负责类型检查、推断、诊断和只读 semantic facts，不负责 JS/声明生成或
-代码改写。watch 尚未复用长驻 Program 是性能差异，不是单轮能力差异。
+代码改写。watch 已按 `rollup-plugin-ets-checker.ts::etsChecker` 生命周期保留每个
+模块/目标的 TSGO session：首轮创建 Program，后续轮次把 watcher 的
+modified/created/deleted 事件与新 immutable source snapshot 传给
+`createProgram(oldProgram, fileChanges)`，再按原顺序重新收集 source graph、linter、
+syntax/semantic/declaration diagnostics 和 transform type facts。JS 不参与该链路。
 
 checker roots 已按 ets2bundle `loadEntryObj/getEntryObj/rootFileNamesCollect` 改为
 loader 的 `entryObj + ohExports`，由 TSGO 扩展为可达 source graph；递归扫描模块
@@ -131,8 +135,6 @@ HSP debug、HSP release、widget 定向对比及完整 33 项 strict suite 均�
 
 ## 性能项，不作为产物能力缺失
 
-- watch 每轮重建 TSGO session；可按 ets2bundle watch 生命周期接入已有
-  `updateProgram`，但不得改变 diagnostics/type-facts invalidation 顺序。
 - Rolldown 暂无当前接入可安全使用的跨进程完整 graph deserialize API；新进程
   仍需 resolve/parse/scan。不得创建空 graph cache 或私有伪格式。
 - 模块 dependency wave 仍可增加并行度；提交前必须按 typed ID 排序，保证产物
@@ -141,7 +143,7 @@ HSP debug、HSP release、widget 定向对比及完整 33 项 strict suite 均�
 ## 下一步顺序
 
 1. 按具体 owner 扩充 R3 真实矩阵；发现差异即在领域 crate 修复。
-2. 功能门禁通过后处理 watch/锁/并行性能项。
+2. 功能门禁通过后处理剩余跨进程 graph cache 和依赖 wave 性能项。
 3. 只有取得当前 task/system plugin 权威源码后，才能决定是否扩展公开插件合同。
 
 完成门槛是 JS CLI/Node API 进入 typed Rust service、ArkTS 1.1 strict fixture

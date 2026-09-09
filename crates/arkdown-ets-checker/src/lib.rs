@@ -10,6 +10,7 @@ pub use native::{
     NativeArktsTransformTypeFacts, NativeArktsTransformTypeQuery, NativeCheckError,
     NativeCompilerOptions, NativeDiagnostic, NativeOhSdkCheckPlugin, NativeOhSdkClassCheckPlugin,
     NativeOhSdkConfig, NativeOhSdkPluginHost, NativeOhSdkPluginRequest, NativeOhSdkPluginResponse,
-    NativeProgram, NativeProgramSourceGraph, NativeProgramSourceGraphFile,
-    NativeResolvedTypeIdentity, NativeSymbol, NativeType, NativeTypeQueryRange, NativeTypeSession,
+    NativeProgram, NativeProgramFileChanges, NativeProgramSourceGraph,
+    NativeProgramSourceGraphFile, NativeResolvedTypeIdentity, NativeSymbol, NativeType,
+    NativeTypeQueryRange, NativeTypeSession,
 };

@@ -17,8 +17,8 @@ use arkdown_ets_checker::{
     NativeAnnotationConstant, NativeAnnotationInfo, NativeAnnotationTransformInfo,
     NativeArktsTransformTypeFacts, NativeArktsTransformTypeQuery, NativeCompilerOptions,
     NativeDiagnostic, NativeOhSdkCheckPlugin, NativeOhSdkClassCheckPlugin, NativeOhSdkConfig,
-    NativeOhSdkPluginHost, NativeProgramSourceGraph, NativeResolvedTypeIdentity,
-    NativeTypeQueryRange, NativeTypeSession,
+    NativeOhSdkPluginHost, NativeProgram, NativeProgramFileChanges, NativeProgramSourceGraph,
+    NativeResolvedTypeIdentity, NativeTypeQueryRange, NativeTypeSession,
 };
 use arkdown_ets_transform::{
     transform::component_meta::ComponentMetadata, AnnotationConstant, AnnotationImportDisposition,
@@ -31,6 +31,7 @@ use arkdown_ets_transform::{
 use arkdown_path::lexical_normalize;
 use arkdown_resolver::PackageResolutionPlan;
 use arkdown_session::{ModuleCompileContext, SdkSnapshot, SourceContent, SourceStore};
+use arkdown_watcher::{WatchEventKind, WatchInvalidationBatch};
 use oxc_span::Span;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
@@ -58,6 +59,127 @@ pub struct ProjectSemanticCheckReport {
     /// below the module directory.
     pub checked_sources: Vec<PathBuf>,
     pub type_facts: ArktsTypeFactsSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct ProjectSemanticRuntimeKey {
+    project_root: PathBuf,
+    module_root: PathBuf,
+    cache_path: PathBuf,
+}
+
+struct ProjectSemanticRuntimeEntry {
+    executable: PathBuf,
+    sdk_plugin_callbacks: bool,
+    session: NativeTypeSession,
+    program: NativeProgram,
+}
+
+/// Long-lived owner of native TypeScript programs for one JS-CLI watch cycle.
+///
+/// Source owner: `rollup-plugin-ets-checker.ts::etsChecker`. The first
+/// `buildStart` creates the language service; later watch builds reuse it and
+/// request a new builder program before collecting linter and TypeScript
+/// diagnostics again.
+#[derive(Default)]
+pub(crate) struct ProjectSemanticRuntime {
+    sessions: FxHashMap<ProjectSemanticRuntimeKey, ProjectSemanticRuntimeEntry>,
+}
+
+impl ProjectSemanticRuntime {
+    fn file_changes(invalidation: Option<&WatchInvalidationBatch>) -> NativeProgramFileChanges {
+        let mut changes = NativeProgramFileChanges::default();
+        let Some(invalidation) = invalidation else {
+            return changes;
+        };
+        let mut final_events = BTreeMap::new();
+        for event in &invalidation.raw_events {
+            final_events.insert(event.path.clone(), event.kind);
+        }
+        for (path, kind) in final_events {
+            match kind {
+                WatchEventKind::Modified => changes.changed.push(path),
+                WatchEventKind::Created => changes.created.push(path),
+                WatchEventKind::Deleted => changes.deleted.push(path),
+            }
+        }
+        changes
+    }
+
+    fn program<'a>(
+        &'a mut self,
+        key: ProjectSemanticRuntimeKey,
+        executable: &Path,
+        project_root: &Path,
+        prepared: &PreparedSemanticCheck,
+        changes: &NativeProgramFileChanges,
+    ) -> Result<(&'a mut NativeTypeSession, NativeProgram)> {
+        let sdk_plugin_callbacks = prepared.sdk_plugin_host.is_some();
+        let entry = self.sessions.remove(&key);
+        let entry = match entry {
+            Some(mut entry)
+                if entry.executable == executable
+                    && entry.sdk_plugin_callbacks == sdk_plugin_callbacks =>
+            {
+                let program = entry.session.update_program_snapshot(
+                    entry.program,
+                    &prepared.roots,
+                    &prepared.options,
+                    prepared.sources.clone(),
+                    changes,
+                )?;
+                ProjectSemanticRuntimeEntry { program, ..entry }
+            }
+            _ => {
+                let mut session = NativeTypeSession::start(
+                    executable,
+                    project_root,
+                    prepared.sources.clone(),
+                    prepared.sdk_plugin_host.clone(),
+                )?;
+                let program = session.create_program(&prepared.roots, &prepared.options)?;
+                ProjectSemanticRuntimeEntry {
+                    executable: executable.to_path_buf(),
+                    sdk_plugin_callbacks,
+                    session,
+                    program,
+                }
+            }
+        };
+        self.sessions.insert(key.clone(), entry);
+        let entry = self
+            .sessions
+            .get_mut(&key)
+            .expect("semantic runtime entry was inserted above");
+        Ok((&mut entry.session, entry.program.clone()))
+    }
+
+    pub(crate) fn close(&mut self) -> Result<()> {
+        let mut entries = std::mem::take(&mut self.sessions)
+            .into_iter()
+            .collect::<Vec<_>>();
+        entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+        let mut first_error = None;
+        for (_, mut entry) in entries {
+            if let Err(error) = entry.session.release(entry.program) {
+                first_error.get_or_insert(error);
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(error.into());
+        }
+        Ok(())
+    }
+}
+
+struct PreparedSemanticCheck {
+    roots: Vec<PathBuf>,
+    options: NativeCompilerOptions,
+    sdk_plugin_host: Option<Arc<dyn NativeOhSdkPluginHost>>,
+    ui_props: BTreeSet<String>,
+    new_extend_names: BTreeSet<String>,
+    sources: BTreeMap<PathBuf, Arc<str>>,
+    semantic_inventories: BTreeMap<PathBuf, ArktsSourceSemanticInventory>,
 }
 
 pub struct ProjectSemanticChecker<'a> {
@@ -419,6 +541,22 @@ impl<'a> ProjectSemanticChecker<'a> {
     }
 
     pub fn run(&self) -> Result<ProjectSemanticCheckReport> {
+        self.run_inner(None, None)
+    }
+
+    pub(crate) fn run_with_runtime(
+        &self,
+        runtime: &mut ProjectSemanticRuntime,
+        invalidation: Option<&WatchInvalidationBatch>,
+    ) -> Result<ProjectSemanticCheckReport> {
+        self.run_inner(Some(runtime), invalidation)
+    }
+
+    fn run_inner(
+        &self,
+        runtime: Option<&mut ProjectSemanticRuntime>,
+        invalidation: Option<&WatchInvalidationBatch>,
+    ) -> Result<ProjectSemanticCheckReport> {
         let mut roots = self
             .root_files
             .iter()
@@ -519,29 +657,62 @@ impl<'a> ProjectSemanticChecker<'a> {
                 sources.insert(path, content);
             }
         }
-        let mut session = NativeTypeSession::start(
-            &NativeTypeSession::resolve_executable(self.typescript_executable.as_deref())?,
-            self.project_root,
-            sources.clone(),
+        let prepared = PreparedSemanticCheck {
+            roots,
+            options,
             sdk_plugin_host,
+            ui_props,
+            new_extend_names,
+            sources,
+            semantic_inventories,
+        };
+        let executable =
+            NativeTypeSession::resolve_executable(self.typescript_executable.as_deref())?;
+        if let Some(runtime) = runtime {
+            let key = ProjectSemanticRuntimeKey {
+                project_root: self.project_root.to_path_buf(),
+                module_root: self.compiler_options.oh_module_path.clone(),
+                cache_path: self.cache_path.clone().unwrap_or_default(),
+            };
+            let changes = ProjectSemanticRuntime::file_changes(invalidation);
+            let (session, program) =
+                runtime.program(key, &executable, self.project_root, &prepared, &changes)?;
+            return self.check_program(session, &program, &prepared);
+        }
+        let mut session = NativeTypeSession::start(
+            &executable,
+            self.project_root,
+            prepared.sources.clone(),
+            prepared.sdk_plugin_host.clone(),
         )?;
-        let program = session.create_program(&roots, &options)?;
-        let source_graph = session.source_graph(&program)?;
+        let program = session.create_program(&prepared.roots, &prepared.options)?;
+        let report = self.check_program(&mut session, &program, &prepared)?;
+        session.release(program)?;
+        Ok(report)
+    }
+
+    fn check_program(
+        &self,
+        session: &mut NativeTypeSession,
+        program: &NativeProgram,
+        prepared: &PreparedSemanticCheck,
+    ) -> Result<ProjectSemanticCheckReport> {
+        let source_graph = session.source_graph(program)?;
         let checked_sources = source_graph
             .files
             .iter()
             .map(|file| file.file_name.clone())
-            .filter(|file| sources.contains_key(file) && Self::is_checkable_root(file))
+            .filter(|file| prepared.sources.contains_key(file) && Self::is_checkable_root(file))
             .collect::<Vec<_>>();
         let linter_started = Instant::now();
-        let linter = session.arkts_linter_diagnostics(&program)?;
+        let linter = session.arkts_linter_diagnostics(program)?;
         tracing::info!(
             elapsed_ms = linter_started.elapsed().as_millis(),
             files = source_graph.files.len(),
             "ArkTS linter diagnostics completed"
         );
         let diagnostics_started = Instant::now();
-        let mut result = session.diagnostics(&program)?;
+        let mut result = session.diagnostics(program)?;
         if self.check_declarations {
             let declaration_sources = source_graph
                 .files
@@ -549,7 +720,7 @@ impl<'a> ProjectSemanticChecker<'a> {
                 .map(|file| file.file_name.clone())
                 .filter(|file| Self::is_declaration_diagnostic_source(file))
                 .collect::<Vec<_>>();
-            result.extend(session.declaration_diagnostics(&program, &declaration_sources)?);
+            result.extend(session.declaration_diagnostics(program, &declaration_sources)?);
         }
         tracing::info!(
             elapsed_ms = diagnostics_started.elapsed().as_millis(),
@@ -561,20 +732,23 @@ impl<'a> ProjectSemanticChecker<'a> {
             .iter()
             .map(|file| file.file_name.clone())
             .filter(|file| {
-                sources.contains_key(file) && Self::is_type_script_preprocess_source(file)
+                prepared.sources.contains_key(file) && Self::is_type_script_preprocess_source(file)
             })
             .collect::<Vec<_>>();
         let facts_started = Instant::now();
-        let native_type_facts = session.annotation_transform_infos(&program, &annotation_files)?;
-        let transform_queries =
-            self.native_transform_type_queries(&annotation_files, &sources, &semantic_inventories)?;
-        let sdk_api_use_files = if options.oh_crossplatform {
+        let native_type_facts = session.annotation_transform_infos(program, &annotation_files)?;
+        let transform_queries = self.native_transform_type_queries(
+            &annotation_files,
+            &prepared.sources,
+            &prepared.semantic_inventories,
+        )?;
+        let sdk_api_use_files = if prepared.options.oh_crossplatform {
             annotation_files.as_slice()
         } else {
             &[]
         };
         let native_transform_type_facts =
-            session.arkts_transform_type_facts(&program, &transform_queries, sdk_api_use_files)?;
+            session.arkts_transform_type_facts(program, &transform_queries, sdk_api_use_files)?;
         tracing::info!(
             elapsed_ms = facts_started.elapsed().as_millis(),
             files = transform_queries.len(),
@@ -592,16 +766,17 @@ impl<'a> ProjectSemanticChecker<'a> {
                 .sum::<usize>(),
             "ArkTS transform type facts completed"
         );
-        let type_facts =
-            NativeAnnotationFactsConverter::new(&sources, &self.crossplatform_dependencies)
-                .convert(native_type_facts, native_transform_type_facts)?;
+        let type_facts = NativeAnnotationFactsConverter::new(
+            &prepared.sources,
+            &self.crossplatform_dependencies,
+        )
+        .convert(native_type_facts, native_transform_type_facts)?;
         let mut linter = self.prepare_linter_diagnostics(linter)?;
-        self.apply_ui_diagnostic_rules(&mut linter, &ui_props, &new_extend_names);
-        self.apply_ui_diagnostic_rules(&mut result, &ui_props, &new_extend_names);
+        self.apply_ui_diagnostic_rules(&mut linter, &prepared.ui_props, &prepared.new_extend_names);
+        self.apply_ui_diagnostic_rules(&mut result, &prepared.ui_props, &prepared.new_extend_names);
         let ignored = self.ignored_diagnostic_files(&source_graph);
         linter.retain(|diagnostic| self.keep_diagnostic(diagnostic, &ignored));
         result.retain(|diagnostic| self.keep_diagnostic(diagnostic, &ignored));
-        session.release(program)?;
         let mut report = ProjectSemanticCheckReport {
             checked_sources,
             type_facts,
