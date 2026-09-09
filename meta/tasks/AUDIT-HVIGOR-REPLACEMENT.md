@@ -85,6 +85,12 @@ host scope，避免多模块并行构建中进程本地 session id 重复。真�
 剩余耗时采样集中于正常类型关系、表达式和签名检查，不再是路径归一化或 JS transport
 阻塞。
 
+Rolldown 热路径也已按当前插件源码收口：
+`check-duplicate-filenames-plugin.js::load` 的 Map/Set 收集改为分片并发 facts，并在
+告警边界稳定排序；`hsp-collect-har-files.js::buildEnd/collectSourceFiles` 改为直接从
+`PluginContext::get_module_ids` 的最终图收集，不再给每个 `moduleParsed` 增加共享写锁。
+没有生产消费者的 `HarDedupFact/facts.rs` facade 已删除。
+
 ### 当前源码未定义：Hvigor task/system plugin ABI
 
 当前权威 `developtools_ace_ets2bundle` 源码定义的是 arkts-compose
@@ -129,8 +135,6 @@ HSP debug、HSP release、widget 定向对比及完整 33 项 strict suite 均�
   `updateProgram`，但不得改变 diagnostics/type-facts invalidation 顺序。
 - Rolldown 暂无当前接入可安全使用的跨进程完整 graph deserialize API；新进程
   仍需 resolve/parse/scan。不得创建空 graph cache 或私有伪格式。
-- `duplicate_check` 与 `har_dedup` 仍使用共享写锁 collector，应改为局部 facts
-  和确定性 merge。
 - 模块 dependency wave 仍可增加并行度；提交前必须按 typed ID 排序，保证产物
   与诊断稳定。
 

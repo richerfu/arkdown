@@ -15,38 +15,40 @@
 //! * `build_end` — emits one warning if duplicate ids were found and clears
 //!   state.
 
-use rustc_hash::{FxHashMap, FxHashSet};
 use std::borrow::Cow;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use arkdown_path::{OhmUrl, SourceFileName};
 use rolldown_common::LogWithoutPlugin;
 use rolldown_plugin::{
     HookBuildEndArgs, HookBuildStartArgs, HookLoadArgs, HookLoadReturn, HookNoopReturn, HookUsage,
     Plugin, PluginContext, SharedLoadPluginContext,
 };
+use rolldown_utils::dashmap::{FxDashMap, FxDashSet};
 
 /// Plugin that mirrors hvigor's duplicate filename warning behavior.
 pub struct DuplicateCheckPlugin {
-    state: Arc<Mutex<DuplicateState>>,
+    state: Arc<DuplicateState>,
 }
 
 #[derive(Default)]
 struct DuplicateState {
     /// Map from full module id without extension → first module id.
-    file_names: FxHashMap<String, String>,
+    file_names: FxDashMap<String, String>,
     /// Full module ids involved in duplicate keys.
-    duplicated_file_names: FxHashSet<String>,
+    duplicated_file_names: FxDashSet<String>,
 }
 
 impl DuplicateState {
-    fn record_module_id(&mut self, id: String, key: String) {
-        if let Some(existing) = self.file_names.get(&key).cloned() {
+    fn record_module_id(&self, id: String, key: String) {
+        let mut existing = None;
+        self.file_names
+            .entry(key)
+            .and_modify(|value| existing = Some(value.clone()))
+            .or_insert_with(|| id.clone());
+        if let Some(existing) = existing {
             self.duplicated_file_names.insert(existing);
             self.duplicated_file_names.insert(id);
-        } else {
-            self.file_names.insert(key, id);
         }
     }
 
@@ -54,13 +56,13 @@ impl DuplicateState {
         let mut files = self
             .duplicated_file_names
             .iter()
-            .cloned()
+            .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
         files.sort();
         files
     }
 
-    fn clear(&mut self) {
+    fn clear(&self) {
         self.file_names.clear();
         self.duplicated_file_names.clear();
     }
@@ -69,7 +71,7 @@ impl DuplicateState {
 impl DuplicateCheckPlugin {
     pub fn new() -> Self {
         DuplicateCheckPlugin {
-            state: Arc::new(Mutex::new(DuplicateState::default())),
+            state: Arc::new(DuplicateState::default()),
         }
     }
 }
@@ -105,9 +107,6 @@ impl Plugin for DuplicateCheckPlugin {
     ) -> impl std::future::Future<Output = HookNoopReturn> + Send {
         let state = Arc::clone(&self.state);
         async move {
-            let mut state = state.lock().map_err(|e| {
-                anyhow::anyhow!("duplicate-check: failed to lock state in build_start: {e}")
-            })?;
             state.clear();
             Ok(())
         }
@@ -122,29 +121,8 @@ impl Plugin for DuplicateCheckPlugin {
         let state = Arc::clone(&self.state);
 
         async move {
-            // Skip declaration files — they are type-only and produce no records.
-            if DuplicateModuleId::new(&id).is_declaration() {
-                return Ok(None);
-            }
-
-            // Skip OHM URL external references — not local source files.
-            if OhmUrl::parse(&id)
-                .ok()
-                .is_some_and(|url| url.is_cross_bundle_reference())
-            {
-                return Ok(None);
-            }
-
             let module_id = DuplicateModuleId::new(&id);
-            let key = match module_id.extensionless_key() {
-                Some(key) => key,
-                None => return Ok(None),
-            };
-
-            let mut state = state.lock().map_err(|e| {
-                anyhow::anyhow!("duplicate-check: failed to lock state in load: {e}")
-            })?;
-
+            let key = module_id.extensionless_key();
             state.record_module_id(id, key);
 
             Ok(None)
@@ -160,9 +138,6 @@ impl Plugin for DuplicateCheckPlugin {
         let state = Arc::clone(&self.state);
 
         async move {
-            let mut state = state.lock().map_err(|e| {
-                anyhow::anyhow!("duplicate-check: failed to lock state in build_end: {e}")
-            })?;
             if !state.duplicated_file_names.is_empty() {
                 let files = state.sorted_duplicate_file_names();
                 ctx.warn(LogWithoutPlugin {
@@ -191,15 +166,17 @@ impl<'a> DuplicateModuleId<'a> {
         Self { raw }
     }
 
-    fn is_declaration(&self) -> bool {
-        SourceFileName::new(Path::new(self.raw)).is_declaration()
-    }
-
-    fn extensionless_key(&self) -> Option<String> {
+    /// `check-duplicate-filenames-plugin.js::load` applies Node
+    /// `path.extname(id)` and slices that suffix from every loaded module ID.
+    /// An extensionless ID therefore uses the empty key, exactly like
+    /// `id.slice(0, -0)` in JavaScript.
+    fn extensionless_key(&self) -> String {
         let mut path = Path::new(self.raw).to_path_buf();
-        path.extension()?;
+        if path.extension().is_none() {
+            return String::new();
+        }
         path.set_extension("");
-        path.to_str().map(ToOwned::to_owned)
+        path.to_string_lossy().into_owned()
     }
 }
 
@@ -211,21 +188,21 @@ mod tests {
     fn keeps_directory_in_extensionless_key_like_hvigor() {
         assert_eq!(
             DuplicateModuleId::new("/project/src/a/Index.ets").extensionless_key(),
-            Some("/project/src/a/Index".to_owned())
+            "/project/src/a/Index".to_owned()
         );
         assert_eq!(
             DuplicateModuleId::new("/project/src/b/Index.ets").extensionless_key(),
-            Some("/project/src/b/Index".to_owned())
+            "/project/src/b/Index".to_owned()
         );
     }
 
     #[test]
     fn different_directories_with_same_file_name_are_not_duplicates() {
-        let mut state = DuplicateState::default();
+        let state = DuplicateState::default();
         for id in ["/project/src/a/Index.ets", "/project/src/b/Index.ets"] {
             state.record_module_id(
                 id.to_owned(),
-                DuplicateModuleId::new(id).extensionless_key().unwrap(),
+                DuplicateModuleId::new(id).extensionless_key(),
             );
         }
 
@@ -234,11 +211,11 @@ mod tests {
 
     #[test]
     fn same_path_with_different_extensions_is_duplicate_like_hvigor() {
-        let mut state = DuplicateState::default();
+        let state = DuplicateState::default();
         for id in ["/project/src/a/Index.ets", "/project/src/a/Index.ts"] {
             state.record_module_id(
                 id.to_owned(),
-                DuplicateModuleId::new(id).extensionless_key().unwrap(),
+                DuplicateModuleId::new(id).extensionless_key(),
             );
         }
 
@@ -248,6 +225,22 @@ mod tests {
                 "/project/src/a/Index.ets".to_owned(),
                 "/project/src/a/Index.ts".to_owned()
             ]
+        );
+    }
+
+    #[test]
+    fn extensionless_loaded_ids_share_the_empty_key_like_node_path_extname() {
+        let state = DuplicateState::default();
+        for id in ["\0virtual-a", "\0virtual-b"] {
+            state.record_module_id(
+                id.to_owned(),
+                DuplicateModuleId::new(id).extensionless_key(),
+            );
+        }
+
+        assert_eq!(
+            state.sorted_duplicate_file_names(),
+            vec!["\0virtual-a".to_owned(), "\0virtual-b".to_owned()]
         );
     }
 }
