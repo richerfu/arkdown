@@ -8,25 +8,18 @@
 //! - **real_build** replaces those exact modules with empty virtual modules so
 //!   Rolldown keeps import bindings stable without bundling duplicate code.
 //!
-//! After the bundle completes, call [`HarDedupPlugin::dedup_facts`] to obtain
-//! the collected [`HarDedupFact`] records for downstream stages.
-//!
 //! Previously the standalone `arkdown-plugin-har-dedup` crate.
 
 use rustc_hash::FxHashSet;
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 
 use arkdown_path::canonicalize_or_owned;
-use rolldown_common::{ModuleInfo, NormalModule};
 use rolldown_plugin::{
     HookBuildEndArgs, HookLoadArgs, HookLoadOutput, HookLoadReturn, HookNoopReturn,
     HookResolveIdArgs, HookResolveIdOutput, HookResolveIdReturn, HookUsage, Plugin, PluginContext,
     SharedLoadPluginContext,
 };
-
-use crate::facts::HarDedupFact;
 
 // ---------------------------------------------------------------------------
 // Mode
@@ -51,12 +44,9 @@ pub enum HarDedupMode {
 ///
 /// Use [`HarDedupPlugin::collect_pass`] for the first bundle run and
 /// [`HarDedupPlugin::real_build`] for subsequent runs.  After bundling, call
-/// [`HarDedupPlugin::dedup_facts`] to obtain the [`HarDedupFact`] records.
 pub struct HarDedupPlugin {
     mode: HarDedupMode,
     collect_file_path: PathBuf,
-    /// Module IDs collected during the collect pass (oh_modules entries).
-    collected: Arc<Mutex<Vec<String>>>,
 }
 
 impl std::fmt::Debug for HarDedupPlugin {
@@ -82,7 +72,6 @@ impl HarDedupPlugin {
         HarDedupPlugin {
             mode: HarDedupMode::CollectPass { source_har_roots },
             collect_file_path,
-            collected: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -99,41 +88,7 @@ impl HarDedupPlugin {
                 excluded_files: excluded,
             },
             collect_file_path,
-            collected: Arc::new(Mutex::new(Vec::new())),
         })
-    }
-
-    /// Return [`HarDedupFact`] records for every module that was deduplicated.
-    ///
-    /// In `CollectPass` mode this returns the modules collected during the
-    /// current run (each marked as its own canonical source).  In `RealBuild`
-    /// mode this returns facts for every module that was excluded as external,
-    /// using the collect file path stem as the HAR package name.
-    pub fn dedup_facts(&self) -> Vec<HarDedupFact> {
-        match &self.mode {
-            HarDedupMode::CollectPass { .. } => {
-                let ids = self.collected.lock().unwrap_or_else(|p| p.into_inner());
-                let har_name = CollectFilePath::new(&self.collect_file_path).har_name();
-                ids.iter()
-                    .map(|id| HarDedupFact {
-                        module_id: id.clone(),
-                        source_hars: vec![har_name.clone()],
-                        canonical_har: har_name.clone(),
-                    })
-                    .collect()
-            }
-            HarDedupMode::RealBuild { excluded_files } => {
-                let har_name = CollectFilePath::new(&self.collect_file_path).har_name();
-                excluded_files
-                    .iter()
-                    .map(|module_id| HarDedupFact {
-                        module_id: module_id.clone(),
-                        source_hars: vec![har_name.clone()],
-                        canonical_har: har_name.clone(),
-                    })
-                    .collect()
-            }
-        }
     }
 
     // ── Internal helpers ──────────────────────────────────────────────────────
@@ -153,13 +108,27 @@ impl HarDedupPlugin {
         Ok(None)
     }
 
-    pub(crate) fn flush_collect(&self) -> Result<(), HarDedupError> {
+    /// `hsp-collect-har-files.js::buildEnd/collectSourceFiles` reads the final
+    /// Rollup graph through `this.getModuleIds()`. Collecting here avoids a
+    /// shared write on every concurrent `moduleParsed` hook and preserves the
+    /// same graph boundary.
+    pub(crate) fn flush_collect<I, S>(&self, module_ids: I) -> Result<(), HarDedupError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
         if matches!(self.mode, HarDedupMode::CollectPass { .. }) {
-            let files = self
-                .collected
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .clone();
+            let files = module_ids
+                .into_iter()
+                .filter_map(|id| {
+                    let id = id.as_ref();
+                    self.should_collect_source(id).then(|| {
+                        canonicalize_or_owned(Path::new(id.strip_prefix('\0').unwrap_or(id)))
+                            .to_string_lossy()
+                            .into_owned()
+                    })
+                })
+                .collect::<Vec<_>>();
             CollectFile::write(&self.collect_file_path, &files)?;
         }
         Ok(())
@@ -183,6 +152,9 @@ impl HarDedupPlugin {
         let HarDedupMode::CollectPass { source_har_roots } = &self.mode else {
             return false;
         };
+        if id.starts_with('\0') {
+            return false;
+        }
         let path = canonicalize_or_owned(Path::new(id.strip_prefix('\0').unwrap_or(id)));
         source_har_roots.iter().any(|root| path.starts_with(root))
     }
@@ -194,7 +166,10 @@ impl Plugin for HarDedupPlugin {
     }
 
     fn register_hook_usage(&self) -> HookUsage {
-        HookUsage::ResolveId | HookUsage::Load | HookUsage::ModuleParsed | HookUsage::BuildEnd
+        match self.mode {
+            HarDedupMode::CollectPass { .. } => HookUsage::BuildEnd,
+            HarDedupMode::RealBuild { .. } => HookUsage::ResolveId | HookUsage::Load,
+        }
     }
 
     fn load(
@@ -216,33 +191,12 @@ impl Plugin for HarDedupPlugin {
         async move { result }
     }
 
-    fn module_parsed(
-        &self,
-        _ctx: &PluginContext,
-        module_info: Arc<ModuleInfo>,
-        _normal_module: &NormalModule,
-    ) -> impl std::future::Future<Output = HookNoopReturn> + Send {
-        let id = module_info.id.as_str().to_owned();
-        let collected = Arc::clone(&self.collected);
-        let should_collect = self.should_collect_source(&id);
-        async move {
-            if should_collect {
-                let path = canonicalize_or_owned(Path::new(id.strip_prefix('\0').unwrap_or(&id)));
-                collected
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .push(path.to_string_lossy().into_owned());
-            }
-            Ok(())
-        }
-    }
-
     fn build_end(
         &self,
-        _ctx: &PluginContext,
+        ctx: &PluginContext,
         _args: Option<&HookBuildEndArgs<'_>>,
     ) -> impl std::future::Future<Output = HookNoopReturn> + Send {
-        let result = self.flush_collect();
+        let result = self.flush_collect(ctx.get_module_ids());
         async move { result.map_err(|e| anyhow::anyhow!("har-dedup: {e}")) }
     }
 }
@@ -281,32 +235,6 @@ impl CollectFile {
                 .collect(),
         }
         .source_har_files)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Collect file paths
-// ---------------------------------------------------------------------------
-
-pub(crate) struct CollectFilePath<'a> {
-    path: &'a Path,
-}
-
-impl<'a> CollectFilePath<'a> {
-    pub(crate) fn new(path: &'a Path) -> Self {
-        Self { path }
-    }
-
-    /// Derive a short HAR package name from the collect file path.
-    ///
-    /// Uses the file stem of the collect file (e.g. `"har_files"` from
-    /// `intermediates/har_dedup/har_files.json`) as a stable identifier.
-    fn har_name(&self) -> String {
-        self.path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("unknown_har")
-            .to_string()
     }
 }
 

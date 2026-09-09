@@ -229,8 +229,9 @@ native checker、build semantic、SDK CommonJS callback 与 OXC 类型消费者�
 - 依据 ets2bundle watch 生命周期复用 TSGO `updateProgram`，减少跨轮解析和
   checker 建图；不得改变现有单轮诊断、类型事实和失效语义，也不得恢复旧 Rust
   子集 checker 或 SDK Node checker 兜底。
-- 将 `duplicate_check` 和 `har_dedup` 的 `Arc<Mutex>` collector 改为局部 facts
-  加确定性归并，避免在 Rolldown hot path 上共享写锁。
+- `duplicate_check` 已用 Rolldown 分片 facts 取代全局 `Arc<Mutex>`，并在告警边界
+  确定性归并；`har_dedup` 已按 `hsp-collect-har-files.js::buildEnd` 直接读取最终
+  module graph，删除 `moduleParsed` 共享 collector 和无调用的 `HarDedupFact` facade。
 - 在 Rolldown 提供结构化磁盘图接口后再实现跨进程 graph cache；在此之前不
   自创序列化格式。
 - 按源码补充更细粒度的 ABC invalidation 和依赖 wave；所有并发结果按 typed

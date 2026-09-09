@@ -11,7 +11,6 @@
 //! | `bundler.rs` | `Bundler`, `BundleOutput` — Rolldown orchestration |
 //! | `manual_chunks.rs` | `ManualChunkPolicy`, `ManualChunkDecision`, `ChunkName` |
 //! | `watch_config.rs` | `WatchConfigBridge`, `WatchInvalidationEvent` |
-//! | `facts.rs` | HSP HAR-dedup facts |
 //! | `cache_bridge.rs` | `BundleCacheBridge`, `ShouldInvalidCacheRequest/Result` |
 //! | `diagnostics.rs` | `BundlerDiagnostic`, `RolldownErrorKind` |
 //! | `compile_entry.rs` | `CompileEntryNamer` — internal entry point helpers |
@@ -22,7 +21,6 @@ pub mod cache_bridge;
 mod chunk_module_request;
 pub mod compile_entry;
 pub mod diagnostics;
-pub mod facts;
 pub mod hvigor_json;
 pub mod manual_chunks;
 #[cfg(feature = "memory-diagnostics")]
@@ -61,9 +59,6 @@ pub use manual_chunks::{ChunkName, ManualChunkDecision, ManualChunkPolicy};
 
 // watch_config — watch mode bridge
 pub use watch_config::{WatchConfigBridge, WatchInvalidationEvent, WatchParityPolicy};
-
-// facts — bundle facts
-pub use facts::HarDedupFact;
 
 // cache_bridge — rollup cache bridge
 pub use cache_bridge::{
