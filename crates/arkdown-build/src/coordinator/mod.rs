@@ -76,6 +76,7 @@ use crate::layout::{
     ModuleBuildLayout, ModuleSourceLayout, ProjectBuildLayout, ResourceOutputLayout,
 };
 use crate::module_plan::ModuleSelectionPlanner;
+use crate::project_checker::ProjectSemanticRuntime;
 use crate::quickfix::{
     ColdReloadProcessor, QuickFixArtifactInput, QuickFixArtifactProcessor, QuickFixTaskBoundary,
     QuickFixTaskPlan, QuickFixVersionStore,

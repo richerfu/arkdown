@@ -4,6 +4,7 @@ use super::*;
 
 pub(super) struct CoordinatorBytecodeStageInput<'a> {
     pub(super) bundle_runtime: Option<&'a mut BundleRuntime>,
+    pub(super) semantic_runtime: Option<&'a mut ProjectSemanticRuntime>,
     pub(super) args: &'a BuildRequest,
     pub(super) config: &'a Arc<ArkdownConfig>,
     pub(super) session: &'a Arc<BuildSession>,
@@ -39,6 +40,7 @@ impl BuildCoordinator {
     ) -> Result<CoordinatorBytecodeStageOutput> {
         let CoordinatorBytecodeStageInput {
             bundle_runtime,
+            semantic_runtime,
             args,
             config,
             session,
@@ -731,6 +733,7 @@ impl BuildCoordinator {
 
             WatchStage::run(WatchStageInput::from_build(WatchStageBuildInput {
                 bundle_runtime: bundle_runtime.map(std::mem::take).unwrap_or_default(),
+                semantic_runtime: semantic_runtime.map(std::mem::take).unwrap_or_default(),
                 config: config.clone(),
                 session: session.clone(),
                 args,

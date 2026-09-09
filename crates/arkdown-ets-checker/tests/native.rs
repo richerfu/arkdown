@@ -6,7 +6,8 @@ use std::{
 use arkdown_ets_checker::{
     NativeArktsTransformTypeQuery, NativeCheckError, NativeCompilerOptions, NativeDiagnostic,
     NativeOhSdkCheckPlugin, NativeOhSdkClassCheckPlugin, NativeOhSdkPluginHost,
-    NativeOhSdkPluginRequest, NativeOhSdkPluginResponse, NativeTypeQueryRange, NativeTypeSession,
+    NativeOhSdkPluginRequest, NativeOhSdkPluginResponse, NativeProgramFileChanges,
+    NativeTypeQueryRange, NativeTypeSession,
 };
 use serde_json::json;
 
@@ -769,5 +770,74 @@ fn native_updates_program_and_resolves_aliased_factory_types() {
         )
         .unwrap();
     assert!(session.diagnostics(&program).unwrap().is_empty());
+    session.release(program).unwrap();
+}
+
+#[test]
+#[ignore = "requires ARKDOWN_TYPESCRIPT_PATH native compiler"]
+fn native_incremental_program_tracks_created_and_deleted_modules() {
+    let project = tempfile::tempdir().unwrap();
+    let entry = project.path().join("index.ts");
+    let dependency = project.path().join("dependency.ts");
+    let entry_source: Arc<str> =
+        Arc::from("import { value } from './dependency'; export const result: number = value;");
+    let options = NativeCompilerOptions::arkts11(project.path());
+    let initial_sources = BTreeMap::from([(entry.clone(), entry_source.clone())]);
+    let mut session = NativeTypeSession::start(
+        &NativeTypeSession::executable().unwrap(),
+        project.path(),
+        initial_sources.clone(),
+        None,
+    )
+    .unwrap();
+    let program = session
+        .create_program(std::slice::from_ref(&entry), &options)
+        .unwrap();
+    assert!(
+        session
+            .diagnostics(&program)
+            .unwrap()
+            .iter()
+            .any(|diagnostic| { diagnostic.code == 2307 })
+    );
+
+    let mut sources_with_dependency = initial_sources;
+    sources_with_dependency.insert(
+        dependency.clone(),
+        Arc::from("export const value: number = 1;"),
+    );
+    let program = session
+        .update_program_snapshot(
+            program,
+            std::slice::from_ref(&entry),
+            &options,
+            sources_with_dependency,
+            &NativeProgramFileChanges {
+                created: vec![dependency.clone()],
+                ..NativeProgramFileChanges::default()
+            },
+        )
+        .unwrap();
+    assert!(session.diagnostics(&program).unwrap().is_empty());
+
+    let program = session
+        .update_program_snapshot(
+            program,
+            std::slice::from_ref(&entry),
+            &options,
+            BTreeMap::from([(entry.clone(), entry_source)]),
+            &NativeProgramFileChanges {
+                deleted: vec![dependency],
+                ..NativeProgramFileChanges::default()
+            },
+        )
+        .unwrap();
+    assert!(
+        session
+            .diagnostics(&program)
+            .unwrap()
+            .iter()
+            .any(|diagnostic| { diagnostic.code == 2307 })
+    );
     session.release(program).unwrap();
 }

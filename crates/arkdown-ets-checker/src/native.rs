@@ -373,6 +373,18 @@ pub struct NativeProgram {
     project: String,
 }
 
+/// Filesystem invalidation passed to an incremental native program update.
+///
+/// `rollup-plugin-watch-change.ts::watchChange` preserves update separately
+/// from create/delete. The Go API exposes the same three-way distinction, so
+/// the Rust watch owner must not collapse it to a bare changed-path list.
+#[derive(Debug, Clone, Default)]
+pub struct NativeProgramFileChanges {
+    pub changed: Vec<PathBuf>,
+    pub created: Vec<PathBuf>,
+    pub deleted: Vec<PathBuf>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct NativeType {
     pub id: u32,
@@ -675,28 +687,96 @@ impl NativeTypeSession {
         changed: BTreeMap<PathBuf, Arc<str>>,
         deleted: &[PathBuf],
     ) -> Result<NativeProgram, NativeCheckError> {
-        let changed_files: Vec<_> = changed.keys().cloned().collect();
-        for path in &changed_files {
+        let mut changes = NativeProgramFileChanges::default();
+        for path in changed.keys() {
+            if self.sources.contains_key(path) {
+                changes.changed.push(path.clone());
+            } else {
+                changes.created.push(path.clone());
+            }
+        }
+        changes.deleted.extend_from_slice(deleted);
+        let mut sources = self.sources.clone();
+        sources.extend(changed);
+        for path in deleted {
+            sources.remove(path);
+        }
+        self.update_program_snapshot(previous, roots, options, sources, &changes)
+    }
+
+    /// Update a retained program from the next immutable source snapshot.
+    ///
+    /// The source diff protects callers that rebuild their input inventory,
+    /// while `observed` carries watcher events for compiler-owned disk files
+    /// that are intentionally absent from the callback source map.
+    pub fn update_program_snapshot(
+        &mut self,
+        previous: NativeProgram,
+        roots: &[PathBuf],
+        options: &NativeCompilerOptions,
+        sources: BTreeMap<PathBuf, Arc<str>>,
+        observed: &NativeProgramFileChanges,
+    ) -> Result<NativeProgram, NativeCheckError> {
+        let mut changed = observed.changed.iter().cloned().collect::<BTreeSet<_>>();
+        let mut created = observed.created.iter().cloned().collect::<BTreeSet<_>>();
+        let mut deleted = observed.deleted.iter().cloned().collect::<BTreeSet<_>>();
+
+        for (path, content) in &sources {
+            match self.sources.get(path) {
+                Some(previous) if previous.as_ref() != content.as_ref() => {
+                    deleted.remove(path);
+                    changed.insert(path.clone());
+                }
+                None => {
+                    deleted.remove(path);
+                    created.insert(path.clone());
+                }
+                _ => {
+                    deleted.remove(path);
+                }
+            }
+        }
+        for path in self.sources.keys() {
+            if !sources.contains_key(path) {
+                deleted.insert(path.clone());
+            }
+        }
+
+        // A final filesystem state has one meaning even when an editor emits
+        // several events for the same path in a single debounced batch.
+        for path in &deleted {
+            changed.remove(path);
+            created.remove(path);
+        }
+        for path in &created {
+            changed.remove(path);
+        }
+
+        for path in changed.iter().chain(created.iter()) {
             self.deleted.remove(path);
         }
-        self.sources.extend(changed);
-        for path in deleted {
-            self.sources.remove(path);
+        for path in &deleted {
             self.deleted.insert(path.clone());
         }
-        let created: CreatedProgram = self.request(
+        self.sources = sources;
+
+        let created_program: CreatedProgram = self.request(
             "createProgram",
             json!({
                 "rootFiles": roots,
                 "createProgramOptions": { "compilerOptions": options },
                 "oldProgram": previous,
-                "fileChanges": { "changed": changed_files, "deleted": deleted }
+                "fileChanges": {
+                    "changed": changed,
+                    "created": created,
+                    "deleted": deleted,
+                }
             }),
         )?;
         self.release(previous)?;
         Ok(NativeProgram {
-            snapshot: created.snapshot,
-            project: created.project.id,
+            snapshot: created_program.snapshot,
+            project: created_program.project.id,
         })
     }
 

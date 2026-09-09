@@ -59,12 +59,17 @@ OXC corpus 只验证 OH 已定义的输入，不用于发明 checker 规则。�
 正常 npm 调用由 N-API 根据自身模块位置传入平台包编译器路径。
 `ARKDOWN_TYPESCRIPT_PATH` 只用于仓库测试或开发覆盖。
 
-## 尚可优化但不属于能力差异
+## Watch 增量生命周期
 
-build/check 已共享同一套配置和语义服务。watch 每轮仍创建并销毁 TSGO session，
-没有复用已有 `updateProgram` 能力；这是性能和增量生命周期优化，不会令单轮诊断、
-类型事实或产物语义缺失。实现该优化前仍须读取 ets2bundle watch 的 session 与
-失效顺序，不能自行定义跨轮缓存规则。
+build/check 共享同一套配置和语义服务。watch 按
+`rollup-plugin-ets-checker.ts::etsChecker` 复用每个模块/目标的 TSGO session：首轮
+创建 Program，后续轮次使用 old Program 和 watcher 的 modified/created/deleted
+事件更新 snapshot；新 Program 建立后释放旧 snapshot。每轮依然重新执行 source
+graph、ArkTS linter、syntax/semantic/declaration diagnostics 和 OXC 所需类型事实
+查询，未引入跨轮诊断或 facts 缓存。
+
+真实 JS CLI fixture 验证一个 watch 周期只执行一次 `initialize`；二次构建执行增量
+`createProgram` 与旧 snapshot `release`，不产生第二个 TSGO 进程。
 
 产品配置覆盖语言版本是合法行为，不是 checker 缺口；不得在后续审计中再次列为
 问题。
@@ -82,6 +87,10 @@ node tools/scripts/package-arkts.mjs
 ARKDOWN_TYPESCRIPT_PATH=/path/to/94e2465a5f92/arm_darwin/tsc \
   cargo test -p arkdown-ets-checker --test native -- --include-ignored
 cargo check --workspace --all-targets
+
+# JS CLI watch：首轮完成并显示 session-watcher started 后修改一个 .ets 文件
+RUST_LOG=arkdown_watcher=debug,arkdown_ets_checker=info,arkdown_build=info \
+  node packages/arkdown/js/arkdown-cli.js build --project /path/to/project --watch
 ```
 
 Linux/Windows 产物已交叉构建并验证 hash/元数据；未把交叉构建表述为对应平台运行

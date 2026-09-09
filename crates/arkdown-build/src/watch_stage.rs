@@ -31,6 +31,7 @@ use crate::request::{AbcBackendChoice, AnalyzeModeChoice, BuildAction, BuildRequ
 
 use super::BuildService;
 use crate::bundle_plan::BundleRuntime;
+use crate::project_checker::ProjectSemanticRuntime;
 
 /// Input for the watch stage.
 ///
@@ -38,6 +39,7 @@ use crate::bundle_plan::BundleRuntime;
 /// N-API request values and avoid retaining unrelated build state.
 pub(super) struct WatchStageInput {
     pub(super) bundle_runtime: BundleRuntime,
+    pub(super) semantic_runtime: ProjectSemanticRuntime,
     pub(super) config: Arc<ArkdownConfig>,
     pub(super) session: Arc<BuildSession>,
     /// Build target string (e.g. "hap", "hsp", "har").
@@ -92,6 +94,7 @@ pub(super) struct WatchStageInput {
 
 pub(super) struct WatchStageBuildInput<'a> {
     pub(super) bundle_runtime: BundleRuntime,
+    pub(super) semantic_runtime: ProjectSemanticRuntime,
     pub(super) config: Arc<ArkdownConfig>,
     pub(super) session: Arc<BuildSession>,
     pub(super) args: &'a BuildRequest,
@@ -109,6 +112,7 @@ impl WatchStageInput {
     pub(super) fn from_build(input: WatchStageBuildInput<'_>) -> Self {
         let WatchStageBuildInput {
             bundle_runtime,
+            semantic_runtime,
             config,
             session,
             args,
@@ -123,6 +127,7 @@ impl WatchStageInput {
         } = input;
         Self {
             bundle_runtime,
+            semantic_runtime,
             config,
             session,
             target: args.target.clone(),
@@ -180,6 +185,7 @@ impl WatchStage {
     /// encounters a fatal error.
     pub(super) async fn run(input: WatchStageInput) -> Result<()> {
         let mut bundle_runtime = input.bundle_runtime;
+        let mut semantic_runtime = input.semantic_runtime;
         let config_for_watch = input.config.clone();
         let arkts_version = input.session.arkts_language_version;
         let session = input.session;
@@ -389,18 +395,22 @@ impl WatchStage {
                 };
                 let command =
                     BuildService::new(rebuild_args).with_package_plugins(package_plugins.clone());
-                if let Err(e) =
-                    rt.block_on(command.execute_with_bundle_runtime(&mut bundle_runtime))
-                {
+                if let Err(e) = rt.block_on(
+                    command.execute_with_runtimes(&mut bundle_runtime, &mut semantic_runtime),
+                ) {
                     tracing::error!(error = %format!("{e:#}"), "watch rebuild failed");
                 }
                 Ok(())
             });
-            let close_result = rt
+            let semantic_close_result = semantic_runtime
+                .close()
+                .map_err(|error| arkdown_watcher::WatchError::Build(error.to_string()));
+            let bundle_close_result = rt
                 .block_on(bundle_runtime.close())
                 .map_err(|error| arkdown_watcher::WatchError::Build(error.to_string()));
             watch_result?;
-            close_result
+            semantic_close_result?;
+            bundle_close_result
         })
         .await
         .map_err(|error| anyhow::anyhow!("watch stage task failed: {error}"))?

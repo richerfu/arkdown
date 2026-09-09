@@ -91,6 +91,7 @@ pub(super) struct CoordinatorBundleStageInput<'a> {
     pub(super) component_metadata: &'a ComponentMetadata,
     pub(super) insight_intent_schema_catalog: &'a InsightIntentSchemaCatalog,
     pub(super) bundle_runtime: Option<&'a mut BundleRuntime>,
+    pub(super) semantic_runtime: Option<&'a mut ProjectSemanticRuntime>,
 }
 
 pub(super) struct CoordinatorBundleStageOutput {
@@ -129,6 +130,7 @@ impl BuildCoordinator {
             component_metadata,
             insight_intent_schema_catalog,
             mut bundle_runtime,
+            mut semantic_runtime,
         } = input;
 
         // ── Step 3: Bundling ──────────────────────────────────────────────
@@ -306,8 +308,12 @@ impl BuildCoordinator {
                         std::iter::empty(),
                         std::iter::empty(),
                     )
-                }
-                .run()?;
+                };
+                let semantic = if let Some(runtime) = semantic_runtime.as_deref_mut() {
+                    semantic.run_with_runtime(runtime, args.watch_invalidation.as_ref())?
+                } else {
+                    semantic.run()?
+                };
                 for warning in &semantic.warnings {
                     tracing::warn!(module = %module.name, diagnostic = warning, "ArkTS native checker warning");
                 }
