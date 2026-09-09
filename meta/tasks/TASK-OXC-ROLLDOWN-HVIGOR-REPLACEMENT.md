@@ -163,6 +163,14 @@ ObservedV2 和 Function。
 和 source map；字节码混淆由 Rust 构造计划并调用 SDK 的 PandaGuard 原生工具。
 不得恢复 JS ArkGuard bridge、单文件 facade 或 Hvigor task wrapper。
 
+规则解析现已覆盖当前 `ConfigResolver` 的完整 option 集；其中
+`-remove-nosideeffects-calls` 按 `DisableConsoleTransformer` 只删除独立调用语句，
+保留 `class['property']` 文本并支持名称通配符；`-keep-uncompact` 按
+`resolveKeepUncompactConfig/handleUncompactPathsForArkguard` 的原始源路径、目录、
+通配符和排除项决定单文件 printer。显式 `-print-namecache` 与上游一样不创建父
+目录。JS CLI 双轮 release 实跑已验证默认/显式 cache 一致，新增声明后已有
+identifier/property/file 映射零变化，未配置调用保留，选中文件保持多行。
+
 ### Cache 和 watch
 
 当前已有版本化的跨进程 OXC transform/fact cache，以及同一 JS CLI watch
@@ -240,8 +248,9 @@ native checker、build semantic、SDK CommonJS callback 与 OXC 类型消费者�
   loader `patchConfig` 三个路径字段及 SDK `cachePath` 默认 changed-list，不再保留
   固定内部路径这一错误兼容分支。AOT 的空 `.an/.ai` 与当前 `gen_aot.ts` 源码一致；
   该源码没有执行其构造的 `ark_aot_compiler` 命令，Arkdown 也不得额外执行。
-- 剩余真实矩阵限定为多 HAP/HSP 复杂 APP、全部签名材料组合和 ArkGuard 全规则/
-  name-cache 跨轮复用；不得把已经实跑的 AOT/reload/未签名 HQF 继续列为未实现能力。
+- 剩余真实矩阵限定为多 HAP/HSP 复杂 APP、全部签名材料组合，以及 ArkGuard
+  `-print-kept-names` 的 reasons/whitelist 完整产物与真实 PandaGuard SDK 组合；
+  ArkGuard 规则集和 name-cache 跨轮复用已经由 JS CLI 实跑，不得继续列为缺口。
 - 在 Rolldown 提供结构化磁盘图接口后再实现跨进程 graph cache；在此之前不
   自创序列化格式。
 - 按源码补充更细粒度的 ABC invalidation 和依赖 wave；所有并发结果按 typed

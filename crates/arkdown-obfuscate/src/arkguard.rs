@@ -8,12 +8,12 @@ use arkdown_path::{
 };
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    AccessorProperty, BindingIdentifier, Class, ComputedMemberExpression, ExportAllDeclaration,
-    ExportDeclaration, ExportDefaultDeclaration, ExportFromDeclaration, ExportNamedDeclaration,
-    Expression, FormalParameter, FormalParameterRest, Function, IdentifierName,
-    IdentifierReference, ImportDeclaration, ImportExpression, LazyImportDeclaration,
-    MethodDefinition, MethodDefinitionKind, ModuleExportName, ObjectProperty,
-    PrivateFieldExpression, Program, PropertyDefinition, PropertyKey, Statement,
+    AccessorProperty, BindingIdentifier, ChainElement, Class, ComputedMemberExpression,
+    ExportAllDeclaration, ExportDeclaration, ExportDefaultDeclaration, ExportFromDeclaration,
+    ExportNamedDeclaration, Expression, FormalParameter, FormalParameterRest, Function,
+    IdentifierName, IdentifierReference, ImportDeclaration, ImportExpression,
+    LazyImportDeclaration, MethodDefinition, MethodDefinitionKind, ModuleExportName,
+    ObjectProperty, PrivateFieldExpression, Program, PropertyDefinition, PropertyKey, Statement,
     StaticMemberExpression, StringLiteral, TSEnumDeclaration, TSEnumMemberName,
     TSInterfaceDeclaration, TSMethodSignature, TSPropertySignature, VariableDeclaration,
 };
@@ -21,7 +21,7 @@ use oxc_ast_visit::{walk, walk_mut, Visit, VisitMut};
 use oxc_codegen::{Codegen, CodegenOptions, CommentOptions, IndentChar};
 use oxc_parser::Parser;
 use oxc_semantic::{Scoping, SemanticBuilder};
-use oxc_span::{SourceType, Span};
+use oxc_span::{GetSpan, SourceType, Span};
 use oxc_str::{Ident, Str};
 use oxc_syntax::reference::ReferenceId;
 use oxc_syntax::symbol::{SymbolFlags, SymbolId};
@@ -486,8 +486,8 @@ impl<'a> ArkguardModuleRunner<'a> {
                 )
             });
         }
-        if self.rules.remove_log {
-            ConsoleStatementRemover.transform(&mut program);
+        if self.rules.remove_log || !self.rules.remove_no_side_effect_calls.is_empty() {
+            ExpressionStatementRemover::new(source, self.rules).transform(&mut program);
         }
         let semantic_return = SemanticBuilder::new()
             .with_build_nodes(true)
@@ -561,7 +561,8 @@ impl<'a> ArkguardModuleRunner<'a> {
         let logical_path =
             ArkguardLogicalFilePath::new(&file.relative_path, &obfuscated_relative_path);
         let output_path = self.output_path(file, &obfuscated_relative_path);
-        let mut codegen_options = if self.rules.compact {
+        let compact = self.rules.compacts(&file.original_path);
+        let mut codegen_options = if compact {
             CodegenOptions::minify()
         } else {
             CodegenOptions {
@@ -581,7 +582,7 @@ impl<'a> ArkguardModuleRunner<'a> {
         if !is_declaration {
             codegen_options.source_map_path = Some(PathBuf::from(&file.relative_path));
         }
-        let (code, generated_map) = if self.rules.compact {
+        let (code, generated_map) = if compact {
             let generated = Codegen::new()
                 .with_options(codegen_options)
                 .with_scoping(Some(scoping))
@@ -1527,9 +1528,9 @@ impl ArkguardNameCache {
         fs_err::write(&default_path, &bytes)?;
         if let Some(configured) = rules.print_name_cache.as_deref() {
             let configured_path = adapter.project_root.join(configured);
-            if let Some(parent) = configured_path.parent() {
-                fs_err::create_dir_all(parent)?;
-            }
+            // `ConfigResolver.writeObfuscationNameCache` writes an explicit
+            // `-print-namecache` path directly. A missing parent is therefore
+            // an IO error rather than an implicitly created directory.
             fs_err::write(configured_path, &bytes)?;
         }
         if rules.print_kept_names {
@@ -2071,21 +2072,58 @@ impl<'a> VisitMut<'a> for NativeArkguardAstTransform<'a, '_> {
     }
 }
 
-struct ConsoleStatementRemover;
+struct ExpressionStatementRemover<'source, 'rules> {
+    source: &'source str,
+    rules: &'rules ObfuscationRules,
+}
 
-impl ConsoleStatementRemover {
+impl<'source, 'rules> ExpressionStatementRemover<'source, 'rules> {
+    fn new(source: &'source str, rules: &'rules ObfuscationRules) -> Self {
+        Self { source, rules }
+    }
+
     fn transform<'a>(&mut self, program: &mut oxc_ast::ast::Program<'a>) {
         self.visit_program(program);
     }
 
-    fn is_console_statement(statement: &Statement<'_>) -> bool {
+    fn is_removable_statement(&self, statement: &Statement<'_>) -> bool {
         let Statement::ExpressionStatement(statement) = statement else {
             return false;
         };
-        let Expression::CallExpression(call) = &statement.expression else {
+        let Some(call) = Self::call_expression(&statement.expression) else {
             return false;
         };
-        match &call.callee {
+        if self.rules.remove_log && Self::is_console_callee(&call.callee) {
+            return true;
+        }
+        if self.rules.remove_no_side_effect_calls.is_empty()
+            || !Self::is_property_or_element_access_chain(&call.callee)
+        {
+            return false;
+        }
+        let span = call.callee.span();
+        let Some(name) = self.source.get(span.start as usize..span.end as usize) else {
+            return false;
+        };
+        self.rules.remove_no_side_effect_calls.contains(name)
+            || ArkguardWildcard::matches_any(&self.rules.remove_no_side_effect_calls, name, false)
+    }
+
+    fn call_expression<'ast>(
+        expression: &'ast Expression<'_>,
+    ) -> Option<&'ast oxc_ast::ast::CallExpression<'ast>> {
+        match expression {
+            Expression::CallExpression(call) => Some(call),
+            Expression::ChainExpression(chain) => match &chain.expression {
+                ChainElement::CallExpression(call) => Some(call),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn is_console_callee(expression: &Expression<'_>) -> bool {
+        match expression {
             Expression::StaticMemberExpression(member) => {
                 matches!(&member.object, Expression::Identifier(identifier) if identifier.name == "console")
             }
@@ -2095,14 +2133,36 @@ impl ConsoleStatementRemover {
             _ => false,
         }
     }
+
+    fn is_property_or_element_access_chain(expression: &Expression<'_>) -> bool {
+        match expression {
+            Expression::Identifier(_) => true,
+            Expression::StaticMemberExpression(member) => {
+                Self::is_property_or_element_access_chain(&member.object)
+            }
+            Expression::ComputedMemberExpression(member) => {
+                Self::is_property_or_element_access_chain(&member.object)
+            }
+            Expression::ChainExpression(chain) => match &chain.expression {
+                ChainElement::StaticMemberExpression(member) => {
+                    Self::is_property_or_element_access_chain(&member.object)
+                }
+                ChainElement::ComputedMemberExpression(member) => {
+                    Self::is_property_or_element_access_chain(&member.object)
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
 }
 
-impl<'a> VisitMut<'a> for ConsoleStatementRemover {
+impl<'a> VisitMut<'a> for ExpressionStatementRemover<'_, '_> {
     fn visit_statements(&mut self, statements: &mut oxc_allocator::Vec<'a, Statement<'a>>) {
         for statement in statements.iter_mut() {
             self.visit_statement(statement);
         }
-        statements.retain(|statement| !Self::is_console_statement(statement));
+        statements.retain(|statement| !self.is_removable_statement(statement));
     }
 }
 
@@ -2203,6 +2263,30 @@ impl ObfuscationRules {
             return false;
         }
         self.keep_source_paths.iter().any(|configured| {
+            if ArkguardWildcard::new(configured, true).matches(&serialized) {
+                return true;
+            }
+            let configured_path = Path::new(configured);
+            configured == &serialized
+                || (configured_path.is_dir() && absolute.starts_with(configured_path))
+        })
+    }
+
+    fn compacts(&self, original_path: &Path) -> bool {
+        if !self.compact || self.keep_uncompact_paths.is_empty() {
+            return self.compact;
+        }
+        let absolute = canonicalize_or_owned(original_path);
+        let Ok(serialized) = ArtifactPathSerializer::path_to_slash_string(&absolute) else {
+            return self.compact;
+        };
+        if self.exclude_uncompact_paths.iter().any(|configured| {
+            configured == &serialized
+                || ArkguardWildcard::new(configured, true).matches(&serialized)
+        }) {
+            return true;
+        }
+        !self.keep_uncompact_paths.iter().any(|configured| {
             if ArkguardWildcard::new(configured, true).matches(&serialized) {
                 return true;
             }

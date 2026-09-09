@@ -52,6 +52,7 @@ pub struct ObfuscationRules {
     pub remove_comments: bool,
     pub compact: bool,
     pub remove_log: bool,
+    pub remove_no_side_effect_calls: FxHashSet<String>,
     pub keep_parameter_names: bool,
     pub keep_object_props: bool,
     pub strip_language_default: bool,
@@ -67,6 +68,8 @@ pub struct ObfuscationRules {
     pub keep_comments: FxHashSet<String>,
     pub keep_source_paths: FxHashSet<String>,
     pub exclude_source_paths: FxHashSet<String>,
+    pub keep_uncompact_paths: FxHashSet<String>,
+    pub exclude_uncompact_paths: FxHashSet<String>,
     pub keep_dts_paths: FxHashSet<String>,
 }
 
@@ -74,11 +77,13 @@ pub struct ObfuscationRules {
 enum Section {
     None,
     KeepSource,
+    KeepUncompact,
     KeepDts,
     KeepProperty,
     KeepGlobal,
     KeepFile,
     KeepComments,
+    RemoveNoSideEffectCalls,
     PrintNameCache,
     PrintKeptNames,
     ApplyNameCache,
@@ -103,6 +108,7 @@ impl ObfuscationRules {
     const REMOVE_COMMENTS: &'static str = "-remove-comments";
     const COMPACT: &'static str = "-compact";
     const REMOVE_LOG: &'static str = "-remove-log";
+    const REMOVE_NO_SIDE_EFFECT_CALLS: &'static str = "-remove-nosideeffects-calls";
     const PRINT_NAMECACHE: &'static str = "-print-namecache";
     const PRINT_KEPT_NAMES: &'static str = "-print-kept-names";
     const APPLY_NAMECACHE: &'static str = "-apply-namecache";
@@ -118,6 +124,7 @@ impl ObfuscationRules {
     const KEEP_PARAMETER_NAMES: &'static str = "-keep-parameter-names";
     const STRIP_NOT_COMPILED_MODULE_NAME: &'static str = "strip-not-compiled-module-name";
     const KEEP_OBJECT_PROPS: &'static str = "-keep-object-props";
+    const KEEP_UNCOMPACT: &'static str = "-keep-uncompact";
 
     /// Parse rule file content from a string.
     pub fn parse(content: &str) -> Self {
@@ -195,8 +202,14 @@ impl ObfuscationRules {
                     rules.keep_object_props = true;
                     section = Section::None;
                 }
+                Self::REMOVE_NO_SIDE_EFFECT_CALLS => {
+                    section = Section::RemoveNoSideEffectCalls;
+                }
                 Self::KEEP => {
                     section = Section::KeepSource;
+                }
+                Self::KEEP_UNCOMPACT => {
+                    section = Section::KeepUncompact;
                 }
                 Self::KEEP_DTS => {
                     section = Section::KeepDts;
@@ -230,6 +243,9 @@ impl ObfuscationRules {
                     Section::KeepSource => {
                         rules.keep_source_paths.insert(name.to_string());
                     }
+                    Section::KeepUncompact => {
+                        rules.keep_uncompact_paths.insert(name.to_string());
+                    }
                     Section::KeepDts => {
                         rules.keep_dts_paths.insert(name.to_string());
                     }
@@ -244,6 +260,9 @@ impl ObfuscationRules {
                     }
                     Section::KeepComments => {
                         rules.keep_comments.insert(name.to_string());
+                    }
+                    Section::RemoveNoSideEffectCalls => {
+                        rules.remove_no_side_effect_calls.insert(name.to_string());
                     }
                     Section::PrintNameCache => {
                         rules.print_name_cache = Some(name.to_string());
@@ -315,6 +334,11 @@ impl ObfuscationRules {
             remove_comments: self.remove_comments || other.remove_comments,
             compact: self.compact || other.compact,
             remove_log: self.remove_log || other.remove_log,
+            remove_no_side_effect_calls: self
+                .remove_no_side_effect_calls
+                .into_iter()
+                .chain(other.remove_no_side_effect_calls)
+                .collect(),
             keep_parameter_names: self.keep_parameter_names || other.keep_parameter_names,
             keep_object_props: self.keep_object_props || other.keep_object_props,
             strip_language_default: self.strip_language_default || other.strip_language_default,
@@ -355,6 +379,16 @@ impl ObfuscationRules {
                 .into_iter()
                 .chain(other.exclude_source_paths)
                 .collect(),
+            keep_uncompact_paths: self
+                .keep_uncompact_paths
+                .into_iter()
+                .chain(other.keep_uncompact_paths)
+                .collect(),
+            exclude_uncompact_paths: self
+                .exclude_uncompact_paths
+                .into_iter()
+                .chain(other.exclude_uncompact_paths)
+                .collect(),
             keep_dts_paths: self
                 .keep_dts_paths
                 .into_iter()
@@ -374,6 +408,9 @@ impl ObfuscationRules {
         self.keep_comments.extend(other.keep_comments);
         self.keep_source_paths.extend(other.keep_source_paths);
         self.exclude_source_paths.extend(other.exclude_source_paths);
+        self.keep_uncompact_paths.extend(other.keep_uncompact_paths);
+        self.exclude_uncompact_paths
+            .extend(other.exclude_uncompact_paths);
         self.keep_dts_paths.extend(other.keep_dts_paths);
         self
     }
@@ -476,6 +513,37 @@ impl ObfuscationRules {
             }
         }
 
+        let configured_paths = std::mem::take(&mut self.keep_uncompact_paths);
+        for configured in configured_paths {
+            let (exclude, value) = configured
+                .strip_prefix('!')
+                .map_or((false, configured.as_str()), |value| (true, value));
+            let unresolved = Path::new(value);
+            let anchored = if unresolved.is_absolute() {
+                unresolved.to_path_buf()
+            } else {
+                config_dir.join(unresolved)
+            };
+            let resolved = lexical_normalize(&anchored);
+            let contains_wildcards = value.contains(['*', '?']);
+            if !exclude && !contains_wildcards && !resolved.exists() {
+                // `ConfigResolver.resolveKeepUncompactConfig` warns and drops
+                // concrete paths which do not exist.
+                continue;
+            }
+            let resolved = if !contains_wildcards && resolved.exists() {
+                std::fs::canonicalize(&resolved)?
+            } else {
+                resolved
+            };
+            let serialized = ArtifactPathSerializer::path_to_slash_string(&resolved)?;
+            if exclude {
+                self.exclude_uncompact_paths.insert(serialized);
+            } else {
+                self.keep_uncompact_paths.insert(serialized);
+            }
+        }
+
         let dts_paths = std::mem::take(&mut self.keep_dts_paths);
         for configured in dts_paths {
             let path = Path::new(&configured);
@@ -511,31 +579,105 @@ impl ObfuscationRules {
 }
 
 struct ArkguardRuleTokens<'a> {
-    content: &'a str,
+    tokens: Vec<&'a str>,
 }
 
 impl<'a> ArkguardRuleTokens<'a> {
     fn new(content: &'a str) -> Self {
-        Self { content }
+        let mut ordinary = Vec::new();
+        let mut remove_calls = Vec::new();
+        let mut cursor = 0;
+        while let Some(offset) =
+            content[cursor..].find(ObfuscationRules::REMOVE_NO_SIDE_EFFECT_CALLS)
+        {
+            let start = cursor + offset;
+            ordinary.push(&content[cursor..start]);
+            let value_start = start + ObfuscationRules::REMOVE_NO_SIDE_EFFECT_CALLS.len();
+            let mut end = Self::nearest_option(content, value_start).unwrap_or(content.len());
+            while end > value_start {
+                let Some(last) = content[..end].chars().next_back() else {
+                    break;
+                };
+                if !Self::is_ordinary_delimiter(last) {
+                    break;
+                }
+                end -= last.len_utf8();
+            }
+            remove_calls.push(&content[start..end]);
+            cursor = end;
+        }
+        ordinary.push(&content[cursor..]);
+
+        let mut tokens = ordinary
+            .into_iter()
+            .flat_map(|part| part.split(Self::is_ordinary_delimiter))
+            .filter(|token| !token.is_empty())
+            .collect::<Vec<_>>();
+        tokens.extend(
+            remove_calls
+                .into_iter()
+                .flat_map(|part| part.split(Self::is_remove_call_delimiter))
+                .filter(|token| !token.is_empty()),
+        );
+        Self { tokens }
+    }
+
+    fn nearest_option(content: &str, start: usize) -> Option<usize> {
+        const OPTIONS: &[&str] = &[
+            ObfuscationRules::KEEP,
+            ObfuscationRules::KEEP_DTS,
+            ObfuscationRules::KEEP_GLOBAL_NAME,
+            ObfuscationRules::KEEP_PROPERTY_NAME,
+            ObfuscationRules::KEEP_FILE_NAME,
+            ObfuscationRules::KEEP_COMMENTS,
+            ObfuscationRules::DISABLE_OBFUSCATION,
+            ObfuscationRules::ENABLE_PROPERTY_OBFUSCATION,
+            ObfuscationRules::ENABLE_STRING_PROPERTY_OBFUSCATION,
+            ObfuscationRules::ENABLE_TOPLEVEL_OBFUSCATION,
+            ObfuscationRules::ENABLE_FILENAME_OBFUSCATION,
+            ObfuscationRules::ENABLE_EXPORT_OBFUSCATION,
+            ObfuscationRules::ENABLE_LIB_OBFUSCATION_OPTIONS,
+            ObfuscationRules::ENABLE_ATKEEP,
+            ObfuscationRules::REMOVE_COMMENTS,
+            ObfuscationRules::COMPACT,
+            ObfuscationRules::REMOVE_LOG,
+            ObfuscationRules::REMOVE_NO_SIDE_EFFECT_CALLS,
+            ObfuscationRules::PRINT_NAMECACHE,
+            ObfuscationRules::PRINT_KEPT_NAMES,
+            ObfuscationRules::APPLY_NAMECACHE,
+            ObfuscationRules::ENABLE_BYTECODE_OBFUSCATION,
+            ObfuscationRules::ENABLE_BYTECODE_OBFUSCATION_DEBUGGING,
+            ObfuscationRules::ENABLE_BYTECODE_OBFUSCATION_ENHANCED,
+            ObfuscationRules::ENABLE_BYTECODE_OBFUSCATION_ARKUI,
+            ObfuscationRules::EXTRA_OPTIONS,
+            ObfuscationRules::STRIP_LANGUAGE_DEFAULT,
+            ObfuscationRules::STRIP_SYSTEM_API_ARGS,
+            ObfuscationRules::KEEP_PARAMETER_NAMES,
+            ObfuscationRules::STRIP_NOT_COMPILED_MODULE_NAME,
+            ObfuscationRules::KEEP_OBJECT_PROPS,
+            ObfuscationRules::KEEP_UNCOMPACT,
+        ];
+        OPTIONS
+            .iter()
+            .filter_map(|option| content[start..].find(option).map(|index| start + index))
+            .min()
+    }
+
+    fn is_ordinary_delimiter(ch: char) -> bool {
+        matches!(ch, '\'' | ',' | '\t' | ' ' | '\n' | '\r')
+    }
+
+    fn is_remove_call_delimiter(ch: char) -> bool {
+        matches!(ch, ',' | '\t' | ' ' | '\n' | '\r')
     }
 }
 
 impl<'a> IntoIterator for ArkguardRuleTokens<'a> {
     type Item = &'a str;
-    type IntoIter = std::iter::Filter<std::str::Split<'a, fn(char) -> bool>, fn(&&'a str) -> bool>;
+    type IntoIter = std::vec::IntoIter<&'a str>;
 
     fn into_iter(self) -> Self::IntoIter {
-        fn is_delimiter(ch: char) -> bool {
-            matches!(ch, '\'' | ',' | '\t' | ' ' | '\n' | '\r')
-        }
-
-        fn is_not_empty(token: &&str) -> bool {
-            !token.is_empty()
-        }
-
-        self.content
-            .split(is_delimiter as fn(char) -> bool)
-            .filter(is_not_empty as fn(&&'a str) -> bool)
+        self.tokens.into_iter()
     }
 }
 
