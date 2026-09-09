@@ -12,7 +12,7 @@ use arkdown_core::{
 use arkdown_obfuscate::{
     ArkguardAdapterOptions, BytecodeObfuscationInput, BytecodeObfuscationModuleRecord,
     ConsumerObfuscationFileWriter, ObfuscationModuleFile, ObfuscationModuleInput,
-    ObfuscationSource, Obfuscator,
+    ObfuscationSource, ObfuscationSourceKind, Obfuscator,
 };
 use arkdown_path::{canonicalize_or_owned, ArtifactPathSerializer};
 use arkdown_profile::LoaderJson;
@@ -168,10 +168,16 @@ impl<'a> ModuleArkguardPlanBuilder<'a> {
                 Some((importer, imports))
             })
             .collect::<BTreeMap<_, _>>();
+        let resource_table_path = self.generated_resource_table_path();
+        let canonical_resource_table_path =
+            resource_table_path.as_deref().map(canonicalize_or_owned);
         let mut inventory_sources = Vec::with_capacity(files.len().saturating_mul(2));
         for file in &files {
             let original_source = if file.relative_path.ends_with(".d.ts")
                 || file.relative_path.ends_with(".d.ets")
+                || canonical_resource_table_path
+                    .as_ref()
+                    .is_some_and(|path| *path == canonicalize_or_owned(&file.original_path))
             {
                 Arc::clone(&file.source)
             } else {
@@ -180,15 +186,16 @@ impl<'a> ModuleArkguardPlanBuilder<'a> {
             inventory_sources.push(ObfuscationSource {
                 path: file.original_path.clone(),
                 source: original_source,
-                sdk_declaration: false,
+                kind: ObfuscationSourceKind::Project,
             });
             inventory_sources.push(ObfuscationSource {
                 path: file.build_path.clone(),
                 source: Arc::clone(&file.source),
-                sdk_declaration: false,
+                kind: ObfuscationSourceKind::Project,
             });
         }
         for root in self.session.sdk.arkguard_source_roots() {
+            let kind = self.arkguard_sdk_source_kind(&root);
             inventory_sources.extend(
                 self.session
                     .source_store
@@ -198,7 +205,7 @@ impl<'a> ModuleArkguardPlanBuilder<'a> {
                     .map(|(path, source)| ObfuscationSource {
                         path: path.to_path_buf(),
                         source,
-                        sdk_declaration: true,
+                        kind,
                     }),
             );
         }
@@ -245,7 +252,8 @@ impl<'a> ModuleArkguardPlanBuilder<'a> {
                 .unwrap_or(self.config.sdk_config.compile_api_version),
             compatible_sdk_version_stage: self.config.product.compatible_sdk_version_stage.clone(),
             entry_package_info: format!("{}|{}", package.name, package.version),
-            resource_table_path: self.generated_resource_table_path(),
+            compile_har: matches!(self.module.module_type, arkdown_core::OhosModuleType::Har),
+            resource_table_path,
             use_normalized: self.loader_json.use_normalized_ohm_url,
             byte_code_har_info: serde_json::to_value(&self.loader_json.byte_code_har_info)?,
             reserved_file_paths: self.reserved_file_paths(&module_context),
@@ -278,6 +286,14 @@ impl<'a> ModuleArkguardPlanBuilder<'a> {
             || name.ends_with(".ts")
             || name.ends_with(".ets")
             || name.ends_with(".js")
+    }
+
+    fn arkguard_sdk_source_kind(&self, root: &Path) -> ObfuscationSourceKind {
+        match root.file_name().and_then(|name| name.to_str()) {
+            Some("pre_define.js") => ObfuscationSourceKind::PreDefine,
+            Some("component") => ObfuscationSourceKind::SdkComponent,
+            _ => ObfuscationSourceKind::SdkApi,
+        }
     }
 
     /// Reconstruct the exact path families consumed by

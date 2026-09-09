@@ -48,6 +48,7 @@ impl NativeArkguardFixture {
             compatible_sdk_version: 13,
             compatible_sdk_version_stage: None,
             entry_package_info: "entry|1.0.0".to_string(),
+            compile_har: false,
             resource_table_path: Some(
                 self.temporary
                     .path()
@@ -62,15 +63,21 @@ impl NativeArkguardFixture {
     }
 
     fn obfuscator(&self, rules: &str) -> Obfuscator {
+        self.obfuscator_with_module_kind(rules, false)
+    }
+
+    fn obfuscator_with_module_kind(&self, rules: &str, compile_har: bool) -> Obfuscator {
         let rule_path = self.temporary.path().join("obfuscation-rules.txt");
         fs_err::write(&rule_path, rules).expect("write ArkGuard rules");
+        let mut adapter = self.adapter();
+        adapter.compile_har = compile_har;
         Obfuscator::new(ObfuscationOptions {
             enable_obfuscation: true,
             rule_files: vec![rule_path],
             dependency_rule_files: Vec::new(),
             cache_dir: self.cache.clone(),
             export_rule_path: None,
-            arkguard: Some(self.adapter()),
+            arkguard: Some(adapter),
         })
         .expect("create native source obfuscator")
     }
@@ -125,9 +132,19 @@ impl NativeArkguardFixture {
             .map(|file| ObfuscationSource {
                 path: file.original_path.clone(),
                 source: Arc::clone(&file.source),
-                sdk_declaration: false,
+                kind: crate::ObfuscationSourceKind::Project,
             })
             .collect();
+        self.run_with_inventory(obfuscator, files, module_dependencies, inventory_sources)
+    }
+
+    fn run_with_inventory(
+        &self,
+        obfuscator: &Obfuscator,
+        files: Vec<ObfuscationModuleFile>,
+        module_dependencies: BTreeMap<PathBuf, Vec<PathBuf>>,
+        inventory_sources: Vec<ObfuscationSource>,
+    ) -> crate::ObfuscationModuleOutput {
         obfuscator
             .obfuscate_module(ObfuscationModuleInput {
                 files,
@@ -301,6 +318,72 @@ fn native_arkguard_keeps_selected_source_multiline_when_compact_is_enabled() {
 
     assert!(kept_code.lines().count() > 1, "{kept_code}");
     assert_eq!(compact_code.lines().count(), 1, "{compact_code}");
+}
+
+#[test]
+fn strip_language_default_selects_the_optimized_arkguard_preset() {
+    let fixture = NativeArkguardFixture::new();
+    let presets = fixture.arkguard_package.join("lib/configs/preset");
+    fs_err::write(
+        presets.join("es_reserved_properties.json"),
+        br#"{"reserved":["standardOnly"]}"#,
+    )
+    .expect("write standard ArkGuard preset");
+    fs_err::write(
+        presets.join("es_reserved_properties_optimized.json"),
+        br#"{"reserved":["optimizedOnly"]}"#,
+    )
+    .expect("write optimized ArkGuard preset");
+    let file = fixture.source_file(
+        "entry/src/main/ets/Index.ets",
+        "const standardOnly = 1; const optimizedOnly = standardOnly; export { optimizedOnly };",
+    );
+    let obfuscator = fixture.obfuscator(
+        "-enable-property-obfuscation\n-enable-toplevel-obfuscation\n-enable-export-obfuscation\n-extra-options\nstrip-language-default\n-compact\n",
+    );
+
+    let output = fixture.run(&obfuscator, vec![file]);
+    let code =
+        fs_err::read_to_string(&output.files[0].output_path).expect("read obfuscated source");
+
+    assert!(code.contains("optimizedOnly"), "{code}");
+    assert!(!code.contains("standardOnly"), "{code}");
+}
+
+#[test]
+fn enum_whitelist_follows_arkguard_har_and_initializer_rules() {
+    const SOURCE: &str = "enum Status { Alpha, Beta = Alpha + 1 } const current = Status.Beta;";
+    const RULES: &str = "-enable-property-obfuscation\n-enable-toplevel-obfuscation\n-enable-export-obfuscation\n-compact\n";
+
+    let application = NativeArkguardFixture::new();
+    let mut application_file = application.source_file("entry/src/main/ets/Index.ets", SOURCE);
+    application_file.build_path.set_extension("ts");
+    fs_err::write(&application_file.build_path, SOURCE).expect("write application enum source");
+    let application_output = application.run(
+        &application.obfuscator_with_module_kind(RULES, false),
+        vec![application_file],
+    );
+    let application_cache: serde_json::Value = serde_json::from_slice(
+        &fs_err::read(application_output.name_cache_path).expect("read application name cache"),
+    )
+    .expect("parse application name cache");
+    assert!(application_cache["PropertyCache"].get("Alpha").is_none());
+    assert!(application_cache["PropertyCache"].get("Beta").is_none());
+
+    let har = NativeArkguardFixture::new();
+    let mut har_file = har.source_file("library/src/main/ets/Index.ets", SOURCE);
+    har_file.build_path.set_extension("ts");
+    fs_err::write(&har_file.build_path, SOURCE).expect("write HAR enum source");
+    let har_output = har.run(
+        &har.obfuscator_with_module_kind(RULES, true),
+        vec![har_file],
+    );
+    let har_cache: serde_json::Value = serde_json::from_slice(
+        &fs_err::read(har_output.name_cache_path).expect("read HAR name cache"),
+    )
+    .expect("parse HAR name cache");
+    assert!(har_cache["PropertyCache"].get("Alpha").is_none());
+    assert!(har_cache["PropertyCache"].get("Beta").is_none());
 }
 
 #[test]
@@ -494,6 +577,253 @@ fn keep_dts_reserves_declared_global_and_property_names() {
     assert!(code.contains("PublicApi"));
     assert!(code.contains("stableProperty"));
     assert!(!code.contains("internalProperty"));
+}
+
+#[test]
+fn language_property_preset_does_not_reserve_a_local_identifier() {
+    let fixture = NativeArkguardFixture::new();
+    fs_err::write(
+        fixture
+            .arkguard_package
+            .join("lib/configs/preset/es_reserved_properties.json"),
+        br#"{"reserved":["languageProperty"]}"#,
+    )
+    .expect("write language property preset");
+    let file = fixture.source_file(
+        "entry/src/main/ets/Index.ets",
+        "function holder() { const languageProperty = 1; return languageProperty; }",
+    );
+    let output = fixture.run(
+        &fixture.obfuscator(
+            "-enable-toplevel-obfuscation\n-enable-property-obfuscation\n-enable-export-obfuscation\n-compact\n",
+        ),
+        vec![file],
+    );
+    let cache: serde_json::Value = serde_json::from_slice(
+        &fs_err::read(output.name_cache_path).expect("read ArkGuard name cache"),
+    )
+    .expect("parse ArkGuard name cache");
+
+    assert!(cache["entry/src/main/ets/Index.ets"]["IdentifierCache"]
+        .get("holder#languageProperty")
+        .is_some());
+    assert!(cache["PropertyCache"].get("languageProperty").is_none());
+}
+
+#[test]
+fn keep_global_name_does_not_reserve_a_same_named_local_identifier() {
+    let fixture = NativeArkguardFixture::new();
+    let file = fixture.source_file(
+        "entry/src/main/ets/Index.ets",
+        "const Stable = 1; function holder() { const Stable = 2; return Stable; }",
+    );
+    let output = fixture.run(
+        &fixture.obfuscator(
+            "-keep-global-name\nStable\n-enable-toplevel-obfuscation\n-enable-export-obfuscation\n-compact\n",
+        ),
+        vec![file],
+    );
+    let cache: serde_json::Value = serde_json::from_slice(
+        &fs_err::read(output.name_cache_path).expect("read ArkGuard name cache"),
+    )
+    .expect("parse ArkGuard name cache");
+    let identifiers = cache["entry/src/main/ets/Index.ets"]["IdentifierCache"]
+        .as_object()
+        .expect("identifier cache");
+
+    assert!(!identifiers.contains_key("#Stable"));
+    assert!(identifiers.contains_key("holder#Stable"));
+}
+
+#[test]
+fn keep_dts_is_the_configured_name_source_for_local_identifiers() {
+    let fixture = NativeArkguardFixture::new();
+    fs_err::write(
+        fixture.temporary.path().join("public-api.d.ts"),
+        "declare const StableLocal: number;",
+    )
+    .expect("write keep-dts declaration");
+    let file = fixture.source_file(
+        "entry/src/main/ets/Index.ets",
+        "function holder() { const StableLocal = 1; return StableLocal; }",
+    );
+    let output = fixture.run(
+        &fixture.obfuscator(
+            "-keep-dts\npublic-api.d.ts\n-enable-toplevel-obfuscation\n-enable-export-obfuscation\n-compact\n",
+        ),
+        vec![file],
+    );
+    let cache: serde_json::Value = serde_json::from_slice(
+        &fs_err::read(output.name_cache_path).expect("read ArkGuard name cache"),
+    )
+    .expect("parse ArkGuard name cache");
+
+    assert!(cache["entry/src/main/ets/Index.ets"]["IdentifierCache"]
+        .get("holder#StableLocal")
+        .is_none());
+}
+
+#[test]
+fn at_keep_separates_global_declarations_from_property_members() {
+    let fixture = NativeArkguardFixture::new();
+    let file = fixture.source_file(
+        "entry/src/main/ets/Index.ets",
+        r#"
+            //@KeepSymbol
+            class PublicClass { publicMember() {} }
+            function holder() {
+                //@KeepSymbol
+                class LocalClass { localMember() {} }
+                return new LocalClass();
+            }
+        "#,
+    );
+    let output = fixture.run(
+        &fixture.obfuscator(
+            "-use-keep-in-source\n-enable-toplevel-obfuscation\n-enable-property-obfuscation\n-enable-export-obfuscation\n-compact\n",
+        ),
+        vec![file],
+    );
+    let cache: serde_json::Value = serde_json::from_slice(
+        &fs_err::read(output.name_cache_path).expect("read ArkGuard name cache"),
+    )
+    .expect("parse ArkGuard name cache");
+    let identifiers = cache["entry/src/main/ets/Index.ets"]["IdentifierCache"]
+        .as_object()
+        .expect("identifier cache");
+
+    assert!(!identifiers.contains_key("#PublicClass"));
+    assert!(identifiers.contains_key("holder#LocalClass"));
+    assert!(cache["PropertyCache"].get("publicMember").is_none());
+    assert!(cache["PropertyCache"].get("localMember").is_none());
+}
+
+#[test]
+fn sdk_property_names_do_not_become_top_level_sdk_names() {
+    let fixture = NativeArkguardFixture::new();
+    let file = fixture.source_file(
+        "entry/src/main/ets/Index.ets",
+        "const SystemApi = 1; const systemMember = 2;",
+    );
+    let inventory_sources = vec![
+        ObfuscationSource {
+            path: file.original_path.clone(),
+            source: Arc::clone(&file.source),
+            kind: crate::ObfuscationSourceKind::Project,
+        },
+        ObfuscationSource {
+            path: fixture.temporary.path().join("sdk/api/global.d.ts"),
+            source: Arc::from("export declare interface SystemApi { systemMember: string; }"),
+            kind: crate::ObfuscationSourceKind::SdkApi,
+        },
+    ];
+    let output = fixture.run_with_inventory(
+        &fixture.obfuscator("-enable-toplevel-obfuscation\n-enable-export-obfuscation\n-compact\n"),
+        vec![file],
+        BTreeMap::new(),
+        inventory_sources,
+    );
+    let cache: serde_json::Value = serde_json::from_slice(
+        &fs_err::read(output.name_cache_path).expect("read ArkGuard name cache"),
+    )
+    .expect("parse ArkGuard name cache");
+    let identifiers = cache["entry/src/main/ets/Index.ets"]["IdentifierCache"]
+        .as_object()
+        .expect("identifier cache");
+
+    assert!(!identifiers.contains_key("#SystemApi"));
+    assert!(identifiers.contains_key("#systemMember"));
+}
+
+#[test]
+fn strip_system_api_args_excludes_sdk_parameters_from_property_whitelist() {
+    let fixture = NativeArkguardFixture::new();
+    let file = fixture.source_file(
+        "entry/src/main/ets/Index.ets",
+        "const value = { method: 1, argumentName: 2, parameterName: 3 };",
+    );
+    let inventory_sources = vec![
+        ObfuscationSource {
+            path: file.original_path.clone(),
+            source: Arc::clone(&file.source),
+            kind: crate::ObfuscationSourceKind::Project,
+        },
+        ObfuscationSource {
+            path: fixture.temporary.path().join("sdk/api/global.d.ts"),
+            source: Arc::from(
+                "export declare function api(argumentName: string): void; export declare interface Api<TArg> { method(parameterName: TArg): void; }",
+            ),
+            kind: crate::ObfuscationSourceKind::SdkApi,
+        },
+    ];
+    let output = fixture.run_with_inventory(
+        &fixture.obfuscator(
+            "-enable-toplevel-obfuscation\n-enable-property-obfuscation\n-enable-export-obfuscation\n-extra-options\nstrip-system-api-args\n-compact\n",
+        ),
+        vec![file],
+        BTreeMap::new(),
+        inventory_sources,
+    );
+    let cache: serde_json::Value = serde_json::from_slice(
+        &fs_err::read(output.name_cache_path).expect("read ArkGuard name cache"),
+    )
+    .expect("parse ArkGuard name cache");
+
+    assert!(cache["PropertyCache"].get("method").is_none());
+    assert!(cache["PropertyCache"].get("argumentName").is_some());
+    assert!(cache["PropertyCache"].get("parameterName").is_some());
+}
+
+#[test]
+fn strip_system_api_args_disables_the_sdk_local_identifier_whitelist() {
+    fn identifier_cache(strip: bool) -> serde_json::Map<String, serde_json::Value> {
+        let fixture = NativeArkguardFixture::new();
+        let file = fixture.source_file(
+            "entry/src/main/ets/Index.ets",
+            "function holder() { const SystemApi = 1; const systemMember = 2; return SystemApi + systemMember; }",
+        );
+        let inventory_sources = vec![
+            ObfuscationSource {
+                path: file.original_path.clone(),
+                source: Arc::clone(&file.source),
+                kind: crate::ObfuscationSourceKind::Project,
+            },
+            ObfuscationSource {
+                path: fixture.temporary.path().join("sdk/api/global.d.ts"),
+                source: Arc::from("export declare interface SystemApi { systemMember: string; }"),
+                kind: crate::ObfuscationSourceKind::SdkApi,
+            },
+        ];
+        let extra = if strip {
+            "-extra-options\nstrip-system-api-args\n"
+        } else {
+            ""
+        };
+        let output = fixture.run_with_inventory(
+            &fixture.obfuscator(&format!(
+                "-enable-toplevel-obfuscation\n-enable-property-obfuscation\n-enable-export-obfuscation\n{extra}-compact\n"
+            )),
+            vec![file],
+            BTreeMap::new(),
+            inventory_sources,
+        );
+        let cache: serde_json::Value = serde_json::from_slice(
+            &fs_err::read(output.name_cache_path).expect("read ArkGuard name cache"),
+        )
+        .expect("parse ArkGuard name cache");
+        cache["entry/src/main/ets/Index.ets"]["IdentifierCache"]
+            .as_object()
+            .expect("identifier cache")
+            .clone()
+    }
+
+    let default_cache = identifier_cache(false);
+    assert!(!default_cache.contains_key("holder#SystemApi"));
+    assert!(!default_cache.contains_key("holder#systemMember"));
+
+    let stripped_cache = identifier_cache(true);
+    assert!(stripped_cache.contains_key("holder#SystemApi"));
+    assert!(stripped_cache.contains_key("holder#systemMember"));
 }
 
 #[test]
@@ -768,6 +1098,127 @@ fn apply_name_cache_accepts_arkguard_scope_keys_with_line_ranges() {
 
     assert!(code.contains("cachedTop"), "{code}");
     assert!(code.contains("cachedLocal"), "{code}");
+}
+
+#[test]
+fn identifier_cache_uses_arkguard_scope_locations_instead_of_oxc_scope_ids() {
+    let fixture = NativeArkguardFixture::new();
+    let file = fixture.source_file(
+        "entry/src/main/ets/Index.ets",
+        r#"
+            function OutFunction(longArgument) {
+                const inFunction = longArgument;
+                { const nested = inFunction; }
+                const arrow = (arrowParam) => arrowParam + inFunction;
+                return arrow(1);
+            }
+            class Student {
+                constructor(name) { const ctorLocal = name; }
+                method(methodParam) { return methodParam; }
+            }
+        "#,
+    );
+    let output = fixture.run(
+        &fixture.obfuscator("-enable-toplevel-obfuscation\n-enable-export-obfuscation\n-compact\n"),
+        vec![file],
+    );
+    let cache: serde_json::Value = serde_json::from_slice(
+        &fs_err::read(output.name_cache_path).expect("read ArkGuard name cache"),
+    )
+    .expect("parse ArkGuard name cache");
+    let identifiers = cache["entry/src/main/ets/Index.ets"]["IdentifierCache"]
+        .as_object()
+        .expect("identifier cache");
+
+    for key in [
+        "#OutFunction:2:7",
+        "OutFunction#longArgument",
+        "OutFunction#inFunction",
+        "OutFunction#$0#nested",
+        "OutFunction#arrow:5:5",
+        "OutFunction#arrow#arrowParam",
+        "#Student",
+        "Student#$0#name",
+        "Student#$0#ctorLocal",
+        "Student#method#methodParam",
+    ] {
+        assert!(
+            identifiers.contains_key(key),
+            "missing {key}: {identifiers:#?}"
+        );
+    }
+    assert!(
+        identifiers.keys().all(|key| !key.starts_with("ScopeId(")),
+        "OXC allocation IDs must not escape into ArkGuard caches: {identifiers:#?}"
+    );
+}
+
+#[test]
+fn print_kept_names_writes_arkguard_reasons_whitelist_and_incremental_cache() {
+    let fixture = NativeArkguardFixture::new();
+    let first = fixture.source_file(
+        "entry/src/main/ets/First.ets",
+        "const preservedTop = { preservedProperty: 1 }; export { preservedTop };",
+    );
+    let rules = "-enable-property-obfuscation\n-enable-toplevel-obfuscation\n-enable-export-obfuscation\n-keep-global-name\npreservedTop\n-keep-property-name\npreservedProperty\n-print-kept-names\nreports/kept.json\n-compact\n";
+    fixture.run(&fixture.obfuscator(rules), vec![first]);
+
+    let default_path = fixture.cache.join("keptNames.json");
+    let first_report: serde_json::Value = serde_json::from_slice(
+        &fs_err::read(&default_path).expect("read default kept-name report"),
+    )
+    .expect("parse default kept-name report");
+    assert_eq!(
+        first_report["keptNames"]["property"]["preservedProperty"],
+        serde_json::json!(["conf"])
+    );
+    assert_eq!(
+        first_report["keptNames"]["entry/src/main/ets/First.ets"]["#preservedTop"],
+        serde_json::json!(["conf"])
+    );
+    assert_eq!(
+        first_report["keptReasons"]["objectProp"],
+        "same as the object property"
+    );
+    assert_eq!(
+        fs_err::read(fixture.temporary.path().join("reports/kept.json"))
+            .expect("read explicit kept-name report"),
+        fs_err::read(&default_path).expect("read default kept-name report for comparison")
+    );
+    let whitelist: serde_json::Value = serde_json::from_slice(
+        &fs_err::read(fixture.cache.join("whitelist.json")).expect("read whitelist report"),
+    )
+    .expect("parse whitelist report");
+    assert!(whitelist["conf"]
+        .as_array()
+        .expect("configured whitelist")
+        .contains(&serde_json::json!("preservedTop")));
+
+    let second = fixture.source_file(
+        "entry/src/main/ets/Second.ets",
+        "const preservedTop = { preservedProperty: 2 }; export { preservedTop };",
+    );
+    fixture.run(&fixture.obfuscator(rules), vec![second]);
+    let second_report: serde_json::Value = serde_json::from_slice(
+        &fs_err::read(default_path).expect("read incremental kept-name report"),
+    )
+    .expect("parse incremental kept-name report");
+    assert!(second_report["keptNames"]["entry/src/main/ets/First.ets"].is_object());
+    assert!(second_report["keptNames"]["entry/src/main/ets/Second.ets"].is_object());
+
+    let changed_second = fixture.source_file(
+        "entry/src/main/ets/Second.ets",
+        "const changedTop = { changedProperty: 3 }; export { changedTop };",
+    );
+    fixture.run(&fixture.obfuscator(rules), vec![changed_second]);
+    let changed_report: serde_json::Value = serde_json::from_slice(
+        &fs_err::read(fixture.cache.join("keptNames.json")).expect("read changed kept-name report"),
+    )
+    .expect("parse changed kept-name report");
+    assert_eq!(
+        changed_report["keptNames"]["entry/src/main/ets/Second.ets"],
+        serde_json::json!({})
+    );
 }
 
 #[test]

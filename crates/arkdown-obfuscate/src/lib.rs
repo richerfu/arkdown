@@ -17,7 +17,7 @@ mod rules;
 
 pub use arkguard::{
     ArkguardAdapterOptions, ObfuscationModuleFile, ObfuscationModuleFileOutput,
-    ObfuscationModuleInput, ObfuscationModuleOutput, ObfuscationSource,
+    ObfuscationModuleInput, ObfuscationModuleOutput, ObfuscationSource, ObfuscationSourceKind,
 };
 pub use bytecode::{
     BytecodeObfuscationInput, BytecodeObfuscationModuleRecord, BytecodeObfuscationOutput,
