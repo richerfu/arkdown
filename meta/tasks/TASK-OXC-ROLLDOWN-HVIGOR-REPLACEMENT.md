@@ -235,6 +235,13 @@ native checker、build semantic、SDK CommonJS callback 与 OXC 类型消费者�
 - `duplicate_check` 已用 Rolldown 分片 facts 取代全局 `Arc<Mutex>`，并在告警边界
   确定性归并；`har_dedup` 已按 `hsp-collect-har-files.js::buildEnd` 直接读取最终
   module graph，删除 `moduleParsed` 共享 collector 和无调用的 `HarDedupFact` facade。
+- AOT partial、HotReload 首轮/增量、ColdReload patch、未签名 HQF 打包以及已物化
+  Source HAR 的 APP 已从 JS CLI 调用真实 SDK 工具通过。ColdReload 现在直接消费
+  loader `patchConfig` 三个路径字段及 SDK `cachePath` 默认 changed-list，不再保留
+  固定内部路径这一错误兼容分支。AOT 的空 `.an/.ai` 与当前 `gen_aot.ts` 源码一致；
+  该源码没有执行其构造的 `ark_aot_compiler` 命令，Arkdown 也不得额外执行。
+- 剩余真实矩阵限定为多 HAP/HSP 复杂 APP、全部签名材料组合和 ArkGuard 全规则/
+  name-cache 跨轮复用；不得把已经实跑的 AOT/reload/未签名 HQF 继续列为未实现能力。
 - 在 Rolldown 提供结构化磁盘图接口后再实现跨进程 graph cache；在此之前不
   自创序列化格式。
 - 按源码补充更细粒度的 ABC invalidation 和依赖 wave；所有并发结果按 typed

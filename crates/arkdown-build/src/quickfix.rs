@@ -41,6 +41,8 @@ pub enum QuickFixError {
         "ARKDOWN_QUICKFIX_SYMBOL_MAP_MISSING: ColdReload requires the base-build symbol map: {0}"
     )]
     MissingSymbolMap(PathBuf),
+    #[error("ARKDOWN_QUICKFIX_PATCH_FIELD: patchConfig.{field} must be a non-empty path")]
+    InvalidPatchPath { field: &'static str },
     #[error("ARKDOWN_QUICKFIX_SOURCE_MAP_MISSING: ColdReload source map is missing: {0}")]
     MissingSourceMap(PathBuf),
     #[error("ARKDOWN_QUICKFIX_RESOURCE_PATH: {0}")]
@@ -126,11 +128,12 @@ pub struct ColdReloadCompilePlan {
 
 pub struct ColdReloadProcessor<'a> {
     layout: &'a ModuleBuildLayout<'a>,
+    cache_dir: &'a Path,
 }
 
 impl<'a> ColdReloadProcessor<'a> {
-    pub fn new(layout: &'a ModuleBuildLayout<'a>) -> Self {
-        Self { layout }
+    pub fn new(layout: &'a ModuleBuildLayout<'a>, cache_dir: &'a Path) -> Self {
+        Self { layout, cache_dir }
     }
 
     pub fn compile_plan(
@@ -139,10 +142,12 @@ impl<'a> ColdReloadProcessor<'a> {
         module_source_files: &[HvigorModuleSourceFile],
         source_maps_path: Option<&Path>,
     ) -> QuickFixResult<Option<ColdReloadCompilePlan>> {
-        if patch_config.is_none() {
+        let Some(config) = self.parse_patch_config(patch_config)? else {
             return Ok(None);
-        }
-        let changed_file_list = self.layout.patch_changed_file_list();
+        };
+        let changed_file_list = config
+            .changed_file_list
+            .unwrap_or_else(|| self.cache_dir.join("changedFileList.json"));
         if !changed_file_list.is_file() {
             return Ok(None);
         }
@@ -177,7 +182,7 @@ impl<'a> ColdReloadProcessor<'a> {
             return Ok(None);
         }
 
-        let symbol_map = self.layout.symbol_map();
+        let symbol_map = config.old_map_dir.join("symbolMap.map");
         if !symbol_map.is_file() {
             return Err(QuickFixError::MissingSymbolMap(symbol_map));
         }
@@ -190,10 +195,15 @@ impl<'a> ColdReloadProcessor<'a> {
                         .unwrap_or_else(|| self.layout.loader_out_source_maps()),
                 )
             })?;
-        self.write_source_maps(source_maps_path, &selected)?;
+        let patch_abc_dir = config
+            .patch_abc_dir
+            .ok_or(QuickFixError::InvalidPatchPath {
+                field: "patchAbcPath",
+            })?;
+        self.write_source_maps(source_maps_path, &patch_abc_dir, &selected)?;
         Ok(Some(ColdReloadCompilePlan {
             module_source_files: selected,
-            modules_abc_path: self.layout.patch_modules_abc(),
+            modules_abc_path: patch_abc_dir.join("modules.abc"),
             reload: Ts2abcReloadPlan {
                 mode: Ts2abcReloadMode::Cold,
                 symbol_table_path: symbol_map,
@@ -204,6 +214,7 @@ impl<'a> ColdReloadProcessor<'a> {
     fn write_source_maps(
         &self,
         input: &Path,
+        patch_abc_dir: &Path,
         selected: &[HvigorModuleSourceFile],
     ) -> QuickFixResult<()> {
         let source_maps: serde_json::Value = self.read_json(input)?;
@@ -223,7 +234,7 @@ impl<'a> ColdReloadProcessor<'a> {
             .filter(|(key, _)| selected_keys.contains(key.as_str()))
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect::<serde_json::Map<_, _>>();
-        let output = self.layout.patch_source_maps();
+        let output = patch_abc_dir.join("sourceMaps.map");
         if let Some(parent) = output.parent() {
             std::fs::create_dir_all(parent).map_err(|source| QuickFixError::Io {
                 path: parent.to_path_buf(),
@@ -242,6 +253,53 @@ impl<'a> ColdReloadProcessor<'a> {
         })
     }
 
+    /// Read the loader handoff exactly as `compiler/main.js::readPatchConfig`
+    /// and `module_coldreload_mode.ts` consume it. A non-cold mode selects a
+    /// different SDK module mode; a missing or empty changed-file list falls
+    /// back to `<cachePath>/changedFileList.json` at the call site.
+    fn parse_patch_config(
+        &self,
+        patch_config: Option<&serde_json::Value>,
+    ) -> QuickFixResult<Option<ColdReloadPatchConfig>> {
+        let Some(patch_config) = patch_config.and_then(serde_json::Value::as_object) else {
+            return Ok(None);
+        };
+        if patch_config.get("mode").and_then(serde_json::Value::as_str) != Some("coldReload") {
+            return Ok(None);
+        }
+        let old_map_dir = self.required_config_path(patch_config, "oldMapFilePath")?;
+        let changed_file_list = self.optional_config_path(patch_config, "changedFileList")?;
+        let patch_abc_dir = self.optional_config_path(patch_config, "patchAbcPath")?;
+        Ok(Some(ColdReloadPatchConfig {
+            old_map_dir,
+            changed_file_list,
+            patch_abc_dir,
+        }))
+    }
+
+    fn required_config_path(
+        &self,
+        patch_config: &serde_json::Map<String, serde_json::Value>,
+        field: &'static str,
+    ) -> QuickFixResult<PathBuf> {
+        self.optional_config_path(patch_config, field)?
+            .ok_or(QuickFixError::InvalidPatchPath { field })
+    }
+
+    fn optional_config_path(
+        &self,
+        patch_config: &serde_json::Map<String, serde_json::Value>,
+        field: &'static str,
+    ) -> QuickFixResult<Option<PathBuf>> {
+        let Some(value) = patch_config.get(field) else {
+            return Ok(None);
+        };
+        let Some(raw) = value.as_str() else {
+            return Err(QuickFixError::InvalidPatchPath { field });
+        };
+        Ok((!raw.is_empty()).then(|| PathBuf::from(raw)))
+    }
+
     fn read_json<T: serde::de::DeserializeOwned>(&self, path: &Path) -> QuickFixResult<T> {
         let bytes = std::fs::read(path).map_err(|source| QuickFixError::Io {
             path: path.to_path_buf(),
@@ -252,6 +310,12 @@ impl<'a> ColdReloadProcessor<'a> {
             source,
         })
     }
+}
+
+struct ColdReloadPatchConfig {
+    old_map_dir: PathBuf,
+    changed_file_list: Option<PathBuf>,
+    patch_abc_dir: Option<PathBuf>,
 }
 
 pub struct QuickFixArtifactInput<'a> {
