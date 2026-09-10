@@ -241,12 +241,17 @@ impl<'a> ColdReloadProcessor<'a> {
                 source,
             })?;
         }
-        let bytes = serde_json::to_vec(&serde_json::Value::Object(filtered)).map_err(|source| {
-            QuickFixError::Json {
-                path: output.clone(),
-                source,
-            }
-        })?;
+        // `ModuleColdreloadMode.updateSourceMapFromFileList` writes
+        // `JSON.stringify(coldReloadSourceMap, null, 2)`; preserve that exact
+        // two-space representation because it is embedded byte-for-byte in
+        // the HQF archive.
+        let bytes =
+            serde_json::to_vec_pretty(&serde_json::Value::Object(filtered)).map_err(|source| {
+                QuickFixError::Json {
+                    path: output.clone(),
+                    source,
+                }
+            })?;
         std::fs::write(&output, bytes).map_err(|source| QuickFixError::Io {
             path: output,
             source,
@@ -820,9 +825,11 @@ struct ChangedResource {
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct EtsPatchState {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    compiled_file_list: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     changed_file_list: Option<String>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default)]
     is_import_new_file: bool,
 }
 

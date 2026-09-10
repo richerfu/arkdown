@@ -1,7 +1,7 @@
 # OXC/Rolldown 替换 Hvigor：当前架构与剩余工作
 
-状态：ArkTS 1.1 源码定义主链与 TSGO 能力已接入，strict 34/34 零差异；剩余为真实矩阵扩展与性能收口
-更新日期：2026-09-08
+状态：ArkTS 1.1 源码定义主链与 TSGO 能力已接入，strict 37/37 零差异；HAR 原生签名迁移等待 hapsigner-rs，其余为性能收口
+更新日期：2026-09-10
 
 最新审计见 [全链路对照](AUDIT-HVIGOR-REPLACEMENT.md)。下文历史的
 build-complete 表述仅指 SDK 链路接入，不能视为 Rust/OXC 业务迁移或全行为
@@ -81,8 +81,9 @@ CLI 参数；check 使用 product 语言版本同样是合法行为，不得列�
 当前 1.1 主链已经由 Rust owner 完成项目快照、解析、OXC 变换、Rolldown
 模块图、ABC、资源、profile、native、混淆、缓存、watch、打包和签名。
 公开入口只有 JS CLI。真实 Hvigor fixture 矩阵在 strict 模式下要求所有
-归一化产物相等，不再允许 allowlist；当前 34/34 通过，其中 20 个是真实构建
-报告场景，并包含 project-mode APP 对其嵌套 HAP/HSP 的递归比较。
+归一化产物相等，不再允许 allowlist；当前 37/37 通过，其中 24 个测试项执行真实
+Hvigor 构建或诊断，并包含 project-mode APP 对其嵌套 HAP/HSP 的递归比较以及真实
+已签名 HAP/HSP/APP/HQF 的验签。
 
 这表示当前 fixture 覆盖范围内为零差异，不表示未被源码语料覆盖的行为可以
 凭空视为完成。新增源码契约时必须继续扩充矩阵。
@@ -263,12 +264,26 @@ native checker、build semantic、SDK CommonJS callback 与 OXC 类型消费者�
   差异。SDK index-signature 参数白名单和上一阶段 source-map `sourceRoot` 继承也已
   按 ArkGuard 源码补齐。ArkGuard 规则集、name-cache 跨轮复用和
   keptNames/whitelist 已有源码对齐回归，不得继续列为实现缺口。
-- project-mode `assembleApp` 已严格验证一组 entry HAP + form-widget HSP，并据源码
+- project-mode `assembleApp` 已严格验证 2 个 HAP + 2 个 HSP 的组合（包含无 ETS
+  源码的 resource-only feature HAP）以及 form-widget 链路，并据源码
   补齐 legacy `pkgSdkInfo.json`、form profile/restool 恢复、widget compile gate、
   ResourceTable module/package/cache owner、interface HAR `packageName`、显式
   `customizedHar: false`、disabled BinXO 空 cache、`.test` ohosTest 源码根和 kit
-  same-name import printer。剩余 APP 矩阵精确限定为含两个以上 HAP 或两个以上 HSP
-  的组合；签名矩阵还缺已签名 HQF 与普通产物的全部材料组合。
+  same-name import printer。`ArkCompile.taskShouldDo`、`checkPackageMain` 与
+  `CoreSourceSetImpl.initCodeMap` 还确认仅当选中 source set 的 `ets` 目录存在，或
+  OHPM `main`（缺省为 `Index.ets`）文件存在时执行 CompileArkTS；仅有生成的
+  `ResourceTable.ts` 不会触发 checker、bundle 或 ABC，
+  `BasePackHapTask.generateCommand` 此时不传 `--ets-path`。Arkdown 已按该源码条件跳过
+  编译并生成不含 `ets/` 的 HAP。
+- 已签名 HAP/HSP/HQF 与包含 2 HAP + 2 HSP 的已签名 APP 已通过真实 Hvigor 严格
+  对比和 `ApplicationVerifier` 验签。ColdReload 的 `compiledFileList`、新文件过滤、
+  `isImportNewFile` 和 source-map JSON 写出格式已分别按
+  `collect-importers-plugin.js` 与 `module_coldreload_mode.ts` 迁入 Rust。
+- HAR 签名暂列明确遗留项：当前 `hapsigner-rs`
+  `e8be862ec0998233ad6e90b70c4c4a7608249783` 不支持 Hvigor `PackageSignHar` 使用的
+  HAR 目录签名协议，故保留 typed Rust runner 调用 SDK
+  `sdk-sign-tool-full.jar sign-har`。不得在 Arkdown 内复刻或猜测该协议；待
+  `hapsigner-rs` 原生支持后再迁移，并补真实 signed HAR 严格矩阵和验签。
 - 在 Rolldown 提供结构化磁盘图接口后再实现跨进程 graph cache；在此之前不
   自创序列化格式。
 - 按源码补充更细粒度的 ABC invalidation 和依赖 wave；所有并发结果按 typed
@@ -288,7 +303,8 @@ Arkdown 只承诺并实现源码可证的 arkts-compose compile-plugin/Rollup AB
 - 真实 Hvigor fixture 矩阵在 `ARKDOWN_PARITY_STRICT=1` 下零差异且无 allowlist。
 - TS/JS 插件契约、独立 Node 进程 cache 恢复和 watch 重建测试通过。
 - 源码契约测试、workspace test、Clippy 和 format 全部通过。
-- HAP/HSP/HAR/APP 按变更范围完成结构、签名以及设备/模拟器验证。
+- HAP/HSP/HAR/APP/HQF 按变更范围完成结构验证，HAP/HSP/APP/HQF 完成签名验证；
+  HAR 原生签名在 `hapsigner-rs` 提供目录协议后单独验收。
 - 没有空 adapter、fake cache、双轨实现或只为保留 Hvigor 内部形状而存在的代码。
 - ArkTS 1.2 构建实现已标记为 build-complete；只有上述外部门禁全部完成并
   通过真实发布 SDK、产物和设备验证后，才可标记为 replacement-complete。

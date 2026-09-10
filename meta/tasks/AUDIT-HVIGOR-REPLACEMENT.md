@@ -1,6 +1,6 @@
 # Hvigor 替换全链路审计
 
-审计日期：2026-09-09。Arkdown 起始基线：
+审计日期：2026-09-10。Arkdown 起始基线：
 `9915ed8971dfb6d60fb0072792084dfce492963c`。
 
 ## 证据和判定规则
@@ -29,7 +29,7 @@ checker 或插件结论。
 | SDK/native tools | ets2bundle command builders、SDK binaries | typed Rust plans | restool/ABC/linker/signer/PandaGuard 等直接调用实际工具；不是 JS 兼容层 |
 | source ArkGuard | ets2bundle obfuscation config + arkcompiler ArkGuard source | `arkdown-obfuscate` OXC implementation | Rust 原生 owner；name/file/property cache 与 consumer rules 进入 build stage |
 | cache/watch | ets2bundle cache/watch hooks | task cache、OXC facts、Rolldown retained graph、watch coordinator | retained TSGO/Rolldown 与 HotReload 增量实跑已通过；下述仅有性能收口 |
-| HAP/HSP/HAR/APP | OHOS packaging/signing tasks | `arkdown-pack`、`arkdown-sign`、app coordinator | 现有 1.1 strict fixtures 进入真实产物链 |
+| HAP/HSP/HAR/APP/HQF | OHOS packaging/signing tasks | `arkdown-pack`、`arkdown-sign`、app coordinator | 1.1 strict fixtures 进入真实产物链；2 HAP + 2 HSP APP 及已签名 HAP/HSP/APP/HQF 零差异 |
 
 TSGO 完成矩阵、发布方式和回归见
 [ArkTS 1.1 原生 TypeScript 对齐合同](ARKTS11-NATIVE-TYPESCRIPT.md)。
@@ -114,14 +114,15 @@ configure-cmake hook 与 watcher facade 已删除，不能把它们当作待补�
 代码语义；comparator 现在只在归一化 ZIP/TAR member 时按 JSON 数据语义排序，
 没有跳过目录或产物。`coverage.log` 只归一化当前 OH coverage parser 不消费的
 进程前缀和 Hypium wall-clock duration，保留 class/test/result/status-code/stack/
-coverage records。ArkTS 1.1 strict Hvigor suite 当前 34/34 通过，其中 20 个为
-真实构建报告场景，覆盖 HAP、HSP、HAR、ByteCode HAR、test、ohosTest、
-APP、multi-module、incremental、release、startup/share/widget，其余为 comparator、
-diagnostic 与 harness 合同测试。
+coverage records。ArkTS 1.1 strict Hvigor suite 当前 37/37 通过，其中 24 个测试项
+执行真实 Hvigor 构建或诊断（签名组合测试在单项内执行 HAP/HSP/APP 三组构建），覆盖
+HAP、HSP、HAR、HQF、ByteCode HAR、test、ohosTest、APP、multi-module、incremental、
+release、startup/share/widget，其余为 comparator、diagnostic 与 harness 合同测试。
 
-本轮新增真实 project-mode `assembleApp` 对比，递归比较 APP 内的 entry HAP、
-form-widget HSP、interface HAR、ABC、profile、资源、`pack.info`、`pac.json` 和
-legacy `pkgSdkInfo.json`。严格矩阵据此定位并按源码修复了以下差异：
+本轮扩展真实 project-mode `assembleApp` 对比到 2 个 HAP + 2 个 HSP，递归比较
+APP 内的 entry/feature HAP、普通/form-widget HSP、interface HAR、ABC、profile、
+资源、`pack.info`、`pac.json` 和 legacy `pkgSdkInfo.json`。严格矩阵据此定位并按
+源码修复了以下差异：
 
 - `GeneratePkgSdkInfo` 仅在非 normalized OHM URL 下生成 legacy package inventory；
   它按 module tree、project tree 的顺序遍历依赖，在 HSP 节点停止，并将原始字节紧跟
@@ -144,8 +145,15 @@ legacy `pkgSdkInfo.json`。严格矩阵据此定位并按源码修复了以下�
 - `process_kit_import.ts` 对未改名 kit import 保持 `{ X }`，不能打印成
   `{ X as X }`；ArkGuard 的 SDK index-signature 参数进入原始 API 白名单，合并
   source map 时精确保留上一阶段 `sourceRoot` 的存在性。
+- `ArkCompile.taskShouldDo` 在选中 source set 存在 ETS `CodeModel` 或
+  `checkPackageMain` 找到 OHPM `main`（缺省 `Index.ets`）时启用；
+  `CoreSourceSetImpl.initCodeMap` 只根据物理 `<source-set>/ets` 目录创建模型。因此
+  resource-only feature 即使 loader 含生成的 `ResourceTable.ts` 也不执行 checker、
+  Rolldown、ArkGuard 或 ABC；根目录带 `main` 的 ByteCode HAR 仍正常编译。
+  `BasePackHapTask.generateCommand` 在 loader-out `ets` 目录不存在时不传
+  `--ets-path`，最终 resource-only HAP 合法且不含 `ets/`。
 
-修复后 APP、HAP/HSP/HAR 及完整 34 项 strict suite 均为零差异。
+修复后 APP、HAP/HSP/HAR/HQF 及完整 37 项 strict suite 均为零差异。
 
 ### R3：缺少独立真实矩阵的 1.1 路径
 
@@ -167,10 +175,17 @@ legacy `pkgSdkInfo.json`。严格矩阵据此定位并按源码修复了以下�
   指定目录生成 cold patch ABC/sourcemap；`PackageQuickfix` 随后通过 SDK
   `app_packing_tool --mode hqf` 产出 HQF，归档包含 `patch.json`、
   `ets/modules.abc`、`ets/sourceMaps.map`。
-- 已物化 `file:` Source HAR 依赖的多模块 fixture 能由 JS CLI 生成 APP；新的
-  form-widget project fixture 还严格验证一组 entry HAP + HSP、项目
-  `pack.info`/`pac.json` 和嵌套归档。构建服务没有为了 sample 隐式执行安装，缺少
-  `oh_modules` 时的 resolver 错误属于正确前置条件。
+- `collect-importers-plugin.js` 的 initial/reload 两段源码图状态已经迁入 Rust：首轮
+  按 Rolldown entry/importedIds 广度遍历写 `compiledFileList`，ColdReload 过滤基线
+  不存在的新文件并计算 `isImportNewFile`；`PrepareQuickfix.collectEts` 只追加
+  changed-list 的 `mtimeMs`。`module_coldreload_mode.ts` 定义的两空格 source-map JSON
+  写出格式也已对齐。已签名 HQF 现在由真实 HotReload symbol table、ColdReload ABC、
+  SDK HQF packer 和 `hapsigner` 串联生成，归档、build 中间件和密码学验签均零差异。
+- 已物化 `file:` Source HAR 依赖的多模块 fixture 能由 JS CLI 生成 APP；扩展后的
+  form-widget project fixture 严格验证 2 HAP + 2 HSP、项目 `pack.info`/`pac.json`
+  和嵌套归档，其中 resource-only feature 验证无 ETS source set 的任务禁用与无 ABC
+  打包语义。构建服务没有为了 sample 隐式执行安装，缺少 `oh_modules` 时的 resolver
+  错误属于正确前置条件。
 
 ArkGuard 已补齐当前 `ConfigResolver` 中此前遗漏的
 `-remove-nosideeffects-calls` 与 `-keep-uncompact`，并从 JS CLI 完成双轮 release
@@ -198,12 +213,19 @@ intermediate、mapping 和 symbol 输出，nameCache 也同步到 symbol 输出�
 阶段生成后通过 `resourceTableTs` 加入 ArkGuard 输入；Rust 现在从已物化的 typed
 CompileArkTS module file 携带该源码，不做运行期兜底读盘。
 
-仍缺独立真实矩阵的是含两个以上 HAP 或两个以上 HSP 的 APP，以及已签名 HQF 与
-普通产物的全部签名材料组合；一组 entry HAP + form-widget HSP 的 APP 已完成真实
-严格对比。ArkGuard keptNames/whitelist 已由精确 schema、原因顺序、增量覆盖和
-HAR/非 HAR 枚举回归保护。这里缺的是对应真实工具与产物验收，不表示这些 owner
-不存在。
-每个场景加入时必须比较其上游任务实际消费和生成的结构，不可只检查
+签名主链已经使用当前发布的 `hapsigner 0.2.0` 原生 API 覆盖 HAP、HSP、HQF 以及
+APP 内嵌 HAP/HSP；真实 PKCS#12、证书、签名 profile 和 DevEco 加密密码材料由严格
+fixture 生成，全部产物同时通过 Hvigor 零差异比较与 `ApplicationVerifier` 验签。
+
+HAR 签名是唯一明确保留的签名遗留项。当前 Hvigor `PackageSignHar` 调用
+`sdk-sign-tool-full.jar sign-har`，其协议是对含 `package/` 的任务目录原地处理，不是
+HAP/HSP/HQF 的 archive-signing 协议。当前 `hapsigner-rs`
+`e8be862ec0998233ad6e90b70c4c4a7608249783` 尚未提供该 HAR 目录协议，因此 Arkdown
+继续由 typed Rust runner 直接调用 SDK Java 工具；这不是内部 Hvigor 兼容层，也不在
+Arkdown 内复刻协议。待 `hapsigner-rs` 原生支持 HAR 后再迁移，并以真实签名 HAR
+严格矩阵和验签作为删除 SDK backend 的门禁。
+
+每个后续场景加入时仍必须比较其上游任务实际消费和生成的结构，不可只检查
 command/config 或 `contains` 片段。
 
 ## 性能项，不作为产物能力缺失
@@ -215,12 +237,13 @@ command/config 或 `contains` 片段。
 
 ## 下一步顺序
 
-1. 按具体 owner 扩充剩余 R3 真实矩阵；继续处理含两个以上 HAP/HSP 的 APP 与签名
-   材料组合，发现差异即在领域 crate 修复。
+1. 按具体 owner 扩充剩余 R3 真实矩阵；HAR 原生签名迁移等待 `hapsigner-rs` 提供
+   目录签名协议，迁移前保留 SDK `sign-har` backend。
 2. 功能门禁通过后处理剩余跨进程 graph cache 和依赖 wave 性能项。
 3. 只有取得当前 task/system plugin 权威源码后，才能决定是否扩展公开插件合同。
 
 完成门槛是 JS CLI/Node API 进入 typed Rust service、ArkTS 1.1 strict fixture
 零跳过/零 allowlist、目标插件 ABI 回归、workspace test/clippy/format、真实
-HAP/HSP/HAR/APP 结构与签名验证，以及没有内部 Hvigor 兼容层。不得用“尚未证明
-全部兼容”代替上述具体结果，也不得用单个 sample 成功宣称全行为完成。
+HAP/HSP/HAR/APP/HQF 结构验证、HAP/HSP/APP/HQF 签名验证，以及没有内部 Hvigor
+兼容层。HAR 原生签名在 `hapsigner-rs` 提供目录协议后单独完成，不阻塞此前范围。
+不得用“尚未证明全部兼容”代替上述具体结果，也不得用单个 sample 成功宣称全行为完成。

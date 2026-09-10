@@ -319,6 +319,7 @@ dependencies = [
 name = "arkdown-napi"
 version = "0.0.1-beta.11"
 dependencies = [
+ "aes-gcm",
  "anyhow",
  "arkdown",
  "arkdown-build",
@@ -331,12 +332,14 @@ dependencies = [
  "arkdown-sign",
  "dhat",
  "flate2",
+ "hapsigner",
  "hex",
  "json5",
  "mimalloc-safe",
  "napi",
  "napi-build",
  "napi-derive",
+ "pbkdf2",
  "rolldown_common",
  "rolldown_plugin",
  "rolldown_sourcemap",

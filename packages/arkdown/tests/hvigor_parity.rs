@@ -12,8 +12,9 @@ use std::fs;
 use std::io::{self, Cursor, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use hapsigner::{ApplicationVerifier, InputFormat};
 use serde_json::{json, Value};
 use walkdir::WalkDir;
 use zip::ZipArchive;
@@ -35,6 +36,11 @@ enum ArtifactType {
   Har,
   Hsp,
   App,
+  /// ColdReload quick-fix package (`assembleDevHqf` /
+  /// `--action assemble-quickfix`). The parity harness first executes the
+  /// source-owned HotReload base-build protocol so both implementations
+  /// consume a real symbol map rather than a test-fabricated compiler input.
+  Hqf,
   /// Local unit-test build (`hvigorw test` / `--target test`). No HAP/HSP
   /// archive is produced; the `.test` build root carries the generated
   /// testability templates, TestAbility-injected profiles and compiled
@@ -53,6 +59,7 @@ impl ArtifactType {
       ArtifactType::Har => "har",
       ArtifactType::Hsp => "hsp",
       ArtifactType::App => "app",
+      ArtifactType::Hqf => "hqf",
       ArtifactType::Test => "test",
       ArtifactType::OhosTest => "hap",
     }
@@ -64,6 +71,7 @@ impl ArtifactType {
       ArtifactType::Har => "assembleHar",
       ArtifactType::Hsp => "assembleHsp",
       ArtifactType::App => "assembleApp",
+      ArtifactType::Hqf => "assembleDevHqf",
       // `hvigorw test`; `setTestDefaultParameters` injects
       // `ohos-test-coverage=true` unless overridden.
       ArtifactType::Test => "test",
@@ -77,6 +85,7 @@ impl ArtifactType {
       ArtifactType::Har => "har",
       ArtifactType::Hsp => "hsp",
       ArtifactType::App => "app",
+      ArtifactType::Hqf => "hap",
       ArtifactType::Test => "test",
       ArtifactType::OhosTest => "hap",
     }
@@ -87,6 +96,489 @@ impl ArtifactType {
 enum ParityBuildMode {
   Debug,
   Release,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParityFixtureSetup {
+  None,
+  Signed,
+  SignedAppPackages,
+}
+
+impl ParityFixtureSetup {
+  fn name(self) -> &'static str {
+    match self {
+      Self::None => "none",
+      Self::Signed => "signed",
+      Self::SignedAppPackages => "signed-app-packages",
+    }
+  }
+
+  fn materialize(self, root: &Path) -> io::Result<()> {
+    match self {
+      Self::None => Ok(()),
+      Self::Signed => SigningParityMaterializer::new(root, false).materialize(),
+      Self::SignedAppPackages => SigningParityMaterializer::new(root, true).materialize(),
+    }
+  }
+
+  fn configure_hvigor_args(self, args: &mut Vec<&'static str>) {
+    if self != Self::None {
+      // SignHap/SignHsp/SignApp read this exact global Hvigor property in
+      // doTaskAction; a configured signingConfig alone does not enable them.
+      args.extend(["-p", "enableSignTask=true"]);
+    }
+  }
+
+  fn signs_embedded_app_packages(self) -> bool {
+    matches!(self, Self::SignedAppPackages)
+  }
+}
+
+struct SigningParityMaterializer<'a> {
+  project_root: &'a Path,
+  app_with_signed_packages: bool,
+}
+
+impl<'a> SigningParityMaterializer<'a> {
+  const DEVECO_COMPONENT: [u8; 16] = [
+    49, 243, 9, 115, 214, 175, 91, 184, 211, 190, 177, 88, 101, 131, 192, 119,
+  ];
+  const CONFIG_NAME: &'static str = "arkdownParity";
+  const PASSWORD: &'static str = "test123";
+  const APP_KEY_ALIAS: &'static str = "oh-app1-key-v1";
+  const PROFILE_KEY_ALIAS: &'static str = "oh-profile1-key-v1";
+  const ROOT_KEY_ALIAS: &'static str = "oh-root-ca-key-v1";
+  const APP_CA_KEY_ALIAS: &'static str = "oh-app-sign-srv-ca-key-v1";
+  const PROFILE_CA_KEY_ALIAS: &'static str = "oh-profile-sign-srv-ca-key-v1";
+  const ROOT_SUBJECT: &'static str = "C=CN,O=OpenHarmony,OU=OpenHarmony Community,CN=Root CA";
+  const APP_CA_SUBJECT: &'static str =
+    "C=CN,O=OpenHarmony,OU=OpenHarmony Community,CN=Application Signature Service CA";
+  const PROFILE_CA_SUBJECT: &'static str =
+    "C=CN,O=OpenHarmony,OU=OpenHarmony Community,CN=Profile Signature Service CA";
+  const APP_SUBJECT: &'static str =
+    "C=CN,O=OpenHarmony,OU=OpenHarmony Community,CN=Arkdown Parity Application";
+  const PROFILE_SUBJECT: &'static str =
+    "C=CN,O=OpenHarmony,OU=OpenHarmony Community,CN=Arkdown Parity Profile";
+  const SIGN_ALGORITHM: &'static str = "SHA256withECDSA";
+
+  fn new(project_root: &'a Path, app_with_signed_packages: bool) -> Self {
+    Self {
+      project_root,
+      app_with_signed_packages,
+    }
+  }
+
+  fn materialize(&self) -> io::Result<()> {
+    let bundle_name = self.bundle_name()?;
+    let sign_dir = self.project_root.join("SignFile");
+    fs::create_dir_all(&sign_dir)?;
+    let sign_tool = self.sign_tool()?;
+    self.generate_authority(&sign_tool, &sign_dir)?;
+    self.write_unsigned_profile(&sign_dir, &bundle_name)?;
+    self.run_sign_tool(
+      &sign_tool,
+      &sign_dir,
+      &[
+        "sign-profile",
+        "-keyAlias",
+        Self::PROFILE_KEY_ALIAS,
+        "-signAlg",
+        Self::SIGN_ALGORITHM,
+        "-mode",
+        "localSign",
+        "-profileCertFile",
+        "profile.pem",
+        "-inFile",
+        "profile.json",
+        "-keystoreFile",
+        "debug.jks",
+        "-outFile",
+        "debug.p7b",
+        "-keyPwd",
+        Self::PASSWORD,
+        "-keystorePwd",
+        Self::PASSWORD,
+      ],
+    )?;
+    let encrypted_password = self.write_password_material(&sign_dir)?;
+    self.write_build_profile(&encrypted_password)
+  }
+
+  fn generate_authority(&self, sign_tool: &Path, sign_dir: &Path) -> io::Result<()> {
+    for alias in [Self::APP_KEY_ALIAS, Self::PROFILE_KEY_ALIAS] {
+      self.run_sign_tool(
+        sign_tool,
+        sign_dir,
+        &[
+          "generate-keypair",
+          "-keyAlias",
+          alias,
+          "-keyAlg",
+          "ECC",
+          "-keySize",
+          "NIST-P-256",
+          "-keystoreFile",
+          "debug.jks",
+          "-keyPwd",
+          Self::PASSWORD,
+          "-keystorePwd",
+          Self::PASSWORD,
+        ],
+      )?;
+    }
+    self.generate_ca(
+      sign_tool,
+      sign_dir,
+      Self::ROOT_KEY_ALIAS,
+      Self::ROOT_SUBJECT,
+      "root.cer",
+      None,
+    )?;
+    self.generate_ca(
+      sign_tool,
+      sign_dir,
+      Self::APP_CA_KEY_ALIAS,
+      Self::APP_CA_SUBJECT,
+      "app-ca.cer",
+      Some((Self::ROOT_SUBJECT, Self::ROOT_KEY_ALIAS)),
+    )?;
+    self.generate_ca(
+      sign_tool,
+      sign_dir,
+      Self::PROFILE_CA_KEY_ALIAS,
+      Self::PROFILE_CA_SUBJECT,
+      "profile-ca.cer",
+      Some((Self::ROOT_SUBJECT, Self::ROOT_KEY_ALIAS)),
+    )?;
+    self.generate_leaf(
+      sign_tool,
+      sign_dir,
+      "generate-app-cert",
+      Self::APP_KEY_ALIAS,
+      Self::APP_SUBJECT,
+      Self::APP_CA_SUBJECT,
+      Self::APP_CA_KEY_ALIAS,
+      "app-ca.cer",
+      "app.pem",
+    )?;
+    self.generate_leaf(
+      sign_tool,
+      sign_dir,
+      "generate-profile-cert",
+      Self::PROFILE_KEY_ALIAS,
+      Self::PROFILE_SUBJECT,
+      Self::PROFILE_CA_SUBJECT,
+      Self::PROFILE_CA_KEY_ALIAS,
+      "profile-ca.cer",
+      "profile.pem",
+    )
+  }
+
+  fn generate_ca(
+    &self,
+    sign_tool: &Path,
+    sign_dir: &Path,
+    alias: &str,
+    subject: &str,
+    output: &str,
+    issuer: Option<(&str, &str)>,
+  ) -> io::Result<()> {
+    let mut args = vec![
+      "generate-ca",
+      "-keyAlias",
+      alias,
+      "-signAlg",
+      Self::SIGN_ALGORITHM,
+      "-keyAlg",
+      "ECC",
+      "-keySize",
+      "NIST-P-256",
+      "-subject",
+      subject,
+      "-keystoreFile",
+      "debug.jks",
+      "-outFile",
+      output,
+      "-keyPwd",
+      Self::PASSWORD,
+      "-keystorePwd",
+      Self::PASSWORD,
+      "-issuerKeyPwd",
+      Self::PASSWORD,
+      "-validity",
+      "3650",
+    ];
+    if let Some((issuer_subject, issuer_alias)) = issuer {
+      args.extend(["-issuer", issuer_subject, "-issuerKeyAlias", issuer_alias]);
+    }
+    self.run_sign_tool(sign_tool, sign_dir, &args)
+  }
+
+  #[allow(clippy::too_many_arguments)]
+  fn generate_leaf(
+    &self,
+    sign_tool: &Path,
+    sign_dir: &Path,
+    command: &str,
+    alias: &str,
+    subject: &str,
+    issuer: &str,
+    issuer_alias: &str,
+    sub_ca: &str,
+    output: &str,
+  ) -> io::Result<()> {
+    self.run_sign_tool(
+      sign_tool,
+      sign_dir,
+      &[
+        command,
+        "-keyAlias",
+        alias,
+        "-signAlg",
+        Self::SIGN_ALGORITHM,
+        "-issuer",
+        issuer,
+        "-issuerKeyAlias",
+        issuer_alias,
+        "-subject",
+        subject,
+        "-keystoreFile",
+        "debug.jks",
+        "-subCaCertFile",
+        sub_ca,
+        "-rootCaCertFile",
+        "root.cer",
+        "-outForm",
+        "certChain",
+        "-outFile",
+        output,
+        "-keyPwd",
+        Self::PASSWORD,
+        "-keystorePwd",
+        Self::PASSWORD,
+        "-issuerKeyPwd",
+        Self::PASSWORD,
+        "-validity",
+        "3650",
+      ],
+    )
+  }
+
+  fn write_unsigned_profile(&self, sign_dir: &Path, bundle_name: &str) -> io::Result<()> {
+    let cert_chain = fs::read_to_string(sign_dir.join("app.pem"))?;
+    let certificate_end = "-----END CERTIFICATE-----";
+    let end = cert_chain
+      .find(certificate_end)
+      .map(|index| index + certificate_end.len())
+      .ok_or_else(|| io::Error::other("generated application certificate is not PEM"))?;
+    let application_certificate = format!("{}\n", &cert_chain[..end]);
+    let now = SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .map_err(|error| io::Error::other(format!("invalid system clock: {error}")))?
+      .as_secs();
+    let profile = json!({
+      "version-name": "2.0.0",
+      "version-code": 2,
+      "app-distribution-type": "os_integration",
+      "uuid": "01234567-89ab-cdef-0123-456789abcdef",
+      "validity": {
+        "not-before": now.saturating_sub(300),
+        "not-after": now + 315_360_000,
+      },
+      "type": "release",
+      "bundle-info": {
+        "developer-id": "OpenHarmony",
+        "distribution-certificate": application_certificate,
+        "bundle-name": bundle_name,
+        "apl": "normal",
+        "app-feature": "hos_normal_app",
+      },
+      "acls": { "allowed-acls": [""] },
+      "permissions": { "restricted-permissions": [] },
+      "issuer": "pki_internal",
+    });
+    fs::write(sign_dir.join("profile.json"), serde_json::to_vec(&profile)?)
+  }
+
+  fn sign_tool(&self) -> io::Result<PathBuf> {
+    let sdk_root = std::env::var_os("DEVECO_SDK_HOME")
+      .map(PathBuf::from)
+      .ok_or_else(|| io::Error::other("DEVECO_SDK_HOME is required for signed parity"))?;
+    [
+      sdk_root.join("toolchains/lib/hap-sign-tool.jar"),
+      sdk_root.join("default/openharmony/toolchains/lib/hap-sign-tool.jar"),
+    ]
+    .into_iter()
+    .find(|path| path.is_file())
+    .ok_or_else(|| {
+      io::Error::new(
+        io::ErrorKind::NotFound,
+        format!("hap-sign-tool.jar is missing under {}", sdk_root.display()),
+      )
+    })
+  }
+
+  fn run_sign_tool(&self, sign_tool: &Path, sign_dir: &Path, args: &[&str]) -> io::Result<()> {
+    let output = Command::new("java")
+      .arg("-jar")
+      .arg(sign_tool)
+      .args(args)
+      .current_dir(sign_dir)
+      .output()?;
+    if output.status.success() {
+      return Ok(());
+    }
+    Err(io::Error::other(format!(
+      "{} {:?} failed: {}{}",
+      sign_tool.display(),
+      args,
+      String::from_utf8_lossy(&output.stdout),
+      String::from_utf8_lossy(&output.stderr),
+    )))
+  }
+
+  /// Materializes the exact three-level key derivation consumed by current
+  /// Hvigor `DecipherUtil`: XOR `fd` components, PBKDF2 the `ac` salt, decrypt
+  /// the `ce` work key, then decrypt each build-profile password.
+  fn write_password_material(&self, sign_dir: &Path) -> io::Result<String> {
+    const PASSWORD_MATERIAL: [u8; 16] = *b"arkdown-sign-key";
+    const SALT: [u8; 16] = *b"arkdown-test-slt";
+    const WORK_KEY: [u8; 16] = [0x42; 16];
+
+    let material_root = sign_dir.join("material");
+    for directory in ["fd/0", "fd/1", "fd/2", "ac", "ce"] {
+      fs::create_dir_all(material_root.join(directory))?;
+    }
+    let mut fd0 = [0_u8; 16];
+    for index in 0..fd0.len() {
+      fd0[index] = PASSWORD_MATERIAL[index] ^ Self::DEVECO_COMPONENT[index];
+    }
+    fs::write(material_root.join("fd/0/value"), fd0)?;
+    fs::write(material_root.join("fd/1/value"), [0_u8; 16])?;
+    fs::write(material_root.join("fd/2/value"), [0_u8; 16])?;
+    fs::write(material_root.join("ac/value"), SALT)?;
+
+    let mut root_key = [0_u8; 16];
+    pbkdf2::pbkdf2_hmac::<sha2::Sha256>(&PASSWORD_MATERIAL, &SALT, 10_000, &mut root_key);
+    fs::write(
+      material_root.join("ce/value"),
+      Self::encrypt_password_material(&root_key, &[1_u8; 12], &WORK_KEY)?,
+    )?;
+    let encrypted_password =
+      Self::encrypt_password_material(&WORK_KEY, &[2_u8; 12], Self::PASSWORD.as_bytes())?;
+    Ok(hex::encode(encrypted_password))
+  }
+
+  fn encrypt_password_material(
+    key: &[u8; 16],
+    nonce: &[u8; 12],
+    plaintext: &[u8],
+  ) -> io::Result<Vec<u8>> {
+    use aes_gcm::{aead::Aead, Aes128Gcm, KeyInit, Nonce};
+
+    let cipher = Aes128Gcm::new_from_slice(key)
+      .map_err(|error| io::Error::other(format!("invalid DevEco test key: {error}")))?;
+    let encrypted = cipher
+      .encrypt(Nonce::from_slice(nonce), plaintext)
+      .map_err(|error| io::Error::other(format!("cannot encrypt DevEco test material: {error}")))?;
+    let encrypted_length = u32::try_from(encrypted.len())
+      .map_err(|_| io::Error::other("DevEco test material exceeds u32"))?;
+    let mut output = Vec::with_capacity(4 + nonce.len() + encrypted.len());
+    output.extend_from_slice(&encrypted_length.to_be_bytes());
+    output.extend_from_slice(nonce);
+    output.extend_from_slice(&encrypted);
+    Ok(output)
+  }
+
+  fn bundle_name(&self) -> io::Result<String> {
+    let path = self.project_root.join("AppScope/app.json5");
+    let source = fs::read_to_string(&path)?;
+    let value: Value = json5::from_str(&source).map_err(|error| {
+      io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!(
+          "invalid signing fixture app profile {}: {error}",
+          path.display()
+        ),
+      )
+    })?;
+    value["app"]["bundleName"]
+      .as_str()
+      .map(str::to_string)
+      .ok_or_else(|| io::Error::other(format!("missing app.bundleName in {}", path.display())))
+  }
+
+  fn write_build_profile(&self, encrypted_password: &str) -> io::Result<()> {
+    let path = self.project_root.join("build-profile.json5");
+    let source = fs::read_to_string(&path)?;
+    let mut value: Value = json5::from_str(&source).map_err(|error| {
+      io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!(
+          "invalid signing fixture build profile {}: {error}",
+          path.display()
+        ),
+      )
+    })?;
+    let app = value
+      .get_mut("app")
+      .and_then(Value::as_object_mut)
+      .ok_or_else(|| io::Error::other(format!("missing app object in {}", path.display())))?;
+    let products = app
+      .get_mut("products")
+      .and_then(Value::as_array_mut)
+      .ok_or_else(|| io::Error::other(format!("missing app.products in {}", path.display())))?;
+    for product in products {
+      let product = product.as_object_mut().ok_or_else(|| {
+        io::Error::other(format!("invalid app.products entry in {}", path.display()))
+      })?;
+      product.insert(
+        "signingConfig".to_string(),
+        Value::String(Self::CONFIG_NAME.to_string()),
+      );
+      if self.app_with_signed_packages {
+        let build_option = product
+          .entry("buildOption")
+          .or_insert_with(|| json!({}))
+          .as_object_mut()
+          .ok_or_else(|| {
+            io::Error::other(format!(
+              "invalid app.products[].buildOption in {}",
+              path.display()
+            ))
+          })?;
+        let pack_options = build_option
+          .entry("packOptions")
+          .or_insert_with(|| json!({}))
+          .as_object_mut()
+          .ok_or_else(|| {
+            io::Error::other(format!(
+              "invalid app.products[].buildOption.packOptions in {}",
+              path.display()
+            ))
+          })?;
+        pack_options.insert("appWithSignedPkg".to_string(), Value::Bool(true));
+      }
+    }
+    app.insert(
+      "signingConfigs".to_string(),
+      json!([{
+        "name": Self::CONFIG_NAME,
+        "type": "HarmonyOS",
+        "material": {
+          "certpath": "./SignFile/app.pem",
+          "keyAlias": Self::APP_KEY_ALIAS,
+          "keyPassword": encrypted_password,
+          "profile": "./SignFile/debug.p7b",
+          "signAlg": Self::SIGN_ALGORITHM,
+          "storeFile": "./SignFile/debug.jks",
+          "storePassword": encrypted_password,
+        }
+      }]),
+    );
+    fs::write(&path, serde_json::to_vec_pretty(&value)?)
+  }
 }
 
 impl ParityBuildMode {
@@ -215,10 +707,10 @@ fn widget_hap_hvigor_parity_report() {
   );
 }
 
-/// Project APP parity: the paired entry HAP and form-widget HSP, project
-/// `pack.info`/`pac.json`, nested package contents, `pkgSdkInfo.json`, restored
-/// form abilities, widget bytecode, and module bytecode are compared against
-/// the real project-mode `assembleApp` task.
+/// Project APP parity: two HAPs (entry + feature), two HSPs (form-widget +
+/// ordinary shared), project `pack.info`/`pac.json`, nested package contents,
+/// `pkgSdkInfo.json`, restored form abilities, widget bytecode, and module
+/// bytecode are compared against the real project-mode `assembleApp` task.
 #[test]
 fn widget_app_hvigor_parity_report() {
   run_parity_report_test(
@@ -226,6 +718,66 @@ fn widget_app_hvigor_parity_report() {
     "widget-app",
     ArtifactType::App,
     ParityBuildMode::Debug,
+  );
+}
+
+/// Current Hvigor SignHap/SignHsp/SignApp parity with real PKCS#12,
+/// application certificate and signed provisioning profile inputs. The
+/// material is generated into each clean comparison root so no host-local
+/// DevEco signing state participates in the oracle.
+#[test]
+fn signed_hap_hsp_and_app_hvigor_parity_report() {
+  for (fixture, report_name, artifact_type) in [
+    (
+      "tests/fixtures/minimal-hap",
+      "signed-minimal-hap",
+      ArtifactType::Hap,
+    ),
+    (
+      "tests/fixtures/minimal-hsp",
+      "signed-minimal-hsp",
+      ArtifactType::Hsp,
+    ),
+    (
+      "tests/fixtures/widget-hap",
+      "signed-widget-app",
+      ArtifactType::App,
+    ),
+  ] {
+    run_parity_report_test_with_setup(
+      fixture,
+      report_name,
+      artifact_type,
+      ParityBuildMode::Debug,
+      ParityFixtureSetup::Signed,
+    );
+  }
+}
+
+/// `SignPackagesFromApp` parity: unpack the ordinary APP, sign every embedded
+/// HAP/HSP, repack the `all` APP, and finally sign both outer APP variants.
+#[test]
+fn signed_app_with_embedded_packages_hvigor_parity_report() {
+  run_parity_report_test_with_setup(
+    "tests/fixtures/widget-hap",
+    "signed-widget-all-app",
+    ArtifactType::App,
+    ParityBuildMode::Debug,
+    ParityFixtureSetup::SignedAppPackages,
+  );
+}
+
+/// `HotReloadArkTS -> ColdReloadArkTS -> PrepareQuickfix -> PackageHqf ->
+/// SignHqf` parity with a real es2abc symbol-table handoff, SDK HQF packer and
+/// PKCS#12/profile signing material.
+#[test]
+fn signed_hqf_hvigor_parity_report() {
+  run_parity_report_test_with_setup(
+    "tests/fixtures/minimal-hap",
+    "signed-minimal-hqf",
+    ArtifactType::Hqf,
+    ParityBuildMode::Debug,
+    ParityFixtureSetup::Signed,
   );
 }
 
@@ -372,6 +924,22 @@ fn run_parity_report_test(
   artifact_type: ArtifactType,
   build_mode: ParityBuildMode,
 ) {
+  run_parity_report_test_with_setup(
+    fixture,
+    report_name,
+    artifact_type,
+    build_mode,
+    ParityFixtureSetup::None,
+  );
+}
+
+fn run_parity_report_test_with_setup(
+  fixture: &str,
+  report_name: &str,
+  artifact_type: ArtifactType,
+  build_mode: ParityBuildMode,
+  setup: ParityFixtureSetup,
+) {
   let repo_root = repo_root();
   let fixture_abs = repo_root.join(fixture);
   if !should_run_parity(&fixture_abs) {
@@ -382,8 +950,9 @@ fn run_parity_report_test(
   }
 
   let report_path = report_path_for(&repo_root, report_name);
-  let report = parity_for_fixture(fixture, artifact_type, build_mode, report_path)
-    .expect("parity harness failed before report generation");
+  let report =
+    parity_for_fixture_with_setup(fixture, artifact_type, build_mode, setup, report_path)
+      .expect("parity harness failed before report generation");
   print_report_summary(&report);
   assert_strict_parity(report_name, &report);
 }
@@ -575,10 +1144,11 @@ fn parity_referenced_fixtures_exist() {
 // Core parity harness — generic over fixture path and artifact type
 // ---------------------------------------------------------------------------
 
-fn parity_for_fixture(
+fn parity_for_fixture_with_setup(
   fixture: &str,
   artifact_type: ArtifactType,
   build_mode: ParityBuildMode,
+  setup: ParityFixtureSetup,
   report_path: PathBuf,
 ) -> Result<Value, Box<dyn std::error::Error>> {
   let repo_root = repo_root();
@@ -602,17 +1172,50 @@ fn parity_for_fixture(
   let project_root = temp.path().join(format!("project/{fixture_name}"));
   copy_clean_fixture(&fixture_abs, &project_root)?;
   materialize_local_file_dependencies(&project_root)?;
+  setup.materialize(&project_root)?;
 
   let hvigorw = hvigorw_program(&project_root)?;
   let arkdown_bin = arkdown_program();
-  let hvigor_args = hvigor_args(artifact_type, build_mode);
+  let mut hvigor_args = hvigor_args(artifact_type, build_mode);
+  setup.configure_hvigor_args(&mut hvigor_args);
+
+  let hqf_base = if artifact_type == ArtifactType::Hqf {
+    match prepare_hvigor_hqf_base_build(&hvigorw, &project_root) {
+      Ok(base) => Some(base),
+      Err(error) => {
+        if env_truthy(ENV_KEEP_WORKDIR) {
+          let preserved = temp.keep();
+          eprintln!(
+            "preserved failed HQF parity workspace at {}",
+            preserved.display()
+          );
+        }
+        return Err(error);
+      }
+    }
+  } else {
+    None
+  };
 
   let hvigor_command = run_command("hvigor", &hvigorw, &hvigor_args, &project_root);
   let hvigor = collect_build("hvigor", &project_root, hvigor_command, artifact_type)?;
+  if artifact_type == ArtifactType::Hqf {
+    stop_hvigor_daemon(&hvigorw, &project_root);
+  }
 
   fs::remove_dir_all(&project_root)?;
   copy_clean_fixture(&fixture_abs, &project_root)?;
   materialize_local_file_dependencies(&project_root)?;
+  setup.materialize(&project_root)?;
+
+  if artifact_type == ArtifactType::Hqf {
+    prepare_hqf_cold_request(
+      &project_root,
+      hqf_base
+        .as_ref()
+        .expect("HQF base state captured from Hvigor base build"),
+    )?;
+  }
 
   let arkdown_project_arg = project_root.to_string_lossy().into_owned();
   let mut arkdown_args = arkdown_args(artifact_type, build_mode);
@@ -621,6 +1224,10 @@ fn parity_for_fixture(
   let arkdown_command = run_command("arkdown", &arkdown_bin, &arkdown_args, &project_root);
 
   let arkdown = collect_build("arkdown", &project_root, arkdown_command, artifact_type)?;
+  if setup != ParityFixtureSetup::None {
+    verify_signed_build(&hvigor, artifact_type, setup.signs_embedded_app_packages())?;
+    verify_signed_build(&arkdown, artifact_type, setup.signs_embedded_app_packages())?;
+  }
   let diffs = compare_builds(&hvigor, &arkdown);
 
   let equal = diffs.is_empty()
@@ -633,6 +1240,7 @@ fn parity_for_fixture(
       "fixture": fixture,
       "artifact_type": artifact_type.ext(),
       "build_mode": build_mode.as_str(),
+      "fixture_setup": setup.name(),
       "report_path": report_path.to_string_lossy(),
       "equal": equal,
       "strict": env_truthy(ENV_STRICT),
@@ -657,6 +1265,247 @@ fn parity_for_fixture(
     let _ = temp.keep();
   }
   Ok(report)
+}
+
+fn verify_signed_build(
+  build: &BuildSnapshot,
+  artifact_type: ArtifactType,
+  verify_embedded_packages: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+  let archive = build.archive.as_ref().ok_or_else(|| {
+    io::Error::other(format!(
+      "{} signed {} archive is missing",
+      build.tool,
+      artifact_type.ext()
+    ))
+  })?;
+  let bytes = fs::read(&archive.path)?;
+  ApplicationVerifier::new(&bytes)
+    .verify(InputFormat::Zip)
+    .map_err(|error| {
+      io::Error::other(format!(
+        "{} signed archive verification failed for {}: {error}",
+        build.tool,
+        archive.path.display()
+      ))
+    })?;
+
+  // `SignApp` signs only the outer APP. `SignPackagesFromApp` is selected by
+  // `packOptions.appWithSignedPkg` and is the source-owned stage that signs
+  // every embedded HAP/HSP before the outer archive is rebuilt.
+  if artifact_type == ArtifactType::App && verify_embedded_packages {
+    for (name, bytes) in &archive.contents {
+      if !matches!(
+        Path::new(name).extension().and_then(OsStr::to_str),
+        Some("hap" | "hsp")
+      ) {
+        continue;
+      }
+      ApplicationVerifier::new(bytes)
+        .verify(InputFormat::Zip)
+        .map_err(|error| {
+          io::Error::other(format!(
+            "{} embedded signed package verification failed for {name}: {error}",
+            build.tool
+          ))
+        })?;
+    }
+  }
+  Ok(())
+}
+
+/// Materialize the debugger handoff consumed by the current Hvigor
+/// `HotReloadArkCompile` and `ColdReloadArkCompile` tasks, execute a genuine
+/// dump-symbol-table base build, then switch the same paths to the cold-reload
+/// request consumed by `assembleDevHqf`.
+struct HqfBaseState {
+  symbol_map: Vec<u8>,
+  ets_state: Vec<u8>,
+}
+
+fn prepare_hvigor_hqf_base_build(
+  program: &OsStr,
+  project_root: &Path,
+) -> Result<HqfBaseState, Box<dyn std::error::Error>> {
+  let module_root = project_root.join("entry");
+  let loader_out_ets = module_root.join("build/default/intermediates/loader_out/default/ets");
+  let patch_root = module_root.join("build/default/intermediates/patch/default");
+  let changed_file_list = patch_root.join("changedFileList.json");
+  let patch_abc_path = patch_root.join("ets");
+  let build_config = module_root.join("build/config/buildConfig.json");
+
+  write_reload_build_config(
+    &build_config,
+    "hotReload",
+    &loader_out_ets,
+    &changed_file_list,
+    &patch_abc_path,
+  )?;
+
+  let args = [
+    "--mode",
+    "module",
+    "-p",
+    "product=default",
+    "-p",
+    "buildMode=debug",
+    "HotReloadBuild",
+    "--daemon",
+  ];
+  let mut command = run_command("hvigor", program, &args, project_root);
+  if command.success && !build_config.is_file() {
+    // Hvigor prepends `Clean` to the first daemon HotReloadBuild request and
+    // removes the externally-owned buildConfig. Re-materialize that same
+    // debugger handoff and submit the next public HotReloadBuild request.
+    write_reload_build_config(
+      &build_config,
+      "hotReload",
+      &loader_out_ets,
+      &changed_file_list,
+      &patch_abc_path,
+    )?;
+    command = run_command("hvigor", program, &args, project_root);
+  }
+  if !command.success {
+    return Err(
+      io::Error::other(format!(
+        "hvigor HotReload base build failed (exit {:?}):\n{}",
+        command.exit_code,
+        command.output_text()
+      ))
+      .into(),
+    );
+  }
+  let symbol_map = loader_out_ets.join("symbolMap.map");
+  // The daemon client schedules HotReloadBuild on its persistent worker. Wait
+  // for the source-defined graph and symbol-table outputs rather than using a
+  // fixed build delay.
+  let ets_state = patch_root.join("ets.json");
+  for _ in 0..150 {
+    if symbol_map.is_file() && ets_state.is_file() {
+      break;
+    }
+    std::thread::sleep(std::time::Duration::from_millis(200));
+  }
+  if !symbol_map.is_file() || !ets_state.is_file() {
+    stop_hvigor_daemon(program, project_root);
+    let generated_symbol_maps = WalkDir::new(&module_root)
+      .into_iter()
+      .filter_map(Result::ok)
+      .filter(|entry| entry.file_type().is_file() && entry.file_name() == "symbolMap.map")
+      .map(|entry| entry.path().display().to_string())
+      .collect::<Vec<_>>();
+    return Err(
+      io::Error::other(format!(
+        "hvigor HotReload base build did not produce {} and {}; found {:?}; command output:\n{}",
+        symbol_map.display(),
+        ets_state.display(),
+        generated_symbol_maps,
+        command.output_text()
+      ))
+      .into(),
+    );
+  }
+
+  let base = HqfBaseState {
+    symbol_map: fs::read(&symbol_map)?,
+    ets_state: fs::read(&ets_state)?,
+  };
+  write_reload_build_config(
+    &build_config,
+    "coldReload",
+    &loader_out_ets,
+    &changed_file_list,
+    &patch_abc_path,
+  )?;
+  if let Some(parent) = changed_file_list.parent() {
+    fs::create_dir_all(parent)?;
+  }
+  fs::write(
+    changed_file_list,
+    serde_json::to_vec(&json!({
+      "modifiedFiles": ["pages/Index.ets"],
+      "removedFiles": []
+    }))?,
+  )?;
+  Ok(base)
+}
+
+/// ColdReload consumes the symbol table emitted by the immediately preceding
+/// Hvigor HotReload base build. Reusing that compiler-owned input makes both
+/// final HQF builds start from the identical base application without
+/// fabricating a symbol-table format in the test harness.
+fn prepare_hqf_cold_request(
+  project_root: &Path,
+  base: &HqfBaseState,
+) -> Result<(), Box<dyn std::error::Error>> {
+  let module_root = project_root.join("entry");
+  let loader_out_ets = module_root.join("build/default/intermediates/loader_out/default/ets");
+  let patch_root = module_root.join("build/default/intermediates/patch/default");
+  let changed_file_list = patch_root.join("changedFileList.json");
+  let patch_abc_path = patch_root.join("ets");
+  let build_config = module_root.join("build/config/buildConfig.json");
+  write_reload_build_config(
+    &build_config,
+    "coldReload",
+    &loader_out_ets,
+    &changed_file_list,
+    &patch_abc_path,
+  )?;
+  fs::create_dir_all(&loader_out_ets)?;
+  fs::write(loader_out_ets.join("symbolMap.map"), &base.symbol_map)?;
+  fs::create_dir_all(&patch_root)?;
+  fs::write(patch_root.join("ets.json"), &base.ets_state)?;
+  fs::write(
+    changed_file_list,
+    serde_json::to_vec(&json!({
+      "modifiedFiles": ["pages/Index.ets"],
+      "removedFiles": []
+    }))?,
+  )?;
+  Ok(())
+}
+
+fn stop_hvigor_daemon(program: &OsStr, project_root: &Path) {
+  let report = run_command(
+    "hvigor",
+    program,
+    &["--stop-daemon", "--no-daemon"],
+    project_root,
+  );
+  if !report.success {
+    eprintln!(
+      "failed to stop parity Hvigor daemon for {}:\n{}",
+      project_root.display(),
+      report.output_text()
+    );
+  }
+}
+
+fn write_reload_build_config(
+  path: &Path,
+  mode: &str,
+  old_map_file_path: &Path,
+  changed_file_list: &Path,
+  patch_abc_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+  if let Some(parent) = path.parent() {
+    fs::create_dir_all(parent)?;
+  }
+  fs::write(
+    path,
+    serde_json::to_vec_pretty(&json!({
+      "patchConfig": {
+        "enableMap": "true",
+        "mode": mode,
+        "oldMapFilePath": old_map_file_path,
+        "changedFileList": changed_file_list,
+        "patchAbcPath": patch_abc_path,
+        "removeChangedFileListInSdk": "true"
+      }
+    }))?,
+  )?;
+  Ok(())
 }
 
 /// Run cold, unchanged, and invalidated builds in the same project copies.
@@ -891,7 +1740,11 @@ fn hvigor_args(artifact_type: ArtifactType, build_mode: ParityBuildMode) -> Vec<
       ParityBuildMode::Release => "buildMode=release",
     },
     artifact_type.hvigor_task(),
-    "--no-daemon",
+    if artifact_type == ArtifactType::Hqf {
+      "--daemon"
+    } else {
+      "--no-daemon"
+    },
   ];
   if artifact_type == ArtifactType::Test {
     // Default `ohos-test-coverage=true` instruments source; disable it so
@@ -922,6 +1775,10 @@ fn arkdown_args(artifact_type: ArtifactType, build_mode: ParityBuildMode) -> Vec
   if artifact_type == ArtifactType::OhosTest {
     args.push("--build-target-name".to_string());
     args.push("ohosTest".to_string());
+  }
+  if artifact_type == ArtifactType::Hqf {
+    args.push("--action".to_string());
+    args.push("assemble-quickfix".to_string());
   }
   args
 }
@@ -1468,6 +2325,44 @@ fn collect_build(
         false,
       )?;
     }
+    ArtifactType::Hqf => {
+      collect_named_artifact(
+        &mut artifacts,
+        root,
+        archive.as_ref(),
+        "patch.json",
+        Some("patch.json"),
+        &["intermediates/patch"],
+        false,
+      )?;
+      collect_named_artifact(
+        &mut artifacts,
+        root,
+        archive.as_ref(),
+        "modules.abc",
+        Some("ets/modules.abc"),
+        &["intermediates/patch"],
+        true,
+      )?;
+      collect_named_artifact(
+        &mut artifacts,
+        root,
+        archive.as_ref(),
+        "sourceMaps.map",
+        Some("ets/sourceMaps.map"),
+        &["intermediates/patch"],
+        false,
+      )?;
+      collect_named_artifact(
+        &mut artifacts,
+        root,
+        archive.as_ref(),
+        "quickfix.json",
+        None,
+        &["outputs/default"],
+        false,
+      )?;
+    }
     ArtifactType::Har => {
       // HAR archives contain oh-package.json5, source ETS files, declaration stubs,
       // and optionally index.abc
@@ -1660,8 +2555,16 @@ fn collect_build(
   // current ets2bundle fills them as concurrent resolver work completes.
   // ArtifactNormalization handles that source-owned nondeterminism, so test
   // targets retain the same complete build/cache comparison as normal modules.
-  let build_files = collect_build_default_files(root)?;
-  let loader_out_js = collect_loader_out_js(root)?;
+  let build_files = if artifact_type == ArtifactType::Hqf {
+    collect_hqf_build_files(root)?
+  } else {
+    collect_build_default_files(root)?
+  };
+  let loader_out_js = if artifact_type == ArtifactType::Hqf {
+    BTreeMap::new()
+  } else {
+    collect_loader_out_js(root)?
+  };
 
   Ok(BuildSnapshot {
     tool: tool.to_string(),
@@ -1948,6 +2851,24 @@ fn collect_build_default_files(
   Ok(files)
 }
 
+fn collect_hqf_build_files(
+  root: &Path,
+) -> Result<BTreeMap<String, ArtifactSnapshot>, Box<dyn std::error::Error>> {
+  Ok(
+    collect_build_default_files(root)?
+      .into_iter()
+      .filter(|(path, _)| {
+        path.contains("/intermediates/patch/")
+          || (path.contains("/outputs/")
+            && matches!(
+              Path::new(path).extension().and_then(OsStr::to_str),
+              Some("json" | "hqf")
+            ))
+      })
+      .collect(),
+  )
+}
+
 fn build_default_key(root: &Path, path: &Path) -> Option<String> {
   let rel = path.strip_prefix(root).ok()?;
   let components = rel
@@ -1979,6 +2900,7 @@ fn is_binary_build_file(path: &Path) -> bool {
         | "hap"
         | "hsp"
         | "app"
+        | "hqf"
         | "har"
         | "tgz"
         | "index"
@@ -2067,6 +2989,7 @@ enum ArtifactNormalization {
   PreserveOrder,
   UnorderedLineManifest,
   JsonObjectInsertionOrder,
+  ReloadEtsState,
   CoverageParserInput,
   ZipContainerTimestamps,
   TarContainerMetadata,
@@ -2075,13 +2998,20 @@ enum ArtifactNormalization {
 impl ArtifactNormalization {
   fn for_path(path: &Path) -> Self {
     match path.extension().and_then(OsStr::to_str) {
-      Some("hap" | "hsp" | "app") => return Self::ZipContainerTimestamps,
+      Some("hap" | "hsp" | "app" | "hqf") => return Self::ZipContainerTimestamps,
       // `PackageSharedTgz` writes an HSP and its interface HAR into this
       // gzip-compressed tar container. Both hvigor and arkdown intentionally
       // preserve the member payloads, while their compression libraries and
       // build-local archive timestamps are not a parity contract.
       Some("har" | "tgz") => return Self::TarContainerMetadata,
       _ => {}
+    }
+    if path.file_name().and_then(OsStr::to_str) == Some("ets.json")
+      && path
+        .components()
+        .any(|component| matches!(component, Component::Normal(name) if name == "patch"))
+    {
+      return Self::ReloadEtsState;
     }
     path
       .file_name()
@@ -2126,6 +3056,19 @@ impl ArtifactNormalization {
       }
       Self::JsonObjectInsertionOrder => serde_json::from_str::<BTreeMap<String, Value>>(&text)
         .and_then(|value| serde_json::to_string_pretty(&value))
+        .unwrap_or(text),
+      Self::ReloadEtsState => serde_json::from_str::<Value>(&text)
+        .and_then(|mut value| {
+          if let Some(object) = value.as_object_mut() {
+            if object.contains_key("changedFileList") {
+              object.insert(
+                "changedFileList".to_string(),
+                Value::String("<MTIME_MS>".to_string()),
+              );
+            }
+          }
+          serde_json::to_string_pretty(&value)
+        })
         .unwrap_or(text),
       Self::CoverageParserInput => Self::normalize_coverage_parser_input(&text),
       Self::ZipContainerTimestamps | Self::TarContainerMetadata => text,
@@ -2214,6 +3157,7 @@ impl ArtifactNormalization {
       let content = match member_normalization {
         Self::UnorderedLineManifest
         | Self::JsonObjectInsertionOrder
+        | Self::ReloadEtsState
         | Self::CoverageParserInput => String::from_utf8(content)
           .map(|text| member_normalization.normalize_text(text).into_bytes())
           .ok()?,
@@ -2264,6 +3208,7 @@ impl ArtifactNormalization {
       let content = match member_normalization {
         Self::UnorderedLineManifest
         | Self::JsonObjectInsertionOrder
+        | Self::ReloadEtsState
         | Self::CoverageParserInput => String::from_utf8(content)
           .map(|text| member_normalization.normalize_text(text).into_bytes())
           .ok()?,
@@ -2760,8 +3705,19 @@ fn compare_archive_entries(
       for name in left_keys.intersection(&right_keys) {
         let left_entry = &left.entries[name];
         let right_entry = &right.entries[name];
-        if left_entry.size != right_entry.size
-          || left_entry.compressed_size != right_entry.compressed_size
+        // ECDSA's DER encoding has a run-dependent byte length. Signed
+        // HAP/HSP members of an APP therefore change raw size even across two
+        // Hvigor runs. Their recursively normalized content hash covers every
+        // ZIP member and storage property; `verify_signed_build` independently
+        // validates both outer and embedded signing blocks.
+        let signed_package_with_equal_content = matches!(
+          Path::new(name).extension().and_then(OsStr::to_str),
+          Some("hap" | "hsp")
+        ) && left_entry.content_hash
+          == right_entry.content_hash;
+        if (!signed_package_with_equal_content
+          && (left_entry.size != right_entry.size
+            || left_entry.compressed_size != right_entry.compressed_size))
           || left_entry.content_hash != right_entry.content_hash
         {
           changed.push(json!({

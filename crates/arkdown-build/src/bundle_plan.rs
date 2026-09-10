@@ -684,9 +684,9 @@ pub struct BundleStageOutput {
 pub enum BundleStageState {
     Executed,
     CacheHit,
-    /// Hvigor's original source HAR task graph runs ArkTS linting but does not
-    /// run HarCompileArkTS/CompileArkTS or es2abc.
-    SkippedOriginalHar,
+    /// CompileArkTS is disabled for the selected source set, or the selected
+    /// original-HAR task graph does not contain a compile stage.
+    Skipped,
 }
 
 pub struct BundlePackageOutput {
@@ -729,9 +729,9 @@ impl BundleStageOutput {
         self
     }
 
-    pub fn skipped_original_har(modules_abc_path: PathBuf, output_dir: PathBuf) -> Self {
+    pub fn skipped(modules_abc_path: PathBuf, output_dir: PathBuf) -> Self {
         let mut output = Self::from_cache(modules_abc_path, output_dir);
-        output.state = BundleStageState::SkippedOriginalHar;
+        output.state = BundleStageState::Skipped;
         output
     }
 

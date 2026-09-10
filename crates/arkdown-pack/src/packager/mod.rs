@@ -496,7 +496,7 @@ impl Packager {
         // Additional ETS-side assets copied by CompileArkTS/loader, such as
         // widget/component_collection.json and widgets.abc, precede the main
         // ABC in SDK app_packing_tool output order.
-        if let Some(ets_dir) = input.abc_path.parent() {
+        if let Some(ets_dir) = input.abc_path.as_deref().and_then(Path::parent) {
             Self::add_loader_out_ets_assets(&mut writer, ets_dir, &input.output_path)?;
         }
 
@@ -505,8 +505,10 @@ impl Packager {
         // module therefore packages both the dynamic and static merged ABCs.
         // Keep the compiler-owned primary path first, then the explicitly
         // declared additional artifacts; never infer a stale sibling file.
-        let mut abc_paths = Vec::with_capacity(1 + input.additional_abc_paths.len());
-        abc_paths.push(input.abc_path.clone());
+        let mut abc_paths = Vec::with_capacity(
+            usize::from(input.abc_path.is_some()) + input.additional_abc_paths.len(),
+        );
+        abc_paths.extend(input.abc_path.iter().cloned());
         abc_paths.extend(input.additional_abc_paths.iter().cloned());
         abc_paths.dedup();
         for abc_path in abc_paths {

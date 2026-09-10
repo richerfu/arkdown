@@ -140,30 +140,17 @@ impl<'a> ArkdownConfigLoader<'a> {
         // 5. Build ProductConfig
         // -----------------------------------------------------------------------
 
-        // Extract old-format per-product signing_configs before other field moves.
-        let raw_signing_configs_compat = raw_product.signing_configs;
-
-        // Resolve signing config: new format references by name under app.signingConfigs;
-        // fall back to old per-product embedded signingConfigs for backward compat.
+        // Current SignUtil.getSigningConfig resolves the selected product's
+        // reference only from app.signingConfigs (then applies hvigorfile
+        // overrides). Product-embedded signingConfigs are not a current input.
         let signing_config_decoder = SigningConfigDecoder::new(root);
-        let signing_config = raw_product
-            .signing_config
-            .as_deref()
-            .and_then(|name| {
-                app_signing_configs
-                    .iter()
-                    .find(|sc| sc.name == name)
-                    .and_then(|sc| sc.material.as_ref())
-                    .map(|material| signing_config_decoder.decode(Some(name), material))
-            })
-            .or_else(|| {
-                // Backward compat: old format had signing_configs embedded in products.
-                raw_signing_configs_compat
-                    .into_iter()
-                    .next()
-                    .and_then(|sc| sc.material.map(|material| (sc.name, material)))
-                    .map(|(name, material)| signing_config_decoder.decode(Some(&name), &material))
-            });
+        let signing_config = raw_product.signing_config.as_deref().and_then(|name| {
+            app_signing_configs
+                .iter()
+                .find(|sc| sc.name == name)
+                .and_then(|sc| sc.material.as_ref())
+                .map(|material| signing_config_decoder.decode(Some(name), material))
+        });
 
         let build_option = BuildOptionDecoder::new(
             raw_product.build_option.as_ref(),

@@ -230,12 +230,17 @@ impl BuildCoordinator {
             } else {
                 versioned_cached_abc
             };
-            if !BuildPolicy::new(module_config.as_ref())
-                .module_requires_arkts_compilation(module)?
-            {
-                bundle_outs.push((BundleStageOutput::skipped_original_har(
-                    cached_abc, output_dir,
-                ),));
+            let package_main = module_context
+                .module
+                .package
+                .as_ref()
+                .and_then(|package| package.package_json.main.as_deref());
+            if !BuildPolicy::new(module_config.as_ref()).module_requires_arkts_compilation(
+                module,
+                module_target_name,
+                package_main,
+            ) {
+                bundle_outs.push((BundleStageOutput::skipped(cached_abc, output_dir),));
                 widget_bundle_outs.push(None);
                 continue;
             }
@@ -1315,6 +1320,24 @@ impl BuildCoordinator {
                 bundled_dependencies,
                 args.byte_code_har_integrated_optimization,
             )?;
+
+            // Current ets2bundle `collect-importers-plugin.js` writes this
+            // source-graph handoff at Rollup buildEnd. ColdReload explicitly
+            // switches `isReload` on; the first HotReload build records the
+            // complete graph and later watch invalidations update it.
+            if args.action.is_hot_reload() || QuickFixTaskPlan::for_action(args.action).is_some() {
+                ReloadImporterStateWriter::new(
+                    &module_layout,
+                    &module_layout.source().ets(),
+                    loader_json.patch_config.as_ref(),
+                    &bundle_out.bundle_output.entry_module_ids,
+                    &bundle_out.bundle_output.module_imports,
+                )
+                .write(
+                    QuickFixTaskPlan::for_action(args.action).is_some()
+                        || args.watch_invalidation.is_some(),
+                )?;
+            }
 
             // Hvigor enables collectImportersPlugin only for hot-reload builds.
             // Normal CompileArkTS builds must not emit importer_map intermediates.

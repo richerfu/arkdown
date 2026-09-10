@@ -226,8 +226,8 @@ impl<'a> DevEcoPasswordResolver<'a> {
     const COMPONENT: [u8; 16] = [
         49, 243, 9, 115, 214, 175, 91, 184, 211, 190, 177, 88, 101, 131, 192, 119,
     ];
-    const MIN_ENCRYPTED_HEX_LEN: usize = 16;
-    const ENCRYPTED_HEADER_PREFIX: &'static str = "000000";
+    const MIN_ENCRYPTED_HEX_LEN: usize = 32;
+    const MATERIAL_DIRECTORIES: [&'static str; 3] = ["fd", "ac", "ce"];
 
     fn new(ciphertext: &'a str, material_dir: &'a Path) -> Self {
         Self {
@@ -237,18 +237,29 @@ impl<'a> DevEcoPasswordResolver<'a> {
     }
 
     fn resolve(&self) -> Result<String, SignError> {
-        if !self.requires_material_decryption() {
-            return Ok(self.ciphertext.to_owned());
+        // Current Hvigor `DecipherUtil.decryptPwd` rejects every short or
+        // odd-length build-profile value before reading signing material. It
+        // has no plaintext-password branch.
+        if self.ciphertext.len() < Self::MIN_ENCRYPTED_HEX_LEN {
+            return Err(SignError::Config(
+                "encrypted signing password is shorter than 32 hexadecimal characters".into(),
+            ));
+        }
+        if !self.ciphertext.len().is_multiple_of(2) {
+            return Err(SignError::Config(
+                "encrypted signing password has an odd hexadecimal length".into(),
+            ));
         }
 
         let material_root = self.material_dir.join("material");
-        let fd_root = material_root.join("fd");
-        let fd0 = self.read_component(&fd_root.join("0"))?;
-        let fd1 = self.read_component(&fd_root.join("1"))?;
-        let fd2 = self.read_component(&fd_root.join("2"))?;
+        self.validate_material_root(&material_root)?;
+        let components = self.read_components(&material_root.join("fd"))?;
         let mut combined = [0_u8; 16];
         for index in 0..combined.len() {
-            combined[index] = fd0[index] ^ fd1[index] ^ fd2[index] ^ Self::COMPONENT[index];
+            combined[index] = components[0][index]
+                ^ components[1][index]
+                ^ components[2][index]
+                ^ Self::COMPONENT[index];
         }
 
         let password_material = String::from_utf8_lossy(&combined);
@@ -274,38 +285,83 @@ impl<'a> DevEcoPasswordResolver<'a> {
         })
     }
 
-    fn requires_material_decryption(&self) -> bool {
-        self.ciphertext.len() >= Self::MIN_ENCRYPTED_HEX_LEN
-            && self.ciphertext.starts_with(Self::ENCRYPTED_HEADER_PREFIX)
+    fn validate_material_root(&self, material_root: &Path) -> Result<(), SignError> {
+        if !material_root.is_dir() {
+            return Err(SignError::Config(format!(
+                "DevEco signing material is not a directory: {}",
+                material_root.display()
+            )));
+        }
+        let entries = self.directory_names(material_root, true)?;
+        if entries.is_empty() {
+            return Err(SignError::Config(format!(
+                "DevEco signing material directory is empty: {}",
+                material_root.display()
+            )));
+        }
+        for required in Self::MATERIAL_DIRECTORIES {
+            if !entries.iter().any(|entry| entry == required) {
+                return Err(SignError::Config(format!(
+                    "DevEco signing material is missing {required}: {}",
+                    material_root.display()
+                )));
+            }
+        }
+        Ok(())
     }
 
-    fn read_component(&self, directory: &Path) -> Result<[u8; 16], SignError> {
-        let bytes = self.read_single_material_file(directory)?;
-        bytes
-            .get(..16)
-            .ok_or_else(|| {
+    fn read_components(&self, directory: &Path) -> Result<[[u8; 16]; 3], SignError> {
+        let entries = self.directory_names(directory, true)?;
+        if entries.len() != 3 {
+            return Err(SignError::Config(format!(
+                "DevEco fd signing material must contain exactly three entries: {}",
+                directory.display()
+            )));
+        }
+        let mut components = [[0_u8; 16]; 3];
+        for (index, entry) in entries.iter().enumerate() {
+            let entry_dir = directory.join(entry);
+            let bytes = self.read_single_material_file(&entry_dir)?;
+            components[index] = bytes.try_into().map_err(|_| {
                 SignError::Config(format!(
-                    "DevEco material component is shorter than 16 bytes: {}",
-                    directory.display()
+                    "DevEco material component must be exactly 16 bytes: {}",
+                    entry_dir.display()
                 ))
-            })?
-            .try_into()
-            .map_err(|_| {
-                SignError::Config(format!(
-                    "DevEco material component is invalid: {}",
-                    directory.display()
-                ))
-            })
+            })?;
+        }
+        Ok(components)
     }
 
     fn read_single_material_file(&self, directory: &Path) -> Result<Vec<u8>, SignError> {
+        if !directory.is_dir() {
+            return Err(SignError::Config(format!(
+                "DevEco signing material entry is not a directory: {}",
+                directory.display()
+            )));
+        }
+        let entries = self.directory_names(directory, false)?;
+        if entries.len() != 1 {
+            return Err(SignError::Config(format!(
+                "DevEco signing material entry must contain exactly one file: {}",
+                directory.display()
+            )));
+        }
+        let path = directory.join(&entries[0]);
+        fs_err::read(&path).map_err(|source| SignError::IoPath { path, source })
+    }
+
+    fn directory_names(
+        &self,
+        directory: &Path,
+        ignore_ds_store: bool,
+    ) -> Result<Vec<std::ffi::OsString>, SignError> {
         let entries = std::fs::read_dir(directory).map_err(|error| {
             SignError::Config(format!(
                 "cannot read DevEco material directory {}: {error}",
                 directory.display()
             ))
         })?;
-        let mut paths = Vec::new();
+        let mut names = Vec::new();
         for entry in entries {
             let entry = entry.map_err(|error| {
                 SignError::Config(format!(
@@ -313,21 +369,13 @@ impl<'a> DevEcoPasswordResolver<'a> {
                     directory.display()
                 ))
             })?;
-            if entry.file_name() != ".DS_Store" {
-                paths.push(entry.path());
+            let name = entry.file_name();
+            if !ignore_ds_store || name != ".DS_Store" {
+                names.push(name);
             }
         }
-        paths.sort();
-        let path = paths.first().ok_or_else(|| {
-            SignError::Config(format!(
-                "DevEco material directory is empty: {}",
-                directory.display()
-            ))
-        })?;
-        fs_err::read(path).map_err(|source| SignError::IoPath {
-            path: path.clone(),
-            source,
-        })
+        names.sort();
+        Ok(names)
     }
 
     fn decrypt(&self, key: &[u8; 16], data: &[u8]) -> Result<Vec<u8>, SignError> {

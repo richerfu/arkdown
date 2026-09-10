@@ -1,0 +1,11 @@
+{
+  "module": {
+    "name": "shared",
+    "type": "shared",
+    "srcEntry": "./ets/Index.ets",
+    "deliveryWithInstall": true,
+    "deviceTypes": [
+      "phone"
+    ]
+  }
+}

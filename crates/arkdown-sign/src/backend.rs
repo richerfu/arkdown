@@ -55,7 +55,9 @@ impl SignBackendRunner {
 /// HAP/HSP archives stay on the published `hapsigner` backend. HAR signing is
 /// a different SDK protocol: `sdk-sign-tool-full.jar sign-har` mutates a task
 /// directory containing `package/`, so the packager owns staging and this
-/// runner owns only the typed external-tool invocation.
+/// runner owns only the typed external-tool invocation. This backend is an
+/// explicit legacy item until hapsigner-rs exposes that HAR directory-signing
+/// protocol; do not reproduce the protocol inside Arkdown.
 #[derive(Debug, Clone)]
 pub struct HarSignBackendRunner {
     java_executable: PathBuf,

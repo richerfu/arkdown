@@ -30,39 +30,19 @@ impl<'a> SigningConfigMaterial<'a> {
         Ok(SigningMaterial {
             keystore_path: self.config.store_file.clone(),
             key_alias: self.config.key_alias.clone(),
-            store_password: self.password(
-                "ARKDOWN_STORE_PASSWORD",
+            // `CommonSignCommandBuilder.getKeyStorePwd/getKeyPwd` always
+            // delegates build-profile values to `DecipherUtil.decryptPwd`.
+            // Environment/plaintext fallbacks are not part of that contract.
+            store_password: SigningPassword::encrypted(
                 &self.config.store_password,
-                &material_dir,
-            )?,
-            key_password: self.password(
-                "ARKDOWN_KEY_PASSWORD",
-                &self.config.key_password,
-                &material_dir,
-            )?,
+                material_dir.clone(),
+            ),
+            key_password: SigningPassword::encrypted(&self.config.key_password, material_dir),
             profile_path: self.config.profile_path.clone(),
             cert_path: self.config.cert_path.clone(),
             sign_alg: self.config.sign_alg.clone(),
             profile_signed: true,
         })
-    }
-
-    fn password(
-        &self,
-        env_var: &str,
-        configured: &str,
-        material_dir: &Path,
-    ) -> Result<SigningPassword, SignError> {
-        match std::env::var(env_var) {
-            Ok(password) => Ok(SigningPassword::plaintext(password)),
-            Err(std::env::VarError::NotPresent) => Ok(SigningPassword::encrypted(
-                configured,
-                material_dir.to_path_buf(),
-            )),
-            Err(std::env::VarError::NotUnicode(_)) => {
-                Err(SignError::Config(format!("{env_var} must be valid UTF-8")))
-            }
-        }
     }
 
     fn material_dir(&self) -> PathBuf {
