@@ -772,6 +772,95 @@ struct Page {
 }
 
 #[test]
+fn default_imported_builder_matches_process_import_module_alias_resolution() {
+    let builder_path = PathBuf::from("/project/components/SettingsPageDialog.ets");
+    let page_path = PathBuf::from("/project/pages/DevMenu.ets");
+    let builder_source = r#"class SettingsPageParams { value: string = '' }
+@Builder
+function SettingsPageDialogBuilder(params: SettingsPageParams) { Text(params.value) }
+export default SettingsPageDialogBuilder
+"#;
+    let page_source = r#"import SettingsPageDialog from '../components/SettingsPageDialog'
+const dialogBuilder = wrapBuilder(SettingsPageDialog)
+"#;
+    let mut source_map = rustc_hash::FxHashMap::default();
+    source_map.insert(builder_path, std::sync::Arc::<str>::from(builder_source));
+    source_map.insert(page_path.clone(), std::sync::Arc::<str>::from(page_source));
+    let sources = crate::source::TransformSourceSnapshot::new(source_map);
+    let metadata = std::sync::Arc::new(ComponentMetadata::default());
+    let options = TransformOptions {
+        sources: sources.clone(),
+        module_exports: ModuleExportIndex::build(&sources, &[], &metadata),
+        component_metadata: metadata,
+        ..TransformOptions::default()
+    };
+
+    let result = TransformHarness::transform_with_options(
+        &make_source(page_path.to_str().unwrap(), page_source),
+        &options,
+    )
+    .expect("default import alias must retain the target @Builder identity");
+
+    assert!(
+        result.contains("wrapBuilder(SettingsPageDialog)"),
+        "the validated factory call must remain available to runtime lowering:\n{result}"
+    );
+}
+
+#[test]
+fn namespace_imported_builder_matches_process_import_module_integration_resolution() {
+    let builder_path = PathBuf::from("/project/components/Dialogs.ets");
+    let page_path = PathBuf::from("/project/pages/Page.ets");
+    let builder_source = r#"@Builder
+export function SettingsDialog(params: { value: number }) {
+  Text(params.value.toString())
+}
+"#;
+    let page_source = r#"import * as Dialogs from '../components/Dialogs'
+
+@Component
+struct Page {
+  @State value: number = 1
+  @BuilderParam content: () => void = Dialogs.SettingsDialog
+  build() {
+    Column() {
+      Dialogs.SettingsDialog({ value: this.value })
+      this.content()
+    }
+  }
+}
+"#;
+    let mut source_map = rustc_hash::FxHashMap::default();
+    source_map.insert(builder_path, std::sync::Arc::<str>::from(builder_source));
+    source_map.insert(page_path.clone(), std::sync::Arc::<str>::from(page_source));
+    let sources = crate::source::TransformSourceSnapshot::new(source_map);
+    let metadata = std::sync::Arc::new(ComponentMetadata::default());
+    let options = TransformOptions {
+        sources: sources.clone(),
+        module_exports: ModuleExportIndex::build(&sources, &[], &metadata),
+        component_metadata: metadata,
+        ..TransformOptions::default()
+    };
+
+    let result = TransformHarness::transform_with_options(
+        &make_source(page_path.to_str().unwrap(), page_source),
+        &options,
+    )
+    .expect("namespace import must retain the target @Builder identity");
+
+    assert!(
+        result.contains(
+            "Dialogs.SettingsDialog.bind(this)(makeBuilderParameterProxy(\"SettingsDialog\""
+        ),
+        "transferBuilderCall must preserve the namespace-qualified callee:\n{result}"
+    );
+    assert!(
+        result.contains("this.content = Dialogs.SettingsDialog;"),
+        "namespace-imported Builders are valid @BuilderParam initializers:\n{result}"
+    );
+}
+
+#[test]
 fn api_available_calls_and_references_match_reference_compiler_lowering() {
     let src = r#"import deviceInfo from '@ohos.deviceInfo'
 const direct = deviceInfo.apiAvailable(25)
@@ -5006,6 +5095,13 @@ export { createCollaborationServiceMenuItems };"#,
     )
     .unwrap();
     std::fs::write(
+        api_root.join("@hms.default.menu.d.ets"),
+        r#"@Builder
+declare function createDefaultMenu(): void;
+export default createDefaultMenu;"#,
+    )
+    .unwrap();
+    std::fs::write(
         kit_root.join("@kit.ServiceCollaborationKit.json"),
         r#"{
   "symbols": {
@@ -5032,12 +5128,16 @@ export { createCollaborationServiceMenuItems };"#,
     };
     let source = r#"
 import { createCollaborationServiceMenuItems } from '@kit.ServiceCollaborationKit';
+import * as collaboration from '@hms.collaboration.service';
+import createDefaultMenu from '@hms.default.menu';
 
 @Component
 struct Page {
   build() {
     Menu() {
       createCollaborationServiceMenuItems()
+      collaboration.createCollaborationServiceMenuItems()
+      createDefaultMenu()
     }
   }
 }
@@ -5055,6 +5155,14 @@ struct Page {
     assert!(
         !result.contains("createCollaborationServiceMenuItems.create("),
         "an SDK @Builder must not be lowered as an ArkUI component: {result}"
+    );
+    assert!(
+        result.contains("collaboration.createCollaborationServiceMenuItems.bind(this)();"),
+        "SDK namespace imports must preserve the qualified Builder callee: {result}"
+    );
+    assert!(
+        result.contains("createDefaultMenu.bind(this)();"),
+        "SDK default aliases must resolve to the decorated declaration: {result}"
     );
 }
 
@@ -5171,6 +5279,45 @@ struct Page {
     assert!(
         !result.contains("AVVolumePanel.hitTestBehavior("),
         "SDK declaration component must not be treated as an inner component; got:\n{result}"
+    );
+}
+
+#[test]
+fn sdk_namespace_component_import_preserves_qualified_component_metadata() {
+    let component_metadata = ComponentMetadata::from_ets_loader_path(Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/ets-loader"
+    )))
+    .expect("test ets-loader metadata");
+    let options = TransformOptions {
+        component_metadata: std::sync::Arc::new(component_metadata),
+        ..Default::default()
+    };
+    let src = r#"
+import * as audio from '@kit.AudioKit';
+
+@Component
+struct Page {
+  @State volumeLevel: number = 0;
+
+  build() {
+    audio.AVVolumePanel({ volumeLevel: this.volumeLevel })
+  }
+}
+"#;
+    let result = TransformHarness::transform_with_options(
+        &make_source("entry/src/main/ets/pages/Index.ets", src),
+        &options,
+    )
+    .unwrap();
+
+    assert!(
+        result.contains("new audio.AVVolumePanel("),
+        "processImportModule namespace imports must retain the SDK component callee: {result}"
+    );
+    assert!(
+        result.contains("volumeLevel: this.volumeLevel"),
+        "the qualified SDK component must retain declaration property metadata: {result}"
     );
 }
 

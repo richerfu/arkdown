@@ -685,6 +685,7 @@ pub(super) struct BuilderMethodCallEmitter<'a> {
     pub(super) name: &'a str,
     pub(super) arguments: &'a [Argument<'a>],
     pub(super) context: &'a BuildContext,
+    target: Option<&'a Expression<'a>>,
 }
 
 impl<'a> BuilderMethodCallEmitter<'a> {
@@ -699,7 +700,13 @@ impl<'a> BuilderMethodCallEmitter<'a> {
             name,
             arguments,
             context,
+            target: None,
         }
+    }
+
+    pub(super) fn with_target(mut self, target: &'a Expression<'a>) -> Self {
+        self.target = Some(target);
+        self
     }
 
     pub(super) fn statement<'b>(
@@ -707,18 +714,22 @@ impl<'a> BuilderMethodCallEmitter<'a> {
         ast: &AstBuilder<'b>,
         allocator: &'b Allocator,
     ) -> Statement<'b> {
-        let target = match self.receiver {
-            BuilderMethodReceiver::Direct => {
-                Expression::new_identifier(SPAN, ast.allocator().alloc_str(self.name), ast)
-            }
-            BuilderMethodReceiver::This => {
-                let object = Expression::new_this_expression(SPAN, ast);
-                let property = IdentifierName::new(SPAN, ast.allocator().alloc_str(self.name), ast);
-                Expression::from(MemberExpression::new_static_member_expression(
-                    SPAN, object, property, false, ast,
-                ))
-            }
-        };
+        let target = self.target.map_or_else(
+            || match self.receiver {
+                BuilderMethodReceiver::Direct => {
+                    Expression::new_identifier(SPAN, ast.allocator().alloc_str(self.name), ast)
+                }
+                BuilderMethodReceiver::This => {
+                    let object = Expression::new_this_expression(SPAN, ast);
+                    let property =
+                        IdentifierName::new(SPAN, ast.allocator().alloc_str(self.name), ast);
+                    Expression::from(MemberExpression::new_static_member_expression(
+                        SPAN, object, property, false, ast,
+                    ))
+                }
+            },
+            |target| target.clone_in(allocator),
+        );
         let bind_member = MemberExpression::new_static_member_expression(
             SPAN,
             target,
@@ -752,13 +763,18 @@ impl<'a> BuilderMethodCallEmitter<'a> {
         ast: &AstBuilder<'b>,
         allocator: &'b Allocator,
     ) -> Statement<'b> {
-        let target = Expression::from(MemberExpression::new_static_member_expression(
-            SPAN,
-            Expression::new_this_expression(SPAN, ast),
-            IdentifierName::new(SPAN, ast.allocator().alloc_str(self.name), ast),
-            false,
-            ast,
-        ));
+        let target = self.target.map_or_else(
+            || {
+                Expression::from(MemberExpression::new_static_member_expression(
+                    SPAN,
+                    Expression::new_this_expression(SPAN, ast),
+                    IdentifierName::new(SPAN, ast.allocator().alloc_str(self.name), ast),
+                    false,
+                    ast,
+                ))
+            },
+            |target| target.clone_in(allocator),
+        );
         let bind_member = MemberExpression::new_static_member_expression(
             SPAN,
             target,

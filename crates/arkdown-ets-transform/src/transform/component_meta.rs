@@ -225,10 +225,15 @@ impl ComponentMetadata {
             .and_then(|components| components.get(binding))
     }
 
-    pub(crate) fn is_sdk_builder_function(&self, specifier: &str, binding: &str) -> bool {
-        self.sdk_builder_functions
-            .get(specifier)
-            .is_some_and(|builders| builders.contains(binding))
+    pub(crate) fn sdk_components(
+        &self,
+        specifier: &str,
+    ) -> Option<&FxHashMap<String, SdkComponentInfo>> {
+        self.sdk_components.get(specifier)
+    }
+
+    pub(crate) fn sdk_builder_function_names(&self, specifier: &str) -> Option<&FxHashSet<String>> {
+        self.sdk_builder_functions.get(specifier)
     }
 }
 
@@ -1121,7 +1126,31 @@ impl<'a> SdkBuilderFunctionDeclarationCollector<'a> {
                         self.collect_function(function, &mut builders);
                     }
                 }
+                Statement::ExportDefaultDeclaration(export) => {
+                    if let ExportDefaultDeclarationKind::FunctionDeclaration(function) =
+                        &export.declaration
+                    {
+                        if Self::is_builder(function) {
+                            builders.insert("default".to_string());
+                        }
+                    }
+                }
                 _ => {}
+            }
+        }
+
+        // `processImportModule/getDefinedNode` follows the TypeScript alias of
+        // `export default LocalBuilder`. Preserve that exported identity for
+        // SDK declaration files as well as project source modules.
+        for statement in &self.program.body {
+            let Statement::ExportDefaultDeclaration(export) = statement else {
+                continue;
+            };
+            let ExportDefaultDeclarationKind::Identifier(identifier) = &export.declaration else {
+                continue;
+            };
+            if builders.contains(identifier.name.as_str()) {
+                builders.insert("default".to_string());
             }
         }
         builders
@@ -1132,16 +1161,19 @@ impl<'a> SdkBuilderFunctionDeclarationCollector<'a> {
         function: &oxc_ast::ast::Function<'_>,
         builders: &mut FxHashSet<String>,
     ) {
-        if !function
-            .decorators
-            .iter()
-            .any(|decorator| ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::BUILDER)
-        {
+        if !Self::is_builder(function) {
             return;
         }
         if let Some(id) = &function.id {
             builders.insert(id.name.to_string());
         }
+    }
+
+    fn is_builder(function: &oxc_ast::ast::Function<'_>) -> bool {
+        function
+            .decorators
+            .iter()
+            .any(|decorator| ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::BUILDER)
     }
 }
 
@@ -1407,13 +1439,11 @@ export { createCollaborationServiceMenuItems };"#,
         )
         .expect("metadata with HarmonyOS external API path");
 
-        assert!(metadata.is_sdk_builder_function(
-            "@hms.collaboration.service",
-            "createCollaborationServiceMenuItems"
-        ));
-        assert!(metadata.is_sdk_builder_function(
-            "@kit.ServiceCollaborationKit",
-            "createCollaborationServiceMenuItems"
-        ));
+        assert!(metadata
+            .sdk_builder_function_names("@hms.collaboration.service")
+            .is_some_and(|builders| builders.contains("createCollaborationServiceMenuItems")));
+        assert!(metadata
+            .sdk_builder_function_names("@kit.ServiceCollaborationKit")
+            .is_some_and(|builders| builders.contains("createCollaborationServiceMenuItems")));
     }
 }
