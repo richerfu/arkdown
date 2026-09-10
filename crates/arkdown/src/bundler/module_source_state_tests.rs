@@ -1052,6 +1052,53 @@ const dynamicHar = import("bytecode-har-dep");"#
 }
 
 #[tokio::test]
+async fn module_source_scan_keeps_typescript_namespace_without_projection_warning() {
+    let temp = tempfile::tempdir().expect("temporary namespace source");
+    let entry = temp.path().join("Config.ets");
+    std::fs::write(
+        &entry,
+        "export namespace Config { export let appId = ''; export function init() {} }",
+    )
+    .expect("namespace source");
+    let mut module_types = FxHashMap::default();
+    module_types.insert("ets".to_string(), rolldown_common::ModuleType::Ts);
+    let options = BundlerOptions {
+        input: Some(vec![InputItem {
+            name: None,
+            import: entry.to_string_lossy().into_owned(),
+        }]),
+        cwd: Some(temp.path().to_path_buf()),
+        format: Some(OutputFormat::Esm),
+        module_types: Some(module_types),
+        transform: Some(BundlerTransformOptions {
+            typescript: Some(TypeScriptOptions::default()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mut bundler = rolldown::Bundler::new(options).expect("namespace scan bundler");
+    let output = bundler.scan_module_sources().await.expect("namespace scan");
+    bundler.close().await.expect("close namespace scan");
+
+    assert!(
+        output
+            .modules
+            .iter()
+            .any(|module| module.source.contains("namespace Config")),
+        "CompileArkTS TypeScript source must remain available to the module-source handoff"
+    );
+    let surfaced_warnings = output
+        .warnings
+        .iter()
+        .filter(|warning| Bundler::should_emit_scan_warning(&warning.kind().to_string()))
+        .collect::<Vec<_>>();
+    assert!(
+        surfaced_warnings.is_empty(),
+        "Rolldown's projection-only TypeScript lowering has no upstream warning counterpart: {surfaced_warnings:?}"
+    );
+}
+
+#[tokio::test]
 async fn rolldown_scan_preserves_variable_dynamic_import_without_request() {
     let temp = tempfile::tempdir().expect("tempdir");
     let build_profile = temp.path().join("BuildProfile.js");

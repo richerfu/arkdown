@@ -355,13 +355,14 @@ impl Bundler {
         // ── 4b. Surface rolldown scan warnings ────────────────────────────────
         // hvigor `arkts-pack.js::generateConfig()` routes every non-fatal
         // bundler warning through `onRollupWarn(message, code, isFaMode)`:
-        // `SHIMMED_EXPORT` is always suppressed, `SOURCEMAP_BROKEN` only in FA
-        // mode (out of scope), and everything else is `console.warn` to the
-        // build log. The scan warnings must not be silently dropped.
+        // `SHIMMED_EXPORT` is always suppressed and `SOURCEMAP_BROKEN` only in
+        // FA mode (out of scope). Arkdown also suppresses Rolldown's
+        // projection-only TypeScript diagnostic below; every warning with an
+        // upstream Rollup counterpart is emitted to the build log.
         let mut emitted_warnings = FxHashSet::default();
         for warning in &module_source_scan.warnings {
             let kind = warning.kind().to_string();
-            if kind == "SHIMMED_EXPORT" {
+            if !Self::should_emit_scan_warning(&kind) {
                 continue;
             }
             let message = format!("{kind}: {warning}");
@@ -656,6 +657,17 @@ impl Bundler {
             })
             .collect();
         ModuleSourceScanOutput { modules, warnings }
+    }
+
+    fn should_emit_scan_warning(kind: &str) -> bool {
+        // In `rollup-plugin-ets-typescript.ts::transform`,
+        // `shouldEmitJs === false` returns a transformed TypeScript AST or
+        // printed TypeScript source to CompileArkTS. Arkdown likewise uses Rolldown only to scan
+        // that TypeScript module graph. A `TOLERATED_TRANSFORM` warning is from
+        // Rolldown's unused best-effort JS projection (for example exported
+        // `let` inside a namespace), not from the CompileArkTS source, and has
+        // no upstream Rollup diagnostic counterpart.
+        !matches!(kind, "SHIMMED_EXPORT" | "TOLERATED_TRANSFORM")
     }
 
     fn canonical_project_root(path: &std::path::Path) -> PathBuf {
