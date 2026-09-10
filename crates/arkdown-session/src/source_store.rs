@@ -23,7 +23,7 @@ use std::time::UNIX_EPOCH;
 
 use arkdown_path::{canonicalize_or_owned, lexical_normalize, HvigorSourceFileFilter};
 use rayon::prelude::*;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use arkdown_core::SourceFileId;
 
@@ -244,6 +244,16 @@ impl WorkerSourceInventory {
 pub struct SourceStore {
     /// Map from absolute path → source file entry.
     files: FxHashMap<PathBuf, SourceFile>,
+    /// TypeScript canonical file name → startup snapshot file name.
+    ///
+    /// `ets_checker.ts::getCanonicalFileName` follows
+    /// `ts.sys.useCaseSensitiveFileNames`; the native TypeScript port keeps
+    /// the same contract in `tspath.GetCanonicalFileName`. On a
+    /// case-insensitive filesystem the Program can therefore report
+    /// `index.ets` for an inventoried `Index.ets`. This startup-only index
+    /// restores the snapshot spelling without filesystem I/O in checker and
+    /// transform hot paths.
+    compiler_canonical_files: Option<FxHashMap<PathBuf, PathBuf>>,
     /// Code resource inventory.
     code_resources: CodeResourceInventory,
     /// Visual file inventory.
@@ -417,9 +427,12 @@ impl SourceStore {
                 },
             );
         }
+        let compiler_canonical_files = (!Self::compiler_uses_case_sensitive_file_names())
+            .then(|| Self::compiler_canonical_file_index(files.keys()));
 
         Ok(Self {
             files,
+            compiler_canonical_files,
             code_resources: CodeResourceInventory::default(),
             visuals,
             workers: WorkerSourceInventory::default(),
@@ -484,10 +497,91 @@ impl SourceStore {
         }
         for (alias, canonical) in self.root_aliases.iter() {
             if let Ok(relative) = path.strip_prefix(alias) {
-                return lexical_normalize(&canonical.join(relative));
+                return self.snapshot_file_spelling(lexical_normalize(&canonical.join(relative)));
             }
         }
-        path
+        self.snapshot_file_spelling(path)
+    }
+
+    fn snapshot_file_spelling(&self, path: PathBuf) -> PathBuf {
+        if self.files.contains_key(&path) {
+            return path;
+        }
+        self.compiler_canonical_files
+            .as_ref()
+            .and_then(|files| Self::compiler_canonical_path(&path).and_then(|key| files.get(&key)))
+            .cloned()
+            .unwrap_or(path)
+    }
+
+    fn compiler_canonical_file_index<'a>(
+        files: impl Iterator<Item = &'a PathBuf>,
+    ) -> FxHashMap<PathBuf, PathBuf> {
+        let mut index = FxHashMap::default();
+        let mut ambiguous = FxHashSet::default();
+        for path in files {
+            let Some(key) = Self::compiler_canonical_path(path) else {
+                continue;
+            };
+            if ambiguous.contains(&key) {
+                continue;
+            }
+            if index.get(&key).is_some_and(|existing| existing != path) {
+                index.remove(&key);
+                ambiguous.insert(key);
+            } else {
+                index.insert(key, path.clone());
+            }
+        }
+        index
+    }
+
+    fn compiler_canonical_path(path: &Path) -> Option<PathBuf> {
+        let path = path.to_str()?;
+        let mut canonical = String::with_capacity(path.len());
+        for character in path.chars() {
+            if character == '\u{0130}' {
+                canonical.push(character);
+            } else {
+                canonical.extend(character.to_lowercase());
+            }
+        }
+        Some(PathBuf::from(canonical))
+    }
+
+    fn compiler_uses_case_sensitive_file_names() -> bool {
+        if cfg!(windows) {
+            return false;
+        }
+        if cfg!(target_arch = "wasm32") {
+            return true;
+        }
+        let Ok(executable) = std::env::current_exe() else {
+            return true;
+        };
+        let Some(executable) = executable.to_str() else {
+            return true;
+        };
+        let swapped = executable
+            .chars()
+            .map(|character| {
+                let mut uppercase = character.to_uppercase();
+                let upper = uppercase.next().unwrap_or(character);
+                let simple_upper = uppercase.next().is_none().then_some(upper);
+                if simple_upper.is_some_and(|upper| upper != character) {
+                    upper
+                } else {
+                    let mut lowercase = character.to_lowercase();
+                    let lower = lowercase.next().unwrap_or(character);
+                    if lowercase.next().is_none() {
+                        lower
+                    } else {
+                        character
+                    }
+                }
+            })
+            .collect::<String>();
+        !Path::new(&swapped).exists()
     }
 
     /// Return the startup-captured text content of a source file.
@@ -666,5 +760,44 @@ mod tests {
         assert!(store.covers(&dependency_root));
         assert!(store.source_by_path(&captured).is_some());
         assert!(store.source_by_path(&excluded).is_none());
+    }
+
+    #[test]
+    fn compiler_canonical_file_index_restores_snapshot_spelling_without_ambiguity() {
+        let actual = PathBuf::from("/project/ShopCartWidget/Index.ets");
+        let paths = [actual.clone()];
+        let index = SourceStore::compiler_canonical_file_index(paths.iter());
+        let compiler_path = PathBuf::from("/project/shopcartwidget/index.ets");
+        let key = SourceStore::compiler_canonical_path(&compiler_path).unwrap();
+
+        assert_eq!(index.get(&key), Some(&actual));
+
+        let colliding = PathBuf::from("/project/ShopCartWidget/index.ets");
+        let paths = [actual, colliding];
+        let index = SourceStore::compiler_canonical_file_index(paths.iter());
+        assert!(!index.contains_key(&key));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn source_lookup_matches_typescript_program_case_on_case_insensitive_macos() {
+        if SourceStore::compiler_uses_case_sensitive_file_names() {
+            return;
+        }
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source_dir = temp.path().join("ShopCartWidget");
+        std::fs::create_dir_all(&source_dir).expect("create source dir");
+        let actual = source_dir.join("Index.ets");
+        std::fs::write(&actual, "export const value = 1;").expect("write source");
+        let store = SourceStore::discover(std::slice::from_ref(&source_dir)).expect("discover");
+        let compiler_path = source_dir.join("index.ets");
+
+        assert_eq!(
+            store
+                .source_by_path(&compiler_path)
+                .expect("TypeScript canonical path")
+                .path,
+            store.source_by_path(&actual).expect("actual path").path
+        );
     }
 }

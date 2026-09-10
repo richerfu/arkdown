@@ -182,6 +182,19 @@ struct PreparedSemanticCheck {
     semantic_inventories: BTreeMap<PathBuf, ArktsSourceSemanticInventory>,
 }
 
+/// One compiler-owned file identity paired with the canonical startup
+/// snapshot identity consumed by OXC/Rolldown.
+///
+/// TypeScript intentionally preserves the module path by which a source was
+/// resolved, while `SourceStore` canonicalizes materialized OHPM packages.
+/// The pair keeps requests addressed to the Program's identity without
+/// duplicating source text or widening the source-owned compiler roots.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SemanticSourceIdentity {
+    compiler_path: PathBuf,
+    snapshot_path: PathBuf,
+}
+
 pub struct ProjectSemanticChecker<'a> {
     project_root: &'a Path,
     root_files: &'a [PathBuf],
@@ -698,11 +711,21 @@ impl<'a> ProjectSemanticChecker<'a> {
         prepared: &PreparedSemanticCheck,
     ) -> Result<ProjectSemanticCheckReport> {
         let source_graph = session.source_graph(program)?;
-        let checked_sources = source_graph
+        let mut source_identities = source_graph
             .files
             .iter()
-            .map(|file| file.file_name.clone())
-            .filter(|file| prepared.sources.contains_key(file) && Self::is_checkable_root(file))
+            .filter_map(|file| self.semantic_source_identity(&file.file_name, &prepared.sources))
+            .collect::<Vec<_>>();
+        source_identities.sort_unstable_by(|left, right| {
+            left.compiler_path
+                .cmp(&right.compiler_path)
+                .then_with(|| left.snapshot_path.cmp(&right.snapshot_path))
+        });
+        source_identities.dedup_by(|left, right| left.compiler_path == right.compiler_path);
+        let checked_sources = source_identities
+            .iter()
+            .filter(|source| Self::is_checkable_root(&source.snapshot_path))
+            .map(|source| source.snapshot_path.clone())
             .collect::<Vec<_>>();
         let linter_started = Instant::now();
         let linter = session.arkts_linter_diagnostics(program)?;
@@ -727,18 +750,23 @@ impl<'a> ProjectSemanticChecker<'a> {
             files = source_graph.files.len(),
             "ArkTS semantic diagnostics completed"
         );
-        let annotation_files = source_graph
-            .files
+        let annotation_sources = source_identities
             .iter()
-            .map(|file| file.file_name.clone())
-            .filter(|file| {
-                prepared.sources.contains_key(file) && Self::is_type_script_preprocess_source(file)
-            })
+            .filter(|source| Self::is_type_script_preprocess_source(&source.snapshot_path))
+            .cloned()
             .collect::<Vec<_>>();
+        let annotation_files = annotation_sources
+            .iter()
+            .map(|source| source.compiler_path.clone())
+            .collect::<Vec<_>>();
+        let source_identities = annotation_sources
+            .iter()
+            .map(|source| (source.compiler_path.clone(), source.snapshot_path.clone()))
+            .collect::<FxHashMap<_, _>>();
         let facts_started = Instant::now();
         let native_type_facts = session.annotation_transform_infos(program, &annotation_files)?;
         let transform_queries = self.native_transform_type_queries(
-            &annotation_files,
+            &annotation_sources,
             &prepared.sources,
             &prepared.semantic_inventories,
         )?;
@@ -768,6 +796,7 @@ impl<'a> ProjectSemanticChecker<'a> {
         );
         let type_facts = NativeAnnotationFactsConverter::new(
             &prepared.sources,
+            &source_identities,
             &self.crossplatform_dependencies,
         )
         .convert(native_type_facts, native_transform_type_facts)?;
@@ -1106,7 +1135,7 @@ impl<'a> ProjectSemanticChecker<'a> {
     /// TSGO remains responsible for every returned type identity.
     fn native_transform_type_queries(
         &self,
-        files: &[PathBuf],
+        files: &[SemanticSourceIdentity],
         sources: &BTreeMap<PathBuf, Arc<str>>,
         inventories: &BTreeMap<PathBuf, ArktsSourceSemanticInventory>,
     ) -> Result<Vec<NativeArktsTransformTypeQuery>> {
@@ -1114,28 +1143,57 @@ impl<'a> ProjectSemanticChecker<'a> {
             .iter()
             .filter_map(|file| {
                 inventories
-                    .get(file)
+                    .get(&file.snapshot_path)
                     .filter(|inventory| inventory.has_type_queries())
                     .map(|inventory| (file, inventory))
             })
             .map(|(file, inventory)| {
-                let source = sources.get(file).ok_or_else(|| {
+                let source = sources.get(&file.snapshot_path).ok_or_else(|| {
                     anyhow::anyhow!(
                         "ARKDOWN_TYPE_QUERY_SOURCE: unavailable OXC source {}",
-                        file.display()
+                        file.snapshot_path.display()
                     )
                 })?;
                 let offsets = Utf16OffsetMap::new(source);
                 Ok(NativeArktsTransformTypeQuery {
-                    file: file.clone(),
-                    properties: offsets.query_ranges(inventory.property_queries(), file)?,
+                    file: file.compiler_path.clone(),
+                    properties: offsets
+                        .query_ranges(inventory.property_queries(), &file.snapshot_path)?,
                     builder_accesses: offsets
-                        .query_ranges(inventory.builder_access_queries(), file)?,
+                        .query_ranges(inventory.builder_access_queries(), &file.snapshot_path)?,
                     member_accesses: offsets
-                        .query_ranges(inventory.member_access_queries(), file)?,
+                        .query_ranges(inventory.member_access_queries(), &file.snapshot_path)?,
                 })
             })
             .collect()
+    }
+
+    /// Resolve TypeScript's source-graph spelling through the immutable
+    /// startup inventory. `processImportModule` asks the checker about the
+    /// resolved Program file, while every OXC consumer uses `SourceStore`'s
+    /// canonical source identity.
+    fn semantic_source_identity(
+        &self,
+        compiler_path: &Path,
+        sources: &BTreeMap<PathBuf, Arc<str>>,
+    ) -> Option<SemanticSourceIdentity> {
+        if sources.contains_key(compiler_path) {
+            return Some(SemanticSourceIdentity {
+                compiler_path: compiler_path.to_path_buf(),
+                snapshot_path: compiler_path.to_path_buf(),
+            });
+        }
+        let snapshot_path = self
+            .source_store?
+            .source_by_path(compiler_path)?
+            .path
+            .clone();
+        sources
+            .contains_key(&snapshot_path)
+            .then(|| SemanticSourceIdentity {
+                compiler_path: compiler_path.to_path_buf(),
+                snapshot_path,
+            })
     }
 
     fn is_ui_diagnostic_source(&self, path: &Path) -> bool {
@@ -1209,16 +1267,19 @@ impl<'a> ProjectSemanticChecker<'a> {
 
 struct NativeAnnotationFactsConverter<'a> {
     sources: &'a BTreeMap<PathBuf, Arc<str>>,
+    source_identities: &'a FxHashMap<PathBuf, PathBuf>,
     crossplatform_dependencies: &'a FxHashMap<(String, String), CrossplatformSourceCollection>,
 }
 
 impl<'a> NativeAnnotationFactsConverter<'a> {
     fn new(
         sources: &'a BTreeMap<PathBuf, Arc<str>>,
+        source_identities: &'a FxHashMap<PathBuf, PathBuf>,
         crossplatform_dependencies: &'a FxHashMap<(String, String), CrossplatformSourceCollection>,
     ) -> Self {
         Self {
             sources,
+            source_identities,
             crossplatform_dependencies,
         }
     }
@@ -1230,12 +1291,7 @@ impl<'a> NativeAnnotationFactsConverter<'a> {
     ) -> Result<ArktsTypeFactsSnapshot> {
         let mut files = FxHashMap::default();
         for info in infos {
-            let source = self.sources.get(&info.file_name).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "ARKDOWN_TYPE_FACTS_SOURCE: compiler returned facts for unavailable source {}",
-                    info.file_name.display()
-                )
-            })?;
+            let (source_path, source) = self.source(&info.file_name)?;
             let offsets = Utf16OffsetMap::new(source);
             let declarations = info
                 .declarations
@@ -1278,7 +1334,7 @@ impl<'a> NativeAnnotationFactsConverter<'a> {
                 })
                 .collect::<Result<Vec<_>>>()?;
             files.insert(
-                info.file_name,
+                source_path.to_path_buf(),
                 ArktsFileTypeFacts {
                     declarations,
                     uses,
@@ -1288,15 +1344,10 @@ impl<'a> NativeAnnotationFactsConverter<'a> {
             );
         }
         for info in transform_infos {
-            let source = self.sources.get(&info.file_name).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "ARKDOWN_TYPE_FACTS_SOURCE: compiler returned facts for unavailable source {}",
-                    info.file_name.display()
-                )
-            })?;
+            let (source_path, source) = self.source(&info.file_name)?;
             let offsets = Utf16OffsetMap::new(source);
             let facts = files
-                .entry(info.file_name.clone())
+                .entry(source_path.to_path_buf())
                 .or_insert_with(ArktsFileTypeFacts::default);
             facts.properties = info
                 .properties
@@ -1344,6 +1395,22 @@ impl<'a> NativeAnnotationFactsConverter<'a> {
             }
         }
         Ok(ArktsTypeFactsSnapshot::new(files))
+    }
+
+    fn source(&self, compiler_path: &Path) -> Result<(&Path, &Arc<str>)> {
+        let requested_path = self
+            .source_identities
+            .get(compiler_path)
+            .map(PathBuf::as_path)
+            .unwrap_or(compiler_path);
+        let (source_path, source) =
+            self.sources.get_key_value(requested_path).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "ARKDOWN_TYPE_FACTS_SOURCE: compiler returned facts for unavailable source {}",
+                    compiler_path.display()
+                )
+            })?;
+        Ok((source_path, source))
     }
 
     fn type_identity(identity: NativeResolvedTypeIdentity) -> ResolvedTypeIdentity {
@@ -1503,9 +1570,14 @@ impl Utf16OffsetMap {
 
 #[cfg(test)]
 mod tests {
-    use super::ProjectSemanticChecker;
-    use arkdown_ets_transform::transform::component_meta::ComponentMetadata;
+    use std::{collections::BTreeMap, sync::Arc};
+
+    use super::{NativeAnnotationFactsConverter, ProjectSemanticChecker};
+    use arkdown_ets_transform::{
+        transform::component_meta::ComponentMetadata, ArktsSourceSemanticCollector,
+    };
     use arkdown_resolver::PackageResolutionPlan;
+    use arkdown_session::{SourceContent, SourceStore};
 
     #[test]
     fn compiler_module_kind_follows_ets_checker_compile_mode_branch() {
@@ -1521,5 +1593,69 @@ mod tests {
         let checker = checker.with_compile_mode("jsbundle");
         assert_eq!(checker.compiler_options.module, 1);
         assert_eq!(checker.compiler_options.oh_compile_mode, "jsbundle");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transform_type_queries_preserve_compiler_alias_and_use_snapshot_source() {
+        use std::os::unix::fs::symlink;
+
+        let project = tempfile::tempdir().unwrap();
+        let physical_root = project.path().join("store/package");
+        std::fs::create_dir_all(&physical_root).unwrap();
+        let source = Arc::<str>::from(
+            "@Component\nstruct Page {\n  @ObjectLink model: Model\n  build() {}\n}\n",
+        );
+        let physical_file = physical_root.join("Index.ets");
+        std::fs::write(&physical_file, source.as_bytes()).unwrap();
+        let compiler_root = project.path().join("oh_modules/package");
+        std::fs::create_dir_all(compiler_root.parent().unwrap()).unwrap();
+        symlink(&physical_root, &compiler_root).unwrap();
+        let compiler_file = compiler_root.join("Index.ets");
+        let store = SourceStore::discover(std::slice::from_ref(&compiler_root)).unwrap();
+        let snapshot_file = store
+            .source_by_path(&compiler_file)
+            .expect("source alias must resolve through the startup inventory")
+            .path
+            .clone();
+        let snapshot_source = match store
+            .source_by_path(&snapshot_file)
+            .and_then(|file| file.cached_content())
+        {
+            Some(SourceContent::Text(source)) => Arc::clone(source),
+            _ => panic!("fixture source must be captured as text"),
+        };
+        let sources = BTreeMap::from([(snapshot_file.clone(), snapshot_source)]);
+        let inventory =
+            ArktsSourceSemanticCollector::new(&ComponentMetadata::default()).collect(&source, true);
+        let inventories = BTreeMap::from([(snapshot_file.clone(), inventory)]);
+        let roots = vec![compiler_file.clone()];
+        let packages = PackageResolutionPlan::default();
+        let metadata = ComponentMetadata::default();
+        let mut checker = ProjectSemanticChecker::new(project.path(), &roots, &packages, &metadata);
+        checker.source_store = Some(&store);
+
+        let identity = checker
+            .semantic_source_identity(&compiler_file, &sources)
+            .expect("compiler alias must map to the canonical snapshot source");
+        assert_eq!(identity.compiler_path, compiler_file);
+        assert_eq!(identity.snapshot_path, snapshot_file);
+        let queries = checker
+            .native_transform_type_queries(&[identity], &sources, &inventories)
+            .unwrap();
+
+        assert_eq!(queries.len(), 1);
+        assert_eq!(queries[0].file, roots[0]);
+        assert_eq!(queries[0].properties.len(), 1);
+
+        let identities =
+            rustc_hash::FxHashMap::from_iter([(roots[0].clone(), snapshot_file.clone())]);
+        let dependencies = rustc_hash::FxHashMap::default();
+        let converter = NativeAnnotationFactsConverter::new(&sources, &identities, &dependencies);
+        let (fact_path, fact_source) = converter
+            .source(&roots[0])
+            .expect("compiler facts must be stored under the Rolldown source identity");
+        assert_eq!(fact_path, snapshot_file);
+        assert_eq!(fact_source.as_ref(), source.as_ref());
     }
 }
