@@ -160,8 +160,9 @@ impl<'a> ModuleBuildLayout<'a> {
         }
     }
 
-    /// Layout used by hvigor `GenerateOhosTestTemplate` while compiling the
-    /// normal `build/<product>/.../ohosTest` target.
+    /// Layout used by hvigor `GenerateOhosTestTemplate`. The target's build
+    /// outputs remain below `build`, while its migrated source templates live
+    /// below the dedicated `.test/<product>/intermediates/src/ohosTest` tree.
     pub fn for_ohos_test_template(module_root: &'a Path, product_name: &'a str) -> Self {
         Self::for_product(module_root, product_name)
     }
@@ -234,7 +235,12 @@ impl<'a> ModuleBuildLayout<'a> {
     }
 
     pub fn ohos_test_source_root(&self) -> PathBuf {
-        self.intermediates().join("src").join("ohosTest")
+        self.module_root
+            .join(".test")
+            .join(self.product_name)
+            .join("intermediates")
+            .join("src")
+            .join("ohosTest")
     }
 
     pub fn ohos_test_ets_root(&self) -> PathBuf {
@@ -429,6 +435,10 @@ impl<'a> ModuleBuildLayout<'a> {
 
     pub fn pkg_context_info_json(&self) -> PathBuf {
         self.default_intermediate_file("loader", "pkgContextInfo.json")
+    }
+
+    pub fn pkg_sdk_info_json(&self) -> PathBuf {
+        self.default_intermediate_file("loader", "pkgSdkInfo.json")
     }
 
     pub fn router_map_loader(&self) -> PathBuf {

@@ -1,4 +1,4 @@
-//! hvigor/arkdown artifact parity harness for HAP, HAR, and HSP fixtures.
+//! hvigor/arkdown artifact parity harness for HAP, HAR, HSP, and APP fixtures.
 //!
 //! Artifact parity tests are environment-gated: without local hvigor
 //! configuration they print a skip line and return. Set `ARKDOWN_PARITY_HVIGORW`
@@ -34,6 +34,7 @@ enum ArtifactType {
   Hap,
   Har,
   Hsp,
+  App,
   /// Local unit-test build (`hvigorw test` / `--target test`). No HAP/HSP
   /// archive is produced; the `.test` build root carries the generated
   /// testability templates, TestAbility-injected profiles and compiled
@@ -51,6 +52,7 @@ impl ArtifactType {
       ArtifactType::Hap => "hap",
       ArtifactType::Har => "har",
       ArtifactType::Hsp => "hsp",
+      ArtifactType::App => "app",
       ArtifactType::Test => "test",
       ArtifactType::OhosTest => "hap",
     }
@@ -61,6 +63,7 @@ impl ArtifactType {
       ArtifactType::Hap => "assembleHap",
       ArtifactType::Har => "assembleHar",
       ArtifactType::Hsp => "assembleHsp",
+      ArtifactType::App => "assembleApp",
       // `hvigorw test`; `setTestDefaultParameters` injects
       // `ohos-test-coverage=true` unless overridden.
       ArtifactType::Test => "test",
@@ -73,6 +76,7 @@ impl ArtifactType {
       ArtifactType::Hap => "hap",
       ArtifactType::Har => "har",
       ArtifactType::Hsp => "hsp",
+      ArtifactType::App => "app",
       ArtifactType::Test => "test",
       ArtifactType::OhosTest => "hap",
     }
@@ -207,6 +211,20 @@ fn widget_hap_hvigor_parity_report() {
     "tests/fixtures/widget-hap",
     "widget-hap",
     ArtifactType::Hsp,
+    ParityBuildMode::Debug,
+  );
+}
+
+/// Project APP parity: the paired entry HAP and form-widget HSP, project
+/// `pack.info`/`pac.json`, nested package contents, `pkgSdkInfo.json`, restored
+/// form abilities, widget bytecode, and module bytecode are compared against
+/// the real project-mode `assembleApp` task.
+#[test]
+fn widget_app_hvigor_parity_report() {
+  run_parity_report_test(
+    "tests/fixtures/widget-hap",
+    "widget-app",
+    ArtifactType::App,
     ParityBuildMode::Debug,
   );
 }
@@ -860,7 +878,11 @@ fn run_component_v2_require_diagnostic_parity_test() {
 fn hvigor_args(artifact_type: ArtifactType, build_mode: ParityBuildMode) -> Vec<&'static str> {
   let mut args = vec![
     "--mode",
-    "module",
+    if artifact_type == ArtifactType::App {
+      "project"
+    } else {
+      "module"
+    },
     "-p",
     "product=default",
     "-p",
@@ -1423,6 +1445,29 @@ fn collect_build(
       // filesInfo.txt, modules.cache, npmEntries.txt) against hvigor.
       collect_all_cache_root_files(&mut artifacts, root)?;
     }
+    ArtifactType::App => {
+      // MakeProjectPackInfo/ProcessProjectPrivacyProfile/PackageApp own these
+      // project-level entries. Nested HAP/HSP payloads are compared recursively
+      // by the ZIP normalization used for the APP archive.
+      collect_named_artifact(
+        &mut artifacts,
+        root,
+        archive.as_ref(),
+        "pack.info",
+        Some("pack.info"),
+        &["intermediates/app", "build/outputs"],
+        false,
+      )?;
+      collect_named_artifact(
+        &mut artifacts,
+        root,
+        archive.as_ref(),
+        "pac.json",
+        Some("pac.json"),
+        &["intermediates/privacy_profile", "build/outputs"],
+        false,
+      )?;
+    }
     ArtifactType::Har => {
       // HAR archives contain oh-package.json5, source ETS files, declaration stubs,
       // and optionally index.abc
@@ -1737,11 +1782,10 @@ fn read_archive_snapshot(
 
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
+    let member_normalization = ArtifactNormalization::for_path(Path::new(file.name()));
     let normalized = match String::from_utf8(normalize_project_bytes(&bytes, root)) {
-      Ok(text) => ArtifactNormalization::for_path(Path::new(file.name()))
-        .normalize_text(text)
-        .into_bytes(),
-      Err(error) => error.into_bytes(),
+      Ok(text) => member_normalization.normalize_text(text).into_bytes(),
+      Err(error) => member_normalization.normalize_binary(error.into_bytes()),
     };
     entries.insert(
       file.name().to_string(),
@@ -1931,7 +1975,18 @@ fn is_binary_build_file(path: &Path) -> bool {
   matches!(
     path.extension().and_then(OsStr::to_str),
     Some(
-      "abc" | "hap" | "hsp" | "har" | "tgz" | "index" | "info" | "png" | "jpg" | "jpeg" | "webp"
+      "abc"
+        | "hap"
+        | "hsp"
+        | "app"
+        | "har"
+        | "tgz"
+        | "index"
+        | "info"
+        | "png"
+        | "jpg"
+        | "jpeg"
+        | "webp"
     )
   )
 }
@@ -2020,7 +2075,7 @@ enum ArtifactNormalization {
 impl ArtifactNormalization {
   fn for_path(path: &Path) -> Self {
     match path.extension().and_then(OsStr::to_str) {
-      Some("hap" | "hsp") => return Self::ZipContainerTimestamps,
+      Some("hap" | "hsp" | "app") => return Self::ZipContainerTimestamps,
       // `PackageSharedTgz` writes an HSP and its interface HAR into this
       // gzip-compressed tar container. Both hvigor and arkdown intentionally
       // preserve the member payloads, while their compression libraries and

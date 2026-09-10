@@ -736,6 +736,7 @@ fn test_loader_json_hvigor_keys() {
         "routerMap",
         "hspResourcesMap",
         "updateVersionInfo",
+        "customizedHar",
         "anBuildOutPut",
         "anBuildMode",
     ]
@@ -787,6 +788,7 @@ fn test_loader_json_serializes_minimal_hvigor_shape() {
   "routerMap": [],
   "hspResourcesMap": {},
   "updateVersionInfo": {},
+  "customizedHar": false,
   "anBuildOutPut": "/project/entry/build/default/intermediates/loader_out/default/an/arm64-v8a",
   "anBuildMode": "type"
 }"#
@@ -1531,6 +1533,7 @@ fn test_loader_json_golden_hvigor_key_set() {
         "routerMap",
         "hspResourcesMap",
         "updateVersionInfo",
+        "customizedHar",
         "anBuildOutPut",
         "anBuildMode",
     ]
@@ -2006,7 +2009,7 @@ fn test_loader_json_serialized_compile_entry_is_separate_from_internal_entries()
             .len(),
         0
     );
-    assert!(value.get("customizedHar").is_none());
+    assert_eq!(value["customizedHar"], false);
 }
 
 #[test]
@@ -3437,7 +3440,7 @@ fn test_loader_json_routes_ohos_test_sources_only_to_ohos_test_target() {
     fs::write(test_ets.join("index.ets"), "export * from './TestRunner'")
         .expect("write test index");
     let generated_test_ability = module_root
-        .join("build/default/intermediates/src/ohosTest/ets/testability/TestAbility.ets");
+        .join(".test/default/intermediates/src/ohosTest/ets/testability/TestAbility.ets");
     fs::create_dir_all(generated_test_ability.parent().unwrap())
         .expect("create generated ohosTest template root");
     fs::write(

@@ -115,6 +115,9 @@ pub struct PackInput {
     /// ArkRuntime uses it to map esmodule entry paths onto records inside
     /// `ets/modules.abc`.
     pub pkg_context_info_path: Option<PathBuf>,
+    /// Path to legacy `pkgSdkInfo.json` emitted when normalized OHM URLs are
+    /// disabled. The SDK packing tool copies these bytes to the archive root.
+    pub pkg_sdk_info_path: Option<PathBuf>,
     /// Remote HSPs to embed inside this HAP (integrated HSP feature, API >= 11).
     ///
     /// Each entry is stored at `libs/<hsp_dir_name>/<hsp_file_name>` inside the archive.

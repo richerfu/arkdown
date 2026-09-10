@@ -106,11 +106,17 @@ mod tests {
         let abc = tmp.path().join("modules.abc");
         let res = tmp.path().join("resources.index");
         let modj = tmp.path().join("module.json");
+        let pkg_sdk_info = tmp.path().join("pkgSdkInfo.json");
         let out = tmp.path().join("entry.hap");
 
         fs::write(&abc, b"PAND\x00\x00\x00\x00").unwrap();
         fs::write(&res, b"\xf0\x0f\x12\x34\x00\x00\x00\x00").unwrap();
         fs::write(&modj, r#"{"module":{"name":"entry","type":"entry"}}"#).unwrap();
+        fs::write(
+            &pkg_sdk_info,
+            br#"{"entry":{"version":"1.0.0","type":"entry","isDirectDep":false}}"#,
+        )
+        .unwrap();
 
         let packager = Packager::new(make_config());
         let result = packager.pack_hap(PackInput {
@@ -139,16 +145,17 @@ mod tests {
             source_maps_path: None,
             aot_mode: None,
             pkg_context_info_path: None,
+            pkg_sdk_info_path: Some(pkg_sdk_info),
         });
         assert!(result.is_ok(), "{:?}", result.err());
         assert!(out.exists());
 
         // Verify it's a valid zip by reading it
         let file = fs::File::open(&out).unwrap();
-        let archive = zip::ZipArchive::new(file).unwrap();
-        let names: Vec<_> = archive.file_names().collect();
+        let mut archive = zip::ZipArchive::new(file).unwrap();
+        let names: Vec<_> = archive.file_names().map(str::to_string).collect();
         assert!(
-            names.contains(&"module.json"),
+            names.iter().any(|name| name == "module.json"),
             "missing module.json; got: {:?}",
             names
         );
@@ -156,6 +163,22 @@ mod tests {
             names.iter().any(|n| n.contains(".abc")),
             "missing .abc; got: {:?}",
             names
+        );
+        let pack_info_index = names.iter().position(|name| name == "pack.info").unwrap();
+        let pkg_sdk_index = names
+            .iter()
+            .position(|name| name == "pkgSdkInfo.json")
+            .unwrap();
+        assert_eq!(pkg_sdk_index, pack_info_index + 1);
+        let mut content = String::new();
+        std::io::Read::read_to_string(
+            &mut archive.by_name("pkgSdkInfo.json").unwrap(),
+            &mut content,
+        )
+        .unwrap();
+        assert_eq!(
+            content,
+            r#"{"entry":{"version":"1.0.0","type":"entry","isDirectDep":false}}"#
         );
     }
 
@@ -193,6 +216,7 @@ mod tests {
                 source_maps_path: None,
                 aot_mode: None,
                 pkg_context_info_path: None,
+                pkg_sdk_info_path: None,
                 integrated_hsps: vec![],
                 privacy_profile_path: None,
                 syscap_path: None,
@@ -242,6 +266,7 @@ mod tests {
             source_maps_path: None,
             aot_mode: None,
             pkg_context_info_path: None,
+            pkg_sdk_info_path: None,
         });
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -344,6 +369,7 @@ mod tests {
             source_maps_path: None,
             aot_mode: None,
             pkg_context_info_path: None,
+            pkg_sdk_info_path: None,
         });
         assert!(result.is_ok(), "{:?}", result.err());
         assert!(out.exists());
@@ -388,6 +414,7 @@ mod tests {
                 source_maps_path: None,
                 aot_mode: None,
                 pkg_context_info_path: None,
+                pkg_sdk_info_path: None,
                 privacy_profile_path: None,
                 syscap_path: None,
                 device_types: vec![],
@@ -444,6 +471,7 @@ mod tests {
                 source_maps_path: None,
                 aot_mode: None,
                 pkg_context_info_path: None,
+                pkg_sdk_info_path: None,
                 privacy_profile_path: Some(privacy),
                 syscap_path: None,
                 integrated_hsps: vec![],

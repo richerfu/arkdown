@@ -104,10 +104,11 @@ pub struct LoaderJson {
     pub update_version_info: IndexMap<String, serde_json::Value>,
     /// Whether HAR compilation uses `packingOptions.customizedOptions.basePackage`.
     ///
-    /// `compiler/main.js::loadBuildJson` coerces a missing value with `!!`.
-    /// The current GenerateLoaderJson output therefore omits the key for the
-    /// ordinary `false` case and serializes it only for a customized HAR.
-    #[serde(default, skip_serializing_if = "is_false")]
+    /// `GenerateLoaderJson.doTaskAction()` always writes the result of
+    /// `targetService.isCustomizedHar()`. The compiler later coerces that
+    /// value with `!!`, but the loader artifact itself retains explicit
+    /// `false` for ordinary builds.
+    #[serde(default)]
     pub customized_har: bool,
     /// Present only for the HAR currently being emitted as ByteCode HAR.
     ///
@@ -255,10 +256,6 @@ pub struct LoaderJson {
     /// `oh-exports` declaration.
     #[serde(rename = "oh-exports", default, skip_serializing_if = "Vec::is_empty")]
     pub oh_exports: Vec<String>,
-}
-
-fn is_false(value: &bool) -> bool {
-    !*value
 }
 
 struct LoaderRouterModuleName<'a> {

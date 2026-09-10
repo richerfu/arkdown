@@ -29,6 +29,7 @@ pub mod native_dependency;
 mod native_stage;
 pub mod obfuscation;
 pub mod package_resolution;
+mod pkg_sdk_info;
 pub mod planning;
 pub mod plugin_share;
 pub mod pre_build;

@@ -106,7 +106,7 @@ impl<'a> UnitTestTemplateWriter<'a> {
     }
 
     /// Write the `ohosTest` template tree into
-    /// `<module>/build/<product>/intermediates/src/ohosTest/`. API >= 11 uses
+    /// `<module>/.test/<product>/intermediates/src/ohosTest/`. API >= 11 uses
     /// the `@kit.*` template variants; older SDKs use the plain templates.
     pub fn generate_ohos_test(&self, api_version: u32, is_cross_platform: bool) -> Result<()> {
         let layout = ModuleBuildLayout::for_ohos_test_template(self.module_root, self.product_name);

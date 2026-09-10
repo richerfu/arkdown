@@ -254,6 +254,36 @@ fn native_arkguard_uses_module_ordered_names_and_writes_hvigor_cache_shape() {
 }
 
 #[test]
+fn merged_source_map_inherits_source_root_presence_from_previous_stage() {
+    let fixture = NativeArkguardFixture::new();
+    let mut file = fixture.source_file(
+        "entry/build/generated/r/ResourceTable.ts",
+        "export const ResourceTable = {};",
+    );
+    file.previous_source_map = Some(serde_json::json!({
+        "version": 3,
+        "file": "ResourceTable.js",
+        "sources": ["ResourceTable.ts"],
+        "names": [],
+        "mappings": "AAAA"
+    }));
+    let source_map_key = file.source_map_key.clone();
+    let obfuscator = fixture.obfuscator("-enable-toplevel-obfuscation\n");
+
+    fixture.run(&obfuscator, vec![file]);
+
+    let source_maps: serde_json::Value = serde_json::from_slice(
+        &fs_err::read(fixture.compile_cache.join("sourceMaps.map"))
+            .expect("read obfuscated source maps"),
+    )
+    .expect("parse obfuscated source maps");
+    assert!(
+        source_maps[&source_map_key].get("sourceRoot").is_none(),
+        "ArkGuard SourceMapMergingUtil.mergeSourceMap preserves an absent previous sourceRoot"
+    );
+}
+
+#[test]
 fn native_arkguard_removes_only_configured_call_expression_statements() {
     let fixture = NativeArkguardFixture::new();
     let file = fixture.source_file(
@@ -740,7 +770,7 @@ fn strip_system_api_args_excludes_sdk_parameters_from_property_whitelist() {
     let fixture = NativeArkguardFixture::new();
     let file = fixture.source_file(
         "entry/src/main/ets/Index.ets",
-        "const value = { method: 1, argumentName: 2, parameterName: 3 };",
+        "const value = { method: 1, argumentName: 2, parameterName: 3, indexName: 4 };",
     );
     let inventory_sources = vec![
         ObfuscationSource {
@@ -751,7 +781,7 @@ fn strip_system_api_args_excludes_sdk_parameters_from_property_whitelist() {
         ObfuscationSource {
             path: fixture.temporary.path().join("sdk/api/global.d.ts"),
             source: Arc::from(
-                "export declare function api(argumentName: string): void; export declare interface Api<TArg> { method(parameterName: TArg): void; }",
+                "export declare function api(argumentName: string): void; export declare interface Api<TArg> { [indexName: string]: TArg; method(parameterName: TArg): void; }",
             ),
             kind: crate::ObfuscationSourceKind::SdkApi,
         },
@@ -772,6 +802,42 @@ fn strip_system_api_args_excludes_sdk_parameters_from_property_whitelist() {
     assert!(cache["PropertyCache"].get("method").is_none());
     assert!(cache["PropertyCache"].get("argumentName").is_some());
     assert!(cache["PropertyCache"].get("parameterName").is_some());
+    assert!(cache["PropertyCache"].get("indexName").is_some());
+}
+
+#[test]
+fn sdk_index_signature_parameter_is_reserved_without_strip_system_api_args() {
+    let fixture = NativeArkguardFixture::new();
+    let file = fixture.source_file(
+        "entry/src/main/ets/Index.ets",
+        "const value = { indexName: 1 };",
+    );
+    let inventory_sources = vec![
+        ObfuscationSource {
+            path: file.original_path.clone(),
+            source: Arc::clone(&file.source),
+            kind: crate::ObfuscationSourceKind::Project,
+        },
+        ObfuscationSource {
+            path: fixture.temporary.path().join("sdk/api/global.d.ts"),
+            source: Arc::from("export declare interface Api { [indexName: string]: string; }"),
+            kind: crate::ObfuscationSourceKind::SdkApi,
+        },
+    ];
+    let output = fixture.run_with_inventory(
+        &fixture.obfuscator(
+            "-enable-toplevel-obfuscation\n-enable-property-obfuscation\n-enable-export-obfuscation\n-compact\n",
+        ),
+        vec![file],
+        BTreeMap::new(),
+        inventory_sources,
+    );
+    let cache: serde_json::Value = serde_json::from_slice(
+        &fs_err::read(output.name_cache_path).expect("read ArkGuard name cache"),
+    )
+    .expect("parse ArkGuard name cache");
+
+    assert!(cache["PropertyCache"].get("indexName").is_none());
 }
 
 #[test]

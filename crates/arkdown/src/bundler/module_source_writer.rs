@@ -481,6 +481,8 @@ impl<'a> HvigorModuleSourceWriter<'a> {
         let path = HvigorModuleSourceOutputPath::new(
             &self.output_dir,
             ownership,
+            self.module_path_map
+                .module_meta_info_package_name(module_id),
             &ownership.source_file,
             module_id,
             emits_javascript,
@@ -699,15 +701,15 @@ impl<'a> HvigorModuleSourceWriter<'a> {
         module_id: &str,
         ownership: &HvigorChunkSource,
     ) -> Result<String, ArkdownError> {
-        // The generated ResourceTable carries the owning module name in its
-        // fixed Ohm URL (e.g. `com.example.arkdown.test/entry/build/
-        // generated/r/ResourceTable`) even for the ohosTest module.
-        if let Some(ohm_url) = self.module_path_map.module_meta_info_ohm_url(module_id) {
-            if let Some((_, module)) = ohm_url.split_once('/') {
-                if let Some(module) = module.split('/').next() {
-                    return Ok(module.to_string());
-                }
-            }
+        // `module-meta-info-plugin.addModuleInfoData` replaces only `meta.ohmurl`
+        // for generated files. `ModuleMode.addModuleInfoItem` continues to read
+        // `meta.pkgName`; the package identity must therefore remain independent
+        // of the explicit ResourceTable record name.
+        if let Some(package_name) = self
+            .module_path_map
+            .module_meta_info_package_name(module_id)
+        {
+            return Ok(package_name.to_string());
         }
         match &ownership.kind {
             // `ModuleMode.processModuleInfos` uses `getPkgModulesFilePkgName`

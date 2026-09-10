@@ -116,6 +116,9 @@ pub struct BundlePlanBuilderInput<'a> {
     pub loader_json_path: &'a Path,
     pub output_dir: PathBuf,
     pub config: &'a ArkdownConfig,
+    /// Owning OHOS module name from `ModuleModel`, matching
+    /// `AbstractCompileNode.moduleName`.
+    pub module_name: &'a str,
     pub module_target_name: &'a str,
     pub custom_config: Option<&'a ArkdownCustomConfig>,
     pub module_analyzer: ModuleAnalyzerKind,
@@ -140,6 +143,7 @@ impl<'a> BundlePlanBuilder<'a> {
             loader_json_path,
             output_dir,
             config,
+            module_name,
             module_target_name,
             custom_config,
             module_analyzer,
@@ -159,7 +163,9 @@ impl<'a> BundlePlanBuilder<'a> {
         let entries = Self::ordered_compile_entries(loader_json);
         let module_meta_info_files = BundleModuleMetaInfoFileCollector::new(
             loader_json,
+            module_name,
             config.product.bundle_name.as_str(),
+            source_map.entry_package_name.as_str(),
         )
         .collect(&entries);
         let compile_target = HvigorCompileTarget::from_loader_json(loader_json, config);
@@ -264,15 +270,29 @@ impl<'a> BundlePlanBuilder<'a> {
 }
 
 struct BundleModuleMetaInfoFileCollector<'a> {
-    loader_json: &'a LoaderJson,
+    module_root: Option<&'a Path>,
+    use_normalized_ohm_url: bool,
+    module_name: &'a str,
     bundle_name: &'a str,
+    package_name: &'a str,
 }
 
 impl<'a> BundleModuleMetaInfoFileCollector<'a> {
-    fn new(loader_json: &'a LoaderJson, bundle_name: &'a str) -> Self {
+    fn new(
+        loader_json: &'a LoaderJson,
+        module_name: &'a str,
+        bundle_name: &'a str,
+        package_name: &'a str,
+    ) -> Self {
         Self {
-            loader_json,
+            module_root: loader_json
+                .module_path_map
+                .get(&loader_json.module_name)
+                .map(Path::new),
+            use_normalized_ohm_url: loader_json.use_normalized_ohm_url,
+            module_name,
             bundle_name,
+            package_name,
         }
     }
 
@@ -284,6 +304,7 @@ impl<'a> BundleModuleMetaInfoFileCollector<'a> {
             .map(|file_path| BundleModuleMetaInfoFile {
                 file_path,
                 ohm_url: self.resource_table_ohm_url(),
+                package_name: self.package_name.to_string(),
             })
             .collect()
     }
@@ -292,12 +313,7 @@ impl<'a> BundleModuleMetaInfoFileCollector<'a> {
         if path.file_name().and_then(|name| name.to_str()) != Some("ResourceTable.ts") {
             return false;
         }
-        let Some(module_root) = self
-            .loader_json
-            .module_path_map
-            .get(&self.loader_json.module_name)
-            .map(Path::new)
-        else {
+        let Some(module_root) = self.module_root else {
             return false;
         };
         // Local unit-test builds root at `<module>/.test`; the generated
@@ -313,23 +329,16 @@ impl<'a> BundleModuleMetaInfoFileCollector<'a> {
     }
 
     fn resource_table_ohm_url(&self) -> String {
-        // The ResourceTable record keeps the owning module name even when the
-        // loader names a test module (`ohosTest` target builds under
-        // `entry_test`; hvigor `getOhmUrlByFilepath` resolves the generated
-        // table through the modulePathMap entry).
-        let module_name = self
-            .loader_json
-            .module_path_map
-            .keys()
-            .find(|name| **name != self.loader_json.module_name)
-            .cloned()
-            .unwrap_or_else(|| self.loader_json.module_name.clone());
-        if self.loader_json.use_normalized_ohm_url {
-            return format!("&{module_name}/build/generated/r/ResourceTable&");
+        // `AbstractCompileNode.getModuleMetaInfoFiles` always uses the owning
+        // `this.moduleName`. The loader's active name and `modulePathMap` can
+        // contain target aliases or sibling modules; neither changes the
+        // ResourceTable record owner.
+        if self.use_normalized_ohm_url {
+            return format!("&{}/build/generated/r/ResourceTable&", self.module_name);
         }
         format!(
-            "{}/{module_name}/build/generated/r/ResourceTable",
-            self.bundle_name
+            "{}/{}/build/generated/r/ResourceTable",
+            self.bundle_name, self.module_name
         )
     }
 }
@@ -793,7 +802,7 @@ impl BundleStage {
 
 #[cfg(test)]
 mod tests {
-    use super::HvigorCompileTarget;
+    use super::{BundleModuleMetaInfoFileCollector, HvigorCompileTarget};
 
     #[test]
     fn compile_target_uses_hvigor_compatible_sdk_version_over_installed_sdk_api() {
@@ -802,5 +811,23 @@ mod tests {
 
         assert_eq!(target.api_version(), 12);
         assert_eq!(target.api_sub_version().as_deref(), Some("beta3"));
+    }
+
+    #[test]
+    fn resource_table_record_uses_owning_module_not_another_loader_module() {
+        // `AbstractCompileNode.getModuleMetaInfoFiles` uses `this.moduleName`.
+        // A multi-module `modulePathMap` must never change that owner.
+        let collector = BundleModuleMetaInfoFileCollector {
+            module_root: None,
+            use_normalized_ohm_url: false,
+            module_name: "entry",
+            bundle_name: "com.example.app",
+            package_name: "@example/entry",
+        };
+
+        assert_eq!(
+            collector.resource_table_ohm_url(),
+            "com.example.app/entry/build/generated/r/ResourceTable"
+        );
     }
 }

@@ -455,6 +455,14 @@ impl Bundler {
             module_source_state.source_maps.clear();
             FxHashMap::default()
         };
+        // `rollup-plugin-ets-typescript.ts::transform` selects the emitted-JS
+        // path per Rollup module through `getShouldEmitJs`, then returns that
+        // module's TypeScript source map. Retain the same module-keyed fact
+        // before the source writer takes ownership of the transform state;
+        // deriving it again from a rewritten map source loses generated
+        // compile entries such as ResourceTable.ts.
+        let javascript_source_map_module_ids =
+            module_source_state.source_map_javascript_module_ids.clone();
         let insight_intent_sources = Self::insight_intent_sources(
             module_source_state.take_insight_intent_sources(),
             &input_plan.module_path_map,
@@ -517,7 +525,13 @@ impl Bundler {
         let source_map_output = if plan.source_map == SourceMapPolicy::External {
             let mut source_maps = raw_source_maps
                 .iter()
-                .map(|(module_id, source_map)| (module_id.as_str(), source_map.as_ref(), false))
+                .map(|(module_id, source_map)| {
+                    (
+                        module_id.as_str(),
+                        source_map.as_ref(),
+                        javascript_source_map_module_ids.contains(module_id),
+                    )
+                })
                 .collect::<Vec<_>>();
             source_maps.sort_by(|left, right| left.0.cmp(right.0));
             output::WrittenOutput::write_hvigor_source_maps_with_metadata_from_raw(

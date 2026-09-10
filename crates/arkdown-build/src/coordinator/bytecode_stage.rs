@@ -492,6 +492,7 @@ impl BuildCoordinator {
                     manifest,
                     loader_json,
                     &module_context.deps,
+                    module_context.module.module_json.as_ref(),
                 )
                 .compile_context_loader_json(&widget_out.plan)?;
                 // 6.24.3 `GenerateLoaderJson.doTaskAction()` writes the widget loader

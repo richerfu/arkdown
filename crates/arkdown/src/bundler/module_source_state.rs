@@ -40,6 +40,7 @@ impl<'a> HvigorExternalModuleRequest<'a> {
 pub(crate) struct HvigorModuleSourceState {
     pub(crate) sources: FxHashMap<String, HvigorCollectedModuleSource>,
     pub(crate) source_maps: FxHashMap<String, Arc<str>>,
+    pub(crate) source_map_javascript_module_ids: FxHashSet<String>,
     pub(crate) resolved_imports: FxHashMap<String, FxHashMap<String, String>>,
     pub(crate) resolved_import_records: FxHashMap<String, Vec<HvigorResolvedImportRecord>>,
     pub(crate) module_ids: Vec<String>,
@@ -58,6 +59,7 @@ impl HvigorModuleSourceState {
     ) -> Self {
         let mut state = Self {
             source_maps: transform.source_maps,
+            source_map_javascript_module_ids: transform.source_map_javascript_module_ids,
             javascript_module_ids: transform.javascript_module_ids,
             shared_module_ids: transform.shared_module_ids,
             insight_intent_sources: transform.insight_intent_sources,

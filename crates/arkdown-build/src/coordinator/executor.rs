@@ -452,7 +452,7 @@ impl BuildCoordinator {
             }
             // hvigor `GenerateOhosTestTemplate`: the `ohosTest` target build
             // (`-p module=entry@ohosTest`) copies the SDK test templates into
-            // `build/<product>/intermediates/src/ohosTest/`.
+            // `.test/<product>/intermediates/src/ohosTest/`.
             if ohos_test_templates_after_migration {
                 let _timer = BuildTimingProbe::module(&module.name, "generate_ohos_test_template");
                 let template_writer = crate::unit_test::UnitTestTemplateWriter::new(
@@ -1196,6 +1196,30 @@ impl BuildCoordinator {
                     .map_err(|error| anyhow::anyhow!("process oh-exports failed: {error}"))?;
             }
 
+            if matches!(
+                module_config.output_target,
+                OutputTarget::Hap | OutputTarget::Hsp
+            ) {
+                let module_package = module_context.module.package.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "GeneratePkgSdkInfo requires a package manifest for module '{}'",
+                        module.name
+                    )
+                })?;
+                crate::pkg_sdk_info::PkgSdkInfoGenerator::new(
+                    crate::pkg_sdk_info::PkgSdkInfoInput {
+                        dependency_graph: module_context.deps.as_ref(),
+                        project_root: &config.project_root,
+                        module_package,
+                        module_type: &module.module_type,
+                        use_normalized_ohm_url: loader_json.use_normalized_ohm_url,
+                        output_path: &module_layout.pkg_sdk_info_json(),
+                    },
+                )
+                .write()
+                .map_err(|error| anyhow::anyhow!("GeneratePkgSdkInfo failed: {error}"))?;
+            }
+
             // Profile disk writes.  Skipped for hot rebuilds (skip_profile=true)
             // since module.json5 / oh-package.json5 have not changed and the
             // previous build's outputs are still valid.
@@ -1418,7 +1442,7 @@ impl BuildCoordinator {
                         .filter(|d| d.exists())
                         .collect();
                 // The `ohosTest` target compiles the generated template resources
-                // (`build/<product>/intermediates/src/ohosTest/resources`) that define
+                // (`.test/<product>/intermediates/src/ohosTest/resources`) that define
                 // `$string:module_test_desc` / `$string:TestAbility_*` / test_pages.
                 if ohos_test_templates_after_migration {
                     let template_resources = ohos_test_template_layout.ohos_test_resources_root();
@@ -1506,7 +1530,7 @@ impl BuildCoordinator {
                 let resource_str = module_layout.res_resource_str_dir();
                 res_dirs.insert_existing(resource_str);
                 // The `ohosTest` target compiles the generated template resources
-                // (`build/<product>/intermediates/src/ohosTest/resources`) that define
+                // (`.test/<product>/intermediates/src/ohosTest/resources`) that define
                 // `$string:module_test_desc` / `$string:TestAbility_*` / test_pages.
                 if ohos_test_templates_after_migration {
                     let template_resources = ohos_test_template_layout.ohos_test_resources_root();
@@ -1627,6 +1651,10 @@ impl BuildCoordinator {
             // emits the runtime-only startup/share profiles and updates module.json,
             // so perform the same handoff after restool returns.
             if compile_resource_enabled && !skip_profile_writes {
+                intermediate_writer.recover_form_extension_abilities(
+                    &module_json_out,
+                    &module_layout.res_ark_module_json(),
+                )?;
                 if let Some(compiled_startup_config) = startup_out.compiled_resource_profile() {
                     let profile_path = module_layout.res_profile_dir().join("startup_config.json");
                     intermediate_writer

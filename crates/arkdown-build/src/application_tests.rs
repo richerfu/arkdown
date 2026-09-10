@@ -7,6 +7,7 @@ use tempfile::TempDir;
 
 use super::coordinator::PackInfoFormResourceResolver;
 use crate::intermediates::{IntermediateArtifactWriter, SourceMapPackageHandoff};
+use crate::pkg_sdk_info::{PkgSdkInfoGenerator, PkgSdkInfoInput};
 use crate::unit_test::{
     inject_unit_test_ability, UnitTestArtifactWriter, UnitTestProfileWriter,
     UnitTestTemplateParams, UnitTestTemplateWriter, UNIT_TEST_REPLACE_PAGE,
@@ -483,6 +484,40 @@ fn compile_resource_metadata_is_added_after_profile_intermediates() {
 }
 
 #[test]
+fn compile_resource_restores_form_ability_from_resource_ark_profile() {
+    let temp = TempDir::new().expect("create form resource fixture root");
+    let source_module_json = temp.path().join("ark_module.json");
+    let compiled_module_json = temp.path().join("module.json");
+    std::fs::write(
+        &source_module_json,
+        r#"{"app":{},"module":{"name":"entry","formWidgetModule":"widget","extensionAbilities":[{"name":"EntryFormAbility","type":"form","srcEntry":"./FormAbility.ets"},{"name":"EntryServiceAbility","type":"service"}]}}"#,
+    )
+    .expect("write resource ark profile");
+    std::fs::write(
+        &compiled_module_json,
+        r#"{"app":{},"module":{"name":"entry","formWidgetModule":"widget","extensionAbilities":[{"name":"EntryServiceAbility","type":"service"}]}}"#,
+    )
+    .expect("write restool output profile");
+    let writer = IntermediateArtifactWriter::new(&temp.path().join("sdk/toolchains/restool"));
+
+    writer
+        .recover_form_extension_abilities(&compiled_module_json, &source_module_json)
+        .expect("restore form extension ability");
+
+    let profile: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(compiled_module_json).expect("read restored profile"),
+    )
+    .expect("parse restored profile");
+    assert_eq!(
+        profile["module"]["extensionAbilities"],
+        serde_json::json!([
+            { "name": "EntryServiceAbility", "type": "service" },
+            { "name": "EntryFormAbility", "type": "form", "srcEntry": "./FormAbility.ets" }
+        ])
+    );
+}
+
+#[test]
 fn merge_profile_precedes_dependency_extension_ability_collection() {
     let temp = TempDir::new().expect("create profile stage fixture root");
     let module_root = temp.path().join("entry");
@@ -560,6 +595,185 @@ fn merge_profile_precedes_dependency_extension_ability_collection() {
         2
     );
     assert_eq!(resource_ark["module"]["virtualMachine"], "ark12.0.6.0");
+}
+
+#[test]
+fn form_extension_hap_filters_form_ability_only_from_process_profile() {
+    let temp = TempDir::new().expect("create form profile fixture root");
+    let module_root = temp.path().join("entry");
+    let writer = IntermediateArtifactWriter::new(&temp.path().join("sdk/toolchains/restool"));
+    let layout = crate::layout::ModuleBuildLayout::new(&module_root);
+    let final_value = serde_json::json!({
+        "app": {},
+        "module": {
+            "name": "entry",
+            "type": "entry",
+            "formWidgetModule": "widget",
+            "extensionAbilities": [
+                { "name": "EntryFormAbility", "type": "form" },
+                { "name": "EntryServiceAbility", "type": "service" }
+            ]
+        }
+    });
+
+    writer
+        .write_process_profile_intermediates(&layout, &final_value, 2, &[])
+        .expect("write form-extension profile intermediates");
+
+    let process: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(layout.process_profile_module_json()).expect("read process profile"),
+    )
+    .expect("parse process profile");
+    let resource_ark: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(layout.res_ark_module_json()).expect("read resource ark profile"),
+    )
+    .expect("parse resource ark profile");
+
+    assert_eq!(
+        process["module"]["extensionAbilities"],
+        serde_json::json!([{ "name": "EntryServiceAbility", "type": "service" }])
+    );
+    assert_eq!(
+        resource_ark["module"]["extensionAbilities"],
+        final_value["module"]["extensionAbilities"]
+    );
+}
+
+#[test]
+fn pkg_sdk_info_matches_hvigor_tree_order_types_and_hsp_barrier() {
+    use arkdown_core::OhosModuleType;
+    use arkdown_session::dependency_graph::snapshot::{
+        DependencyCompileInputSnapshot, DependencyEdgeKind, DependencyEdgeSnapshot,
+        DependencyGraphSnapshot, DependencyNodeSnapshot, DependencyNodeType,
+    };
+    use arkdown_session::PackageSnapshot;
+
+    let temp = TempDir::new().expect("create pkg sdk info fixture root");
+    let project_root = temp.path().canonicalize().expect("canonical project root");
+    let host_root = project_root.join("entry");
+    let package = |root: &std::path::Path, name: &str, version: &str| {
+        std::fs::create_dir_all(root).expect("create package root");
+        std::fs::write(
+            root.join("oh-package.json5"),
+            serde_json::json!({ "name": name, "version": version }).to_string(),
+        )
+        .expect("write package manifest");
+        Arc::new(
+            PackageSnapshot::from_root(root)
+                .expect("snapshot package")
+                .expect("package exists"),
+        )
+    };
+    let self_package = package(&host_root, "entry", "1.0.0");
+    let shared_root = project_root.join("oh_modules/shared");
+    let har_root = project_root.join("oh_modules/har");
+    let hidden_root = shared_root.join("oh_modules/hidden");
+    let nested_root = har_root.join("oh_modules/nested");
+    let project_dep_root = project_root.join("oh_modules/global");
+    let shared = package(&shared_root, "shared-lib", "2.0.0");
+    let har = package(&har_root, "har-lib", "3.0.0");
+    let hidden = package(&hidden_root, "hidden-under-hsp", "4.0.0");
+    let nested = package(&nested_root, "nested-other", "5.0.0");
+    let project_dep = package(&project_dep_root, "global-so", "6.0.0");
+
+    let mut graph = DependencyGraphSnapshot {
+        host_module: "entry".to_string(),
+        host_root: host_root.clone(),
+        ..DependencyGraphSnapshot::default()
+    };
+    let mut add_node = |alias: &str,
+                        package: Arc<PackageSnapshot>,
+                        node_type: DependencyNodeType,
+                        is_transitive: bool| {
+        graph.nodes.insert(
+            package.name.clone(),
+            DependencyNodeSnapshot {
+                alias: alias.to_string(),
+                package_name: package.name.clone(),
+                version_spec: None,
+                package_root: Some(package.root.clone()),
+                package: Some(package),
+                module_profile: None,
+                compile_inputs: Arc::new(DependencyCompileInputSnapshot::default()),
+                node_type,
+                is_runtime_only: false,
+                is_dynamic: false,
+                is_transitive,
+                direct_deps: Vec::new(),
+            },
+        );
+    };
+    add_node("shared", shared, DependencyNodeType::SharedHsp, false);
+    add_node("har", har, DependencyNodeType::SourceHar, false);
+    add_node("hidden", hidden, DependencyNodeType::OhpmSource, true);
+    add_node("nested", nested, DependencyNodeType::OhpmSource, true);
+    add_node("global", project_dep, DependencyNodeType::NativeSo, false);
+    let edge = |issuer_root: &std::path::Path,
+                alias: &str,
+                package_name: &str,
+                package_root: &std::path::Path,
+                is_transitive: bool| DependencyEdgeSnapshot {
+        issuer_root: issuer_root.to_path_buf(),
+        alias: alias.to_string(),
+        version_spec: None,
+        package_name: package_name.to_string(),
+        package_root: package_root.to_path_buf(),
+        installed_alias_path: None,
+        kind: DependencyEdgeKind::Dependency,
+        is_transitive,
+    };
+    graph.edges = vec![
+        edge(&host_root, "shared", "shared-lib", &shared_root, false),
+        edge(&host_root, "har", "har-lib", &har_root, false),
+        edge(
+            &project_root,
+            "global",
+            "global-so",
+            &project_dep_root,
+            false,
+        ),
+        edge(
+            &shared_root,
+            "hidden",
+            "hidden-under-hsp",
+            &hidden_root,
+            true,
+        ),
+        edge(&har_root, "nested", "nested-other", &nested_root, true),
+    ];
+
+    let output = project_root.join("build/pkgSdkInfo.json");
+    PkgSdkInfoGenerator::new(PkgSdkInfoInput {
+        dependency_graph: &graph,
+        project_root: &project_root,
+        module_package: &self_package,
+        module_type: &OhosModuleType::Entry,
+        use_normalized_ohm_url: false,
+        output_path: &output,
+    })
+    .write()
+    .expect("write pkg sdk info");
+
+    assert_eq!(
+        std::fs::read_to_string(&output).expect("read pkg sdk info"),
+        r#"{"shared-lib":{"version":"2.0.0","type":"shared","isDirectDep":true},"har-lib":{"version":"3.0.0","type":"har","isDirectDep":true},"nested-other":{"version":"5.0.0","type":"other","isDirectDep":false},"global-so":{"version":"6.0.0","type":"so","isDirectDep":true},"entry":{"version":"1.0.0","type":"entry","isDirectDep":false}}"#
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&output).expect("read generated pkg sdk info"))
+            .expect("parse generated pkg sdk info");
+    assert!(parsed.get("hidden-under-hsp").is_none());
+
+    PkgSdkInfoGenerator::new(PkgSdkInfoInput {
+        dependency_graph: &graph,
+        project_root: &project_root,
+        module_package: &self_package,
+        module_type: &OhosModuleType::Entry,
+        use_normalized_ohm_url: true,
+        output_path: &output,
+    })
+    .write()
+    .expect("suppress normalized pkg sdk info");
+    assert!(!output.exists());
 }
 
 #[test]

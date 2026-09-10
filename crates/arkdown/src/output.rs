@@ -533,14 +533,8 @@ impl HvigorSourceDescriptor {
         javascript_source_paths: &FxHashSet<PathBuf>,
     ) -> Result<Self, ArkdownError> {
         let normalized = ArtifactPathSerializer::rel_to_slash(&PathBuf::from(source));
-        let is_original_javascript = matches!(
-            Path::new(&normalized)
-                .extension()
-                .and_then(|extension| extension.to_str()),
-            Some("js" | "mjs" | "cjs")
-        );
-        let emits_javascript =
-            emits_javascript || Self::source_emits_javascript(&normalized, javascript_source_paths);
+        let emits_javascript = emits_javascript
+            || Self::source_emits_javascript(&normalized, project_root, javascript_source_paths);
         if let Some(local_dependency) = Self::local_dependency_descriptor(
             Path::new(&normalized),
             project_root,
@@ -565,7 +559,7 @@ impl HvigorSourceDescriptor {
                 package_version: Some(package.package_version),
                 key_path: Some(ArtifactPathSerializer::rel_to_slash(&key_path)),
                 file: None,
-                include_source_root: !is_original_javascript,
+                include_source_root: !emits_javascript,
             });
         }
 
@@ -619,15 +613,14 @@ impl HvigorSourceDescriptor {
                     package_version: None,
                     key_path: Some(ArtifactPathSerializer::rel_to_slash(&key_path)),
                     // `process_module_files.ts::genContentAndSourceMapInfo`
-                    // supplies `sourceRoot: ""` for ETS/TS printer maps. A
-                    // generated profile compile entry instead leaves
-                    // `rollup-plugin-ets-typescript.ts::printSourceFile` as a
-                    // string transform, so Rollup's composed map has no
-                    // `sourceRoot`. ByteCode HAR `ModuleInfo.ts` exposes this
-                    // distinction. Generated ohosTest templates live below
-                    // `intermediates/src`, take the printer path, and retain
-                    // the field.
-                    include_source_root: !is_original_javascript
+                    // supplies `sourceRoot: ""` only for the retained TS AST
+                    // printer path. `rollup-plugin-ets-typescript.ts` instead
+                    // returns TypeScript's emit map when `getShouldEmitJs`
+                    // selects JavaScript (for example generated
+                    // `ResourceTable.ts` with `//@ts-noCheck`); that map omits
+                    // `sourceRoot`. Generated profile compile entries also
+                    // omit it on their string-transform path.
+                    include_source_root: !emits_javascript
                         && !Self::is_generated_profile_source(&components),
                 });
             }
@@ -660,11 +653,15 @@ impl HvigorSourceDescriptor {
                 .file_name()
                 .and_then(|name| name.to_str())
                 .map(str::to_string),
-            include_source_root: !is_original_javascript,
+            include_source_root: !emits_javascript,
         })
     }
 
-    fn source_emits_javascript(source: &str, javascript_source_paths: &FxHashSet<PathBuf>) -> bool {
+    fn source_emits_javascript(
+        source: &str,
+        project_root: &Path,
+        javascript_source_paths: &FxHashSet<PathBuf>,
+    ) -> bool {
         let source_path = Path::new(source);
         if matches!(
             source_path
@@ -674,7 +671,12 @@ impl HvigorSourceDescriptor {
         ) {
             return true;
         }
-        javascript_source_paths.contains(&canonicalize_or_owned(source_path))
+        let absolute_source_path = if source_path.is_absolute() {
+            source_path.to_path_buf()
+        } else {
+            project_root.join(source_path)
+        };
+        javascript_source_paths.contains(&canonicalize_or_owned(&absolute_source_path))
     }
 
     fn intermediate_source_path(source_path: &Path, emits_javascript: bool) -> PathBuf {
@@ -752,12 +754,7 @@ impl HvigorSourceDescriptor {
                 .file_name()
                 .and_then(|name| name.to_str())
                 .map(str::to_string),
-            include_source_root: !matches!(
-                source_path
-                    .extension()
-                    .and_then(|extension| extension.to_str()),
-                Some("js" | "mjs" | "cjs")
-            ),
+            include_source_root: !emits_javascript,
         })
     }
 
@@ -927,6 +924,104 @@ mod tests {
         .expect("describe original package JavaScript");
 
         assert!(!descriptor.include_source_root);
+    }
+
+    #[test]
+    fn emitted_typescript_map_omits_typescript_printer_source_root() {
+        // `rollup-plugin-ets-typescript.ts::getShouldEmitJs` selects
+        // TypeScript emit for `//@ts-noCheck` inputs such as ResourceTable.ts.
+        // Its emitted source map has no `sourceRoot`, even though the original
+        // source extension is `.ts`.
+        let source = "/project/entry/build/default/generated/r/default/ResourceTable.ts";
+        let descriptor = HvigorSourceDescriptor::new(
+            source,
+            Path::new("/project"),
+            Path::new("/project/entry"),
+            false,
+            &FxHashMap::default(),
+            &[],
+            &FxHashSet::from_iter([PathBuf::from(source)]),
+        )
+        .expect("describe emitted ResourceTable TypeScript");
+
+        assert!(!descriptor.include_source_root);
+        assert_eq!(
+            descriptor.key_path.as_deref(),
+            Some("build/default/generated/r/default/ResourceTable.js")
+        );
+    }
+
+    #[test]
+    fn project_relative_emitted_typescript_map_uses_project_root_for_language_lookup() {
+        // `transform.js::preserveSourceMap` rewrites `sources[0]` relative to
+        // `projectRootPath`, while ModuleMode retains the absolute module id.
+        let source = "entry/build/default/generated/r/default/ResourceTable.ts";
+        let absolute = "/project/entry/build/default/generated/r/default/ResourceTable.ts";
+        let descriptor = HvigorSourceDescriptor::new(
+            source,
+            Path::new("/project"),
+            Path::new("/project/entry"),
+            false,
+            &FxHashMap::default(),
+            &[],
+            &FxHashSet::from_iter([PathBuf::from(absolute)]),
+        )
+        .expect("describe project-relative emitted ResourceTable TypeScript");
+
+        assert!(!descriptor.include_source_root);
+        assert_eq!(
+            descriptor.source_file,
+            "entry/build/default/generated/r/default/ResourceTable.js"
+        );
+    }
+
+    #[test]
+    fn emitted_javascript_module_fact_omits_source_root_for_generated_typescript() {
+        // `rollup-plugin-ets-typescript.ts::transform` owns the emitted-JS
+        // decision before `transform.js::preserveSourceMap` rewrites the map
+        // source. The module-scoped fact must therefore be sufficient even
+        // when no path-based lookup is available.
+        let output_dir = temp_output_dir("emitted-javascript-module-source-map");
+        let source_map = serde_json::json!({
+            "version": 3,
+            "file": "ResourceTable.ts",
+            "sources": ["entry/build/default/generated/r/default/ResourceTable.ts"],
+            "names": [],
+            "mappings": ""
+        })
+        .to_string();
+        let opts = SourceMapOptions {
+            project_root: PathBuf::from("/project"),
+            module_root: PathBuf::from("/project/entry"),
+            module_name: "entry".to_string(),
+            package_name: "entry".to_string(),
+            version: "1.0.0".to_string(),
+            chunk_source_files: FxHashMap::default(),
+            package_versions: FxHashMap::default(),
+            local_dependency_roots: Vec::new(),
+            javascript_source_paths: FxHashSet::default(),
+        };
+
+        let output = WrittenOutput::write_hvigor_source_maps_from_raw(
+            &output_dir,
+            [(
+                "/project/entry/build/default/generated/r/default/ResourceTable.ts",
+                source_map.as_str(),
+                true,
+            )],
+            &opts,
+        )
+        .expect("write emitted-JavaScript source map")
+        .expect("sourceMaps.map");
+        let value: serde_json::Value = serde_json::from_slice(
+            &fs_err::read(&output).expect("read emitted-JavaScript source map"),
+        )
+        .expect("parse emitted-JavaScript source map");
+        let key = "entry|entry|1.0.0|entry/build/default/generated/r/default/ResourceTable.js";
+
+        assert!(value[key].get("sourceRoot").is_none(), "{value}");
+
+        let _ = fs_err::remove_dir_all(output_dir);
     }
 
     fn temp_output_dir(test_name: &str) -> PathBuf {
