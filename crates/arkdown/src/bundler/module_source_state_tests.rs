@@ -220,6 +220,7 @@ fn module_meta_info_ohm_url_survives_compile_entry_root_enrichment() {
     module_path_map.add_module_meta_info_files(&[crate::plan::BundleModuleMetaInfoFile {
         file_path: resource_table.clone(),
         ohm_url: "com.example/entry/build/generated/r/ResourceTable".to_string(),
+        package_name: "@example/entry".to_string(),
     }]);
     module_path_map
         .add_compile_entry_package_roots(&[resource_table.to_string_lossy().into_owned()]);
@@ -227,6 +228,10 @@ fn module_meta_info_ohm_url_survives_compile_entry_root_enrichment() {
     assert_eq!(
         module_path_map.module_meta_info_ohm_url(resource_table.to_str().unwrap()),
         Some("com.example/entry/build/generated/r/ResourceTable")
+    );
+    assert_eq!(
+        module_path_map.module_meta_info_package_name(resource_table.to_str().unwrap()),
+        Some("@example/entry")
     );
 }
 
@@ -841,6 +846,7 @@ textToSpeech.createEngine({});"#;
                 Arc::<str>::from(lazy_source),
             )]),
             source_maps: FxHashMap::default(),
+            source_map_javascript_module_ids: FxHashSet::default(),
             javascript_module_ids: FxHashSet::default(),
             shared_module_ids: FxHashSet::default(),
             insight_intent_sources: FxHashMap::default(),
@@ -892,6 +898,7 @@ fn module_source_state_prefers_ets_transform_snapshot_over_rolldown_printer_outp
                 Arc::<str>::from(ets_transform_source),
             )]),
             source_maps: FxHashMap::default(),
+            source_map_javascript_module_ids: FxHashSet::default(),
             javascript_module_ids: FxHashSet::default(),
             shared_module_ids: FxHashSet::default(),
             insight_intent_sources: FxHashMap::default(),
@@ -993,6 +1000,7 @@ const dynamicHar = import("bytecode-har-dep");"#
         HvigorModuleTransformSnapshot {
             module_source_overrides: FxHashMap::default(),
             source_maps,
+            source_map_javascript_module_ids: FxHashSet::from_iter([importer.to_string()]),
             javascript_module_ids: FxHashSet::from_iter([importer.to_string()]),
             shared_module_ids: FxHashSet::default(),
             insight_intent_sources: FxHashMap::default(),

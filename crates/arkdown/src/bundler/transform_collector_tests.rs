@@ -113,6 +113,7 @@ fn transform_store_hands_crossplatform_facts_to_bundle_state() {
         module_id: "/project/entry/src/main/ets/model/Router.js".to_string(),
         module_source_code: None,
         source_map: None,
+        source_map_emits_javascript: false,
         module_source_emits_javascript: false,
         is_shared_module: false,
         insight_intent: InsightIntentSourceMetadata::default(),
@@ -134,6 +135,31 @@ fn transform_store_hands_crossplatform_facts_to_bundle_state() {
 }
 
 #[test]
+fn transform_store_keeps_source_map_and_module_source_language_facts_separate() {
+    let module_id = "/project/entry/build/generated/ResourceTable.ts";
+    let store = HvigorModuleTransformStore::default();
+    store.record(HvigorModuleTransformRecord {
+        module_id: module_id.to_string(),
+        module_source_code: Some(Arc::from("export const resource = 1;")),
+        source_map: Some(Arc::from(
+            r#"{"version":3,"sources":["ResourceTable.ts"],"mappings":""}"#,
+        )),
+        source_map_emits_javascript: true,
+        module_source_emits_javascript: false,
+        is_shared_module: false,
+        insight_intent: InsightIntentSourceMetadata::default(),
+        crossplatform_collection: CrossplatformSourceCollection::default(),
+    });
+
+    let snapshot = store.finish();
+
+    assert!(snapshot
+        .source_map_javascript_module_ids
+        .contains(module_id));
+    assert!(!snapshot.javascript_module_ids.contains(module_id));
+}
+
+#[test]
 fn incremental_snapshot_preserves_unchanged_modules_and_removes_stale_modules() {
     let unchanged = "/project/entry/src/main/ets/model/Unchanged.ets".to_string();
     let changed = "/project/entry/src/main/ets/model/Changed.ets".to_string();
@@ -148,6 +174,11 @@ fn incremental_snapshot_preserves_unchanged_modules_and_removes_stale_modules() 
             (unchanged.clone(), Arc::from("unchanged-map")),
             (changed.clone(), Arc::from("changed-old-map")),
             (deleted.clone(), Arc::from("deleted-map")),
+        ]),
+        source_map_javascript_module_ids: FxHashSet::from_iter([
+            unchanged.clone(),
+            changed.clone(),
+            deleted.clone(),
         ]),
         javascript_module_ids: FxHashSet::from_iter([
             unchanged.clone(),
@@ -164,6 +195,7 @@ fn incremental_snapshot_preserves_unchanged_modules_and_removes_stale_modules() 
             Arc::from("changed-new"),
         )]),
         source_maps: FxHashMap::from_iter([(changed.clone(), Arc::from("changed-new-map"))]),
+        source_map_javascript_module_ids: FxHashSet::default(),
         javascript_module_ids: FxHashSet::default(),
         shared_module_ids: FxHashSet::from_iter([changed.clone()]),
         insight_intent_sources: FxHashMap::default(),
@@ -193,10 +225,12 @@ fn incremental_snapshot_preserves_unchanged_modules_and_removes_stale_modules() 
         snapshot.source_maps.get(&changed).map(AsRef::as_ref),
         Some("changed-new-map")
     );
+    assert!(!snapshot.source_map_javascript_module_ids.contains(&changed));
     assert!(!snapshot.javascript_module_ids.contains(&changed));
     assert!(snapshot.shared_module_ids.contains(&changed));
     assert!(!snapshot.module_source_overrides.contains_key(&deleted));
     assert!(!snapshot.source_maps.contains_key(&deleted));
+    assert!(!snapshot.source_map_javascript_module_ids.contains(&deleted));
     assert!(!snapshot.javascript_module_ids.contains(&deleted));
     assert!(!snapshot.shared_module_ids.contains(&deleted));
 }

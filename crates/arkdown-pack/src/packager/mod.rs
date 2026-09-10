@@ -446,6 +446,17 @@ impl Packager {
         } else {
             None
         };
+        let pkg_sdk_info = if let Some(pkg_sdk_info_path) = &input.pkg_sdk_info_path {
+            if !pkg_sdk_info_path.exists() {
+                return Err(PackError::MissingInput(format!(
+                    "pkgSdkInfo.json ({})",
+                    pkg_sdk_info_path.display()
+                )));
+            }
+            Some(fs_err::read(pkg_sdk_info_path)?)
+        } else {
+            None
+        };
         if let Some(syscap_path) = &input.syscap_path {
             if !syscap_path.is_file() {
                 return Err(PackError::MissingInput(format!(
@@ -633,6 +644,9 @@ impl Packager {
         // alongside the other input paths.
         if let Some(pkg_context) = pkg_context {
             zip_writer::add_bytes_stored(&mut writer, "pkgContextInfo.json", &pkg_context)?;
+        }
+        if let Some(pkg_sdk_info) = pkg_sdk_info {
+            zip_writer::add_bytes_stored(&mut writer, "pkgSdkInfo.json", &pkg_sdk_info)?;
         }
         writer.finish()?;
         Ok(input.output_path)

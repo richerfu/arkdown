@@ -1339,7 +1339,19 @@ mod tests {
         assert_eq!(cache["libs"].as_object().unwrap().len(), 1);
         assert_eq!(cache["stripped"].as_object().unwrap().len(), 1);
         assert!(cache.get("debugSymbol").is_none());
-        assert!(!layout.binxo_native_lib_cache_file().exists());
+        let binxo_cache: serde_json::Value =
+            serde_json::from_slice(&fs::read(layout.binxo_native_lib_cache_file()).unwrap())
+                .unwrap();
+        // `CacheNativeLibs.doTaskAction` always passes
+        // `intermediatesProcessLibs` as refreshBinxoFileCache's originalLibs,
+        // even when DoNativeBinxo is disabled.
+        assert_eq!(binxo_cache["libs"].as_object().unwrap().len(), 1);
+        assert!(binxo_cache["binxo"].as_object().unwrap().is_empty());
+        assert_eq!(binxo_cache["binxoSymbol"]["enableAsanBinxo"], false);
+        assert_eq!(
+            binxo_cache["binxoSymbol"]["excludeSoFromBinxo"],
+            serde_json::json!([])
+        );
         for hash in cache["libs"]
             .as_object()
             .unwrap()
@@ -1353,7 +1365,7 @@ mod tests {
     }
 
     #[test]
-    fn native_cache_omits_and_removes_binxo_state_when_binxo_is_disabled() {
+    fn native_cache_writes_empty_binxo_state_when_binxo_is_disabled() {
         let tmp = tempfile::tempdir().unwrap();
         let option = NativeLibOption::default();
         let layout = NativeModuleLayout::for_variant(tmp.path(), "default", "default");
@@ -1368,7 +1380,10 @@ mod tests {
             fs::read_to_string(layout.native_lib_cache_file()).unwrap(),
             r#"{"libs":{},"stripped":{}}"#
         );
-        assert!(!layout.binxo_native_lib_cache_file().exists());
+        assert_eq!(
+            fs::read_to_string(layout.binxo_native_lib_cache_file()).unwrap(),
+            r#"{"libs":{},"binxo":{},"binxoSymbol":{"enableAsanBinxo":false,"excludeSoFromBinxo":[]}}"#
+        );
     }
 
     #[test]

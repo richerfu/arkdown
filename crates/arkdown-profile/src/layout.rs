@@ -165,7 +165,7 @@ impl<'a> ProfileModuleLayout<'a> {
 
     pub(crate) fn ohos_test_template_ets_root(&self) -> PathBuf {
         self.module_root
-            .join("build")
+            .join(".test")
             .join(self.product_name)
             .join("intermediates")
             .join("src")

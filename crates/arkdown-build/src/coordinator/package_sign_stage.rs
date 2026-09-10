@@ -991,6 +991,8 @@ impl BuildCoordinator {
                                         pkg_context_info_path: loader_json
                                             .use_normalized_ohm_url
                                             .then(|| module_layout.pkg_context_info_json()),
+                                        pkg_sdk_info_path: (!loader_json.use_normalized_ohm_url)
+                                            .then(|| module_layout.pkg_sdk_info_json()),
                                         integrated_hsps: integrated_hsps.clone(),
                                         device_types: manifest.device_types.clone(),
                                         installation_free: bundle_type == "atomicService",

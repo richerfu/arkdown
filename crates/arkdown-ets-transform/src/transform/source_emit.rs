@@ -107,7 +107,7 @@ impl HvigorTypescriptPrinter {
             TypeScriptSourceCommentSnapshot::from_program(program)
         };
         let mut source_layouts = TypeScriptSourceLayoutInventory::from_program_source(program);
-        source_layouts.record_synthetic_type_import_aliases(program);
+        source_layouts.record_explicit_same_name_import_aliases(program);
         let generated = Codegen::new()
             .with_options(options)
             .with_scoping(scoping)
@@ -2215,7 +2215,7 @@ impl<'a> TypeScriptSourceLayoutInventory<'a> {
             logical_line_breaks: self.logical_line_breaks,
             single_arrow_parenthesized: self.single_arrow_parenthesized,
             empty_arrow_body_multiline: self.empty_arrow_body_multiline,
-            synthetic_type_import_aliases: FxHashMap::default(),
+            explicit_same_name_import_aliases: FxHashMap::default(),
         }
     }
 
@@ -2362,19 +2362,16 @@ struct HvigorSourceLayoutSnapshot {
     logical_line_breaks: FxHashMap<String, VecDeque<bool>>,
     single_arrow_parenthesized: VecDeque<bool>,
     empty_arrow_body_multiline: VecDeque<bool>,
-    synthetic_type_import_aliases: FxHashMap<String, VecDeque<Vec<String>>>,
+    explicit_same_name_import_aliases: FxHashMap<String, VecDeque<Vec<String>>>,
 }
 
 impl HvigorSourceLayoutSnapshot {
-    fn record_synthetic_type_import_aliases(&mut self, program: &Program<'_>) {
+    fn record_explicit_same_name_import_aliases(&mut self, program: &Program<'_>) {
         for statement in &program.body {
             let Statement::ImportDeclaration(declaration) = statement else {
                 continue;
             };
-            let source = declaration.source.value.as_str();
-            if !declaration.import_kind.is_type()
-                || !(source.starts_with("@ohos:") || source.starts_with("@ohos."))
-            {
+            if !declaration.import_kind.is_type() {
                 continue;
             }
             let aliases = declaration
@@ -2386,12 +2383,26 @@ impl HvigorSourceLayoutSnapshot {
                         return None;
                     };
                     let imported = specifier.imported.name();
-                    (imported.as_str() == specifier.local.name.as_str())
+                    // TypeScript's ImportSpecifier distinguishes an omitted
+                    // propertyName (`{ X }`) from an explicit same-name
+                    // propertyName (`{ X as X }`). OXC represents both with
+                    // imported/local nodes and its codegen intentionally
+                    // collapses equal names. The source/factory ownership is
+                    // still visible in their spans: an omitted propertyName
+                    // shares the local span, while `import_path_expand.ts`
+                    // creates a distinct synthetic imported identifier when
+                    // a default import resolves to a named export. Preserve
+                    // only that explicit shape. In particular,
+                    // `process_kit_import.ts::ImportSpecifierKitInfo.transform`
+                    // passes `undefined` for an unrenamed binding and must
+                    // remain `{ X }`.
+                    (imported.as_str() == specifier.local.name.as_str()
+                        && specifier.imported.span() != specifier.local.span)
                         .then(|| imported.to_string())
                 })
                 .collect::<Vec<_>>();
             if !aliases.is_empty() {
-                self.synthetic_type_import_aliases
+                self.explicit_same_name_import_aliases
                     .entry(declaration.source.value.to_string())
                     .or_default()
                     .push_back(aliases);
@@ -2578,7 +2589,7 @@ struct HvigorLayoutInventory<'a> {
     logical_line_breaks: FxHashMap<String, VecDeque<bool>>,
     single_arrow_parenthesized: VecDeque<bool>,
     empty_arrow_body_multiline: VecDeque<bool>,
-    synthetic_type_import_aliases: FxHashMap<String, VecDeque<Vec<String>>>,
+    explicit_same_name_import_aliases: FxHashMap<String, VecDeque<Vec<String>>>,
 }
 
 impl<'a> HvigorLayoutInventory<'a> {
@@ -2594,7 +2605,7 @@ impl<'a> HvigorLayoutInventory<'a> {
             logical_line_breaks: source_layouts.logical_line_breaks,
             single_arrow_parenthesized: source_layouts.single_arrow_parenthesized,
             empty_arrow_body_multiline: source_layouts.empty_arrow_body_multiline,
-            synthetic_type_import_aliases: source_layouts.synthetic_type_import_aliases,
+            explicit_same_name_import_aliases: source_layouts.explicit_same_name_import_aliases,
         }
     }
 
@@ -3107,7 +3118,7 @@ impl<'a> Visit<'a> for HvigorLayoutInventory<'_> {
 
     fn visit_import_declaration(&mut self, declaration: &ImportDeclaration<'a>) {
         let aliases = self
-            .synthetic_type_import_aliases
+            .explicit_same_name_import_aliases
             .get_mut(declaration.source.value.as_str())
             .and_then(VecDeque::pop_front)
             .unwrap_or_default();

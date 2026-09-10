@@ -2352,6 +2352,7 @@ fn module_source_output_path_uses_cache_module_and_transform_language_metadata()
     let output = HvigorModuleSourceOutputPath::new(
         Path::new("/workspace/cache"),
         &ownership,
+        None,
         "ets/Zip.ts",
         "/workspace/entry/src/main/ets/Zip.ts",
         true,
@@ -2362,6 +2363,31 @@ fn module_source_output_path_uses_cache_module_and_transform_language_metadata()
     assert_eq!(
         output,
         Path::new("/workspace/cache/entry_test/src/main/ets/Zip.js")
+    );
+
+    // `module_mode.ts::genFileCachePath` derives generated ResourceTable
+    // cache ownership from its explicit module metadata (`belongProjectPath`),
+    // which remains the production `entry` package for an `entry_test` target.
+    let resource_table_ownership = HvigorChunkSource::source_module(
+        "entry".to_string(),
+        "entry_test".to_string(),
+        String::new(),
+        "build/generated/r/ResourceTable.ts".to_string(),
+        "build/default/generated/r/ohosTest/ResourceTable.ts".to_string(),
+    );
+    let resource_table_output = HvigorModuleSourceOutputPath::new(
+        Path::new("/workspace/cache"),
+        &resource_table_ownership,
+        Some("entry"),
+        "build/default/generated/r/ohosTest/ResourceTable.ts",
+        "/workspace/entry/build/default/generated/r/ohosTest/ResourceTable.ts",
+        true,
+    )
+    .path()
+    .expect("ResourceTable output path");
+    assert_eq!(
+        resource_table_output,
+        Path::new("/workspace/cache/entry/build/default/generated/r/ohosTest/ResourceTable.js")
     );
     assert_eq!(
         ownership.file_info_source_file("entry", "1.0.0", false, true),
@@ -2420,6 +2446,7 @@ fn package_source_output_uses_the_owning_dependency_project_like_hvigor() {
     let output = HvigorModuleSourceOutputPath::new(
         &cache,
         &ownership,
+        None,
         "index.ts",
         module_id.to_str().unwrap(),
         false,

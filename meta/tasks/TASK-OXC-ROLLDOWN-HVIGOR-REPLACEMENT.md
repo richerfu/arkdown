@@ -1,6 +1,6 @@
 # OXC/Rolldown 替换 Hvigor：当前架构与剩余工作
 
-状态：ArkTS 1.1 源码定义主链与 TSGO 能力已接入；剩余为真实矩阵证据与性能收口
+状态：ArkTS 1.1 源码定义主链与 TSGO 能力已接入，strict 34/34 零差异；剩余为真实矩阵扩展与性能收口
 更新日期：2026-09-08
 
 最新审计见 [全链路对照](AUDIT-HVIGOR-REPLACEMENT.md)。下文历史的
@@ -81,7 +81,8 @@ CLI 参数；check 使用 product 语言版本同样是合法行为，不得列�
 当前 1.1 主链已经由 Rust owner 完成项目快照、解析、OXC 变换、Rolldown
 模块图、ABC、资源、profile、native、混淆、缓存、watch、打包和签名。
 公开入口只有 JS CLI。真实 Hvigor fixture 矩阵在 strict 模式下要求所有
-归一化产物相等，不再允许 allowlist。
+归一化产物相等，不再允许 allowlist；当前 34/34 通过，其中 20 个是真实构建
+报告场景，并包含 project-mode APP 对其嵌套 HAP/HSP 的递归比较。
 
 这表示当前 fixture 覆盖范围内为零差异，不表示未被源码语料覆盖的行为可以
 凭空视为完成。新增源码契约时必须继续扩充矩阵。
@@ -259,8 +260,15 @@ native checker、build semantic、SDK CommonJS callback 与 OXC 类型消费者�
   该源码没有执行其构造的 `ark_aot_compiler` 命令，Arkdown 也不得额外执行。
 - 真实 SDK PandaGuard 已从 JS CLI 验证 origin/obf/final HAP ABC、source map 与
   nameCache 的完整交接，并修复生成期 `ResourceTable.ts` 不属于启动快照的生命周期
-  差异。剩余真实矩阵限定为多 HAP/HSP 复杂 APP 与全部签名材料组合；ArkGuard 规则集、
-  name-cache 跨轮复用和 keptNames/whitelist 已有源码对齐回归，不得继续列为实现缺口。
+  差异。SDK index-signature 参数白名单和上一阶段 source-map `sourceRoot` 继承也已
+  按 ArkGuard 源码补齐。ArkGuard 规则集、name-cache 跨轮复用和
+  keptNames/whitelist 已有源码对齐回归，不得继续列为实现缺口。
+- project-mode `assembleApp` 已严格验证一组 entry HAP + form-widget HSP，并据源码
+  补齐 legacy `pkgSdkInfo.json`、form profile/restool 恢复、widget compile gate、
+  ResourceTable module/package/cache owner、interface HAR `packageName`、显式
+  `customizedHar: false`、disabled BinXO 空 cache、`.test` ohosTest 源码根和 kit
+  same-name import printer。剩余 APP 矩阵精确限定为含两个以上 HAP 或两个以上 HSP
+  的组合；签名矩阵还缺已签名 HQF 与普通产物的全部材料组合。
 - 在 Rolldown 提供结构化磁盘图接口后再实现跨进程 graph cache；在此之前不
   自创序列化格式。
 - 按源码补充更细粒度的 ABC invalidation 和依赖 wave；所有并发结果按 typed

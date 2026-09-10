@@ -114,17 +114,38 @@ configure-cmake hook 与 watcher facade 已删除，不能把它们当作待补�
 代码语义；comparator 现在只在归一化 ZIP/TAR member 时按 JSON 数据语义排序，
 没有跳过目录或产物。`coverage.log` 只归一化当前 OH coverage parser 不消费的
 进程前缀和 Hypium wall-clock duration，保留 class/test/result/status-code/stack/
-coverage records。ArkTS 1.1 strict Hvigor suite 当前 33/33 通过，其中 19 个为
+coverage records。ArkTS 1.1 strict Hvigor suite 当前 34/34 通过，其中 20 个为
 真实构建报告场景，覆盖 HAP、HSP、HAR、ByteCode HAR、test、ohosTest、
-multi-module、incremental、release、startup/share/widget，其余为 comparator、
+APP、multi-module、incremental、release、startup/share/widget，其余为 comparator、
 diagnostic 与 harness 合同测试。
 
-本轮严格矩阵曾定位出 3 个真实差异：HSP debug/release 的 interface HAR 和
-widget 场景生成的 HAR 多写了 `module.packageName`。当前 DevEco
-`PrepareSharedHarRes.generateModuleJson()` 通过显式字段白名单重建 interface
-HAR 的 `module.json`，白名单不包含 `packageName`；Arkdown 已在
-`HspInterfaceModuleJson` 按同一白名单删除该字段并增加归档内容回归。修复后
-HSP debug、HSP release、widget 定向对比及完整 33 项 strict suite 均通过。
+本轮新增真实 project-mode `assembleApp` 对比，递归比较 APP 内的 entry HAP、
+form-widget HSP、interface HAR、ABC、profile、资源、`pack.info`、`pac.json` 和
+legacy `pkgSdkInfo.json`。严格矩阵据此定位并按源码修复了以下差异：
+
+- `GeneratePkgSdkInfo` 仅在非 normalized OHM URL 下生成 legacy package inventory；
+  它按 module tree、project tree 的顺序遍历依赖，在 HSP 节点停止，并将原始字节紧跟
+  `pack.info` 写入 HAP/HSP；
+- `ProcessProfile.processFormExtensionAbilities` 只从 restool 输入移除 HAP 的 form
+  ability，`CompileResource.recoverFormExtensionModule` 在 restool 后从
+  `ark_module.json` 恢复，最终 HAP profile 不丢失 form ability；声明
+  `formWidgetModule` 的 HAP 本身不执行配对 HSP 的 widget compile pass；
+- `GenerateOhosTestTemplate` 的迁移源码根是
+  `.test/<product>/intermediates/src/ohosTest`，不是普通 `build` 中间目录；
+- `GenerateLoaderJson` 对普通构建也显式写 `customizedHar: false`；
+  `CacheNativeLibs.refreshBinxoFileCache` 在未启用 ASAN/BinXO 时仍写空 cache 和
+  `enableAsanBinxo: false`；
+- `PrepareSharedHarRes.generateModuleJson` 的 interface HAR 白名单包含
+  `module.packageName`；未被当前模块依赖图引用的 workspace HSP 不得自动写入
+  `module.dependencies`；
+- generated `ResourceTable.ts` 的 OHM URL 使用 owning module，package/cache owner
+  独立保留 package metadata；TypeScript emit 与 retained TS printer 的 source-map
+  语言事实分别保存；
+- `process_kit_import.ts` 对未改名 kit import 保持 `{ X }`，不能打印成
+  `{ X as X }`；ArkGuard 的 SDK index-signature 参数进入原始 API 白名单，合并
+  source map 时精确保留上一阶段 `sourceRoot` 的存在性。
+
+修复后 APP、HAP/HSP/HAR 及完整 34 项 strict suite 均为零差异。
 
 ### R3：缺少独立真实矩阵的 1.1 路径
 
@@ -146,9 +167,10 @@ HSP debug、HSP release、widget 定向对比及完整 33 项 strict suite 均�
   指定目录生成 cold patch ABC/sourcemap；`PackageQuickfix` 随后通过 SDK
   `app_packing_tool --mode hqf` 产出 HQF，归档包含 `patch.json`、
   `ets/modules.abc`、`ets/sourceMaps.map`。
-- 已物化 `file:` Source HAR 依赖的多模块 fixture 能由 JS CLI 生成 APP；APP 通过
-  实际 packing tool 包含 entry HAP、`pack.info` 和 `pac.json`。构建服务没有为了
-  sample 隐式执行安装，缺少 `oh_modules` 时的 resolver 错误属于正确前置条件。
+- 已物化 `file:` Source HAR 依赖的多模块 fixture 能由 JS CLI 生成 APP；新的
+  form-widget project fixture 还严格验证一组 entry HAP + HSP、项目
+  `pack.info`/`pac.json` 和嵌套归档。构建服务没有为了 sample 隐式执行安装，缺少
+  `oh_modules` 时的 resolver 错误属于正确前置条件。
 
 ArkGuard 已补齐当前 `ConfigResolver` 中此前遗漏的
 `-remove-nosideeffects-calls` 与 `-keep-uncompact`，并从 JS CLI 完成双轮 release
@@ -176,8 +198,9 @@ intermediate、mapping 和 symbol 输出，nameCache 也同步到 symbol 输出�
 阶段生成后通过 `resourceTableTs` 加入 ArkGuard 输入；Rust 现在从已物化的 typed
 CompileArkTS module file 携带该源码，不做运行期兜底读盘。
 
-仍缺独立真实矩阵的是多 HAP/HSP 组成的复杂 APP，以及 HQF 与普通产物的全部签名
-材料组合。ArkGuard keptNames/whitelist 已由精确 schema、原因顺序、增量覆盖和
+仍缺独立真实矩阵的是含两个以上 HAP 或两个以上 HSP 的 APP，以及已签名 HQF 与
+普通产物的全部签名材料组合；一组 entry HAP + form-widget HSP 的 APP 已完成真实
+严格对比。ArkGuard keptNames/whitelist 已由精确 schema、原因顺序、增量覆盖和
 HAR/非 HAR 枚举回归保护。这里缺的是对应真实工具与产物验收，不表示这些 owner
 不存在。
 每个场景加入时必须比较其上游任务实际消费和生成的结构，不可只检查
@@ -192,8 +215,8 @@ command/config 或 `contains` 片段。
 
 ## 下一步顺序
 
-1. 按具体 owner 扩充剩余 R3 真实矩阵；继续处理多 HAP/HSP APP 与签名，发现差异
-   即在领域 crate 修复。
+1. 按具体 owner 扩充剩余 R3 真实矩阵；继续处理含两个以上 HAP/HSP 的 APP 与签名
+   材料组合，发现差异即在领域 crate 修复。
 2. 功能门禁通过后处理剩余跨进程 graph cache 和依赖 wave 性能项。
 3. 只有取得当前 task/system plugin 权威源码后，才能决定是否扩展公开插件合同。
 

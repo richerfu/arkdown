@@ -1940,6 +1940,42 @@ export default class ChannelManager {
     }
 
     #[test]
+    fn compile_transform_keeps_unrenamed_kit_named_import_without_alias() {
+        // `process_kit_import.ts::ImportSpecifierKitInfo.transform` supplies
+        // `undefined` as propertyName when the public kit name and system API
+        // binding are equal. TypeScript therefore prints `{ BusinessError }`,
+        // not the explicit-alias shape `{ BusinessError as BusinessError }`.
+        let plan = RolldownEtsTransformPlan::new(
+            "com.example",
+            "entry",
+            PathBuf::from("/tmp/project"),
+            PathBuf::from("/tmp/project/entry/src/main/ets"),
+            Vec::new(),
+            12,
+            FxHashMap::default(),
+            transform::component_meta::ComponentMetadata::default(),
+            TransformSourceSnapshot::default(),
+        );
+        let transformer = RolldownEtsTransformer::new(Arc::new(plan));
+        let output = transformer
+            .compile_transform(
+                "import { BusinessError } from '@kit.BasicServicesKit';\nexport type Failure = BusinessError;\n",
+                "/tmp/project/entry/src/ohosTest/ets/OpenHarmonyTestRunner.ets",
+            )
+            .unwrap()
+            .expect("kit import transform");
+        let module_source = output
+            .module_source_code
+            .expect("CompileArkTS must retain transformed TypeScript");
+
+        assert!(
+            module_source.contains("import type { BusinessError } from"),
+            "{module_source}"
+        );
+        assert!(!module_source.contains("BusinessError as BusinessError"));
+    }
+
+    #[test]
     fn compile_transform_adapts_lazy_import_in_ts_dependency_for_rolldown() {
         let plan = RolldownEtsTransformPlan::new(
             "com.example",

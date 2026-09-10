@@ -1001,7 +1001,20 @@ impl<'a> ArkguardModuleRunner<'a> {
                 "sources".to_string(),
                 Value::Array(vec![Value::String(file.relative_path.clone())]),
             );
-            map.insert("sourceRoot".to_string(), Value::String(String::new()));
+            // ArkGuard's SourceMapMergingUtil.mergeSourceMap assigns
+            // `previousMap.sourceRoot` after tracing. JSON serialization drops
+            // that property when the previous map did not define it. Only a
+            // map created wholly by ArkGuard receives the empty source root
+            // installed by ArkObfuscator.handleSourceMapAndNameCache.
+            if let Some(previous) = file.previous_source_map.as_ref() {
+                if let Some(source_root) = previous.get("sourceRoot") {
+                    map.insert("sourceRoot".to_string(), source_root.clone());
+                } else {
+                    map.remove("sourceRoot");
+                }
+            } else {
+                map.insert("sourceRoot".to_string(), Value::String(String::new()));
+            }
             map.insert(
                 "entry-package-info".to_string(),
                 Value::String(self.adapter.entry_package_info.clone()),

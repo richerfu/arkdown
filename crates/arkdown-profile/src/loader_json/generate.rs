@@ -406,7 +406,7 @@ impl LoaderJson {
             compile_entry.extend(runtime_entry_sources.iter().cloned());
         } else if target_name == "ohosTest" {
             // The `ohosTest` target compiles the generated template tree
-            // (`build/<product>/intermediates/src/ohosTest/ets/`) — the
+            // (`.test/<product>/intermediates/src/ohosTest/ets/`) — the
             // TestAbility srcEntry points there and the test pages live in
             // the template `resources`. Relative `./ets/...` srcEntry values
             // resolve against the module ets root, which does not exist for

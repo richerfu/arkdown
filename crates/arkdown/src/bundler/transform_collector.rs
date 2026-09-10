@@ -23,6 +23,7 @@ use super::*;
 pub(crate) struct HvigorModuleTransformStore {
     pub(crate) module_source_overrides: Arc<FxDashMap<String, Arc<str>>>,
     pub(crate) source_maps: Arc<FxDashMap<String, Arc<str>>>,
+    pub(crate) source_map_javascript_module_ids: Arc<FxDashMap<String, ()>>,
     pub(crate) javascript_module_ids: Arc<FxDashMap<String, ()>>,
     pub(crate) shared_module_ids: Arc<FxDashMap<String, ()>>,
     pub(crate) insight_intent_sources: Arc<FxDashMap<String, InsightIntentSourceMetadata>>,
@@ -33,6 +34,7 @@ pub(crate) struct HvigorModuleTransformRecord {
     pub(crate) module_id: String,
     pub(crate) module_source_code: Option<Arc<str>>,
     pub(crate) source_map: Option<Arc<str>>,
+    pub(crate) source_map_emits_javascript: bool,
     pub(crate) module_source_emits_javascript: bool,
     pub(crate) is_shared_module: bool,
     pub(crate) insight_intent: InsightIntentSourceMetadata,
@@ -45,6 +47,7 @@ impl HvigorModuleTransformStore {
             module_id,
             module_source_code,
             source_map,
+            source_map_emits_javascript,
             module_source_emits_javascript,
             is_shared_module,
             insight_intent,
@@ -56,6 +59,10 @@ impl HvigorModuleTransformStore {
         }
         if let Some(source_map) = source_map {
             self.source_maps.insert(module_id.clone(), source_map);
+        }
+        if source_map_emits_javascript {
+            self.source_map_javascript_module_ids
+                .insert(module_id.clone(), ());
         }
         if module_source_emits_javascript {
             self.javascript_module_ids.insert(module_id.clone(), ());
@@ -86,6 +93,12 @@ impl HvigorModuleTransformStore {
             source_maps.insert(item.key().clone(), Arc::clone(item.value()));
         }
         self.source_maps.clear();
+        let source_map_javascript_module_ids = self
+            .source_map_javascript_module_ids
+            .iter()
+            .map(|item| item.key().clone())
+            .collect();
+        self.source_map_javascript_module_ids.clear();
         let javascript_module_ids = self
             .javascript_module_ids
             .iter()
@@ -111,6 +124,7 @@ impl HvigorModuleTransformStore {
         HvigorModuleTransformSnapshot {
             module_source_overrides,
             source_maps,
+            source_map_javascript_module_ids,
             javascript_module_ids,
             shared_module_ids,
             insight_intent_sources,
@@ -123,6 +137,7 @@ impl HvigorModuleTransformStore {
 pub(crate) struct HvigorModuleTransformSnapshot {
     pub(crate) module_source_overrides: FxHashMap<String, Arc<str>>,
     pub(crate) source_maps: FxHashMap<String, Arc<str>>,
+    pub(crate) source_map_javascript_module_ids: FxHashSet<String>,
     pub(crate) javascript_module_ids: FxHashSet<String>,
     pub(crate) shared_module_ids: FxHashSet<String>,
     pub(crate) insight_intent_sources: FxHashMap<String, InsightIntentSourceMetadata>,
@@ -140,6 +155,7 @@ impl HvigorModuleTransformSnapshot {
         let mut updated_module_ids = FxHashSet::default();
         updated_module_ids.extend(update.module_source_overrides.keys().cloned());
         updated_module_ids.extend(update.source_maps.keys().cloned());
+        updated_module_ids.extend(update.source_map_javascript_module_ids.iter().cloned());
         updated_module_ids.extend(update.javascript_module_ids.iter().cloned());
         updated_module_ids.extend(update.shared_module_ids.iter().cloned());
         updated_module_ids.extend(update.insight_intent_sources.keys().cloned());
@@ -148,6 +164,7 @@ impl HvigorModuleTransformSnapshot {
         for module_id in &updated_module_ids {
             self.module_source_overrides.remove(module_id);
             self.source_maps.remove(module_id);
+            self.source_map_javascript_module_ids.remove(module_id);
             self.javascript_module_ids.remove(module_id);
             self.shared_module_ids.remove(module_id);
             self.insight_intent_sources.remove(module_id);
@@ -157,6 +174,8 @@ impl HvigorModuleTransformSnapshot {
         self.module_source_overrides
             .extend(update.module_source_overrides.drain());
         self.source_maps.extend(update.source_maps.drain());
+        self.source_map_javascript_module_ids
+            .extend(update.source_map_javascript_module_ids.drain());
         self.javascript_module_ids
             .extend(update.javascript_module_ids.drain());
         self.shared_module_ids
@@ -170,6 +189,8 @@ impl HvigorModuleTransformSnapshot {
             .retain(|module_id, _| active_module_ids.contains(module_id));
         self.source_maps
             .retain(|module_id, _| active_module_ids.contains(module_id));
+        self.source_map_javascript_module_ids
+            .retain(|module_id| active_module_ids.contains(module_id));
         self.javascript_module_ids
             .retain(|module_id| active_module_ids.contains(module_id));
         self.shared_module_ids
@@ -375,6 +396,7 @@ impl Plugin for HvigorModuleTransformCollector {
                     module_id,
                     module_source_code: metadata.module_source_code,
                     source_map,
+                    source_map_emits_javascript: metadata.emits_javascript,
                     module_source_emits_javascript: metadata.module_source_emits_javascript,
                     is_shared_module: metadata.is_shared_module,
                     insight_intent: metadata.insight_intent,
@@ -385,6 +407,7 @@ impl Plugin for HvigorModuleTransformCollector {
                     module_id,
                     module_source_code: None,
                     source_map: Some(source_map),
+                    source_map_emits_javascript: true,
                     module_source_emits_javascript: true,
                     is_shared_module: false,
                     insight_intent: InsightIntentSourceMetadata::default(),

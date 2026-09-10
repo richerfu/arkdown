@@ -45,6 +45,7 @@ impl<'a> HvigorModuleSourceId<'a> {
 pub(crate) struct HvigorModuleSourceOutputPath<'a> {
     pub(crate) output_dir: &'a Path,
     pub(crate) ownership: &'a HvigorChunkSource,
+    pub(crate) cache_module_name_override: Option<&'a str>,
     pub(crate) source_file: &'a str,
     pub(crate) module_id: &'a str,
     pub(crate) emits_javascript: bool,
@@ -54,6 +55,7 @@ impl<'a> HvigorModuleSourceOutputPath<'a> {
     pub(crate) fn new(
         output_dir: &'a Path,
         ownership: &'a HvigorChunkSource,
+        cache_module_name_override: Option<&'a str>,
         source_file: &'a str,
         module_id: &'a str,
         emits_javascript: bool,
@@ -61,6 +63,7 @@ impl<'a> HvigorModuleSourceOutputPath<'a> {
         Self {
             output_dir,
             ownership,
+            cache_module_name_override,
             source_file,
             module_id,
             emits_javascript,
@@ -69,7 +72,11 @@ impl<'a> HvigorModuleSourceOutputPath<'a> {
 
     pub(crate) fn path(&self) -> Result<PathBuf, ArkdownError> {
         Ok(self.output_dir.join(match &self.ownership.kind {
-            HvigorChunkSourceKind::Source => Path::new(&self.ownership.cache_module_name).join(
+            HvigorChunkSourceKind::Source => Path::new(
+                self.cache_module_name_override
+                    .unwrap_or(&self.ownership.cache_module_name),
+            )
+            .join(
                 HvigorModuleSourceFileAttribution::project_source_file_for(
                     &self.ownership.cache_source_file,
                 )

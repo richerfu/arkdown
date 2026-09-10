@@ -1185,7 +1185,13 @@ impl<'a> Visit<'a> for ReservedNameAstCollector {
     }
 
     fn visit_ts_index_signature_name(&mut self, parameter: &TSIndexSignatureName<'a>) {
-        if self.collect_all_names {
+        // `ApiExtractor.visitChildNode` treats an index-signature parameter as
+        // an SDK child node with a `name`, so it belongs to the system-API
+        // property/local whitelist unless `strip-system-api-args` is active.
+        // OXC exposes this node separately from `FormalParameter`; keep the
+        // source-owned parameter semantics here instead of depending on the
+        // declaration-wide `collect_all_names` mode.
+        if self.collect_all_names || (self.is_sdk_source() && !self.strip_sdk_argument_names) {
             self.insert_property_name(parameter.name.as_str());
         }
         walk::walk_ts_index_signature_name(self, parameter);

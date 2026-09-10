@@ -149,6 +149,7 @@ pub struct BundleMockDependency {
 pub struct BundleModuleMetaInfoFile {
     pub file_path: PathBuf,
     pub ohm_url: String,
+    pub package_name: String,
 }
 
 /// Package metadata required by hvigor's `SourceMapGenerator`.

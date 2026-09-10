@@ -288,6 +288,62 @@ impl IntermediateArtifactWriter {
         self.write_json_minified(module_json, &value)
     }
 
+    /// Restore the form-extension entries removed from the restool input.
+    ///
+    /// Current Hvigor `CompileResource.recoverFormExtensionModule` reads the
+    /// original HAP profile after restool returns and appends every
+    /// `extensionAbilities` item whose type is `form` to restool's generated
+    /// `module.json`. `ProcessProfile` deliberately removed those entries so
+    /// restool would not try to resolve the paired HSP's form resources.
+    pub fn recover_form_extension_abilities(
+        &self,
+        module_json: &Path,
+        source_module_json: &Path,
+    ) -> Result<()> {
+        let source_content = fs_err::read_to_string(source_module_json)?;
+        let source_value: serde_json::Value = serde_json::from_str(&source_content)?;
+        let Some(source_module) = source_value
+            .get("module")
+            .and_then(serde_json::Value::as_object)
+        else {
+            return Ok(());
+        };
+        if source_module
+            .get("formWidgetModule")
+            .and_then(serde_json::Value::as_str)
+            .is_none()
+        {
+            return Ok(());
+        }
+        let form_abilities = source_module
+            .get("extensionAbilities")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|ability| {
+                ability.get("type").and_then(serde_json::Value::as_str) == Some("form")
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if form_abilities.is_empty() {
+            return Ok(());
+        }
+
+        let content = fs_err::read_to_string(module_json)?;
+        let mut value: serde_json::Value = serde_json::from_str(&content)?;
+        let module = value
+            .get_mut("module")
+            .and_then(serde_json::Value::as_object_mut)
+            .context("resource module.json must contain a module object")?;
+        let extension_abilities = module
+            .entry("extensionAbilities".to_string())
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+            .as_array_mut()
+            .context("resource module.json extensionAbilities must be an array")?;
+        extension_abilities.extend(form_abilities);
+        self.write_json_minified(module_json, &value)
+    }
+
     fn insight_intent_profile_has_entries(&self, path: &Path) -> bool {
         let Ok(content) = fs_err::read_to_string(path) else {
             return false;
@@ -471,15 +527,15 @@ impl IntermediateArtifactWriter {
         current_extension_ability_count: usize,
         form_widget_abilities: &[serde_json::Value],
     ) -> Result<()> {
-        let process_value = self.profile_without_resource_ids(final_value.clone());
-        self.write_profile_json(&module_layout.process_profile_module_json(), &process_value)?;
+        let mut process_value = self.profile_without_resource_ids(final_value.clone());
 
-        // Restool's ark_module.json describes the current resource module. Hvigor
-        // appends dependency HAR extension abilities in ProcessProfile, after the
-        // resource compiler has produced ark_module.json, so those dependency
-        // entries must not leak back into the resource-stage artifact. Form
-        // widget modules additionally carry the form extension module's merged
-        // `type: "form"` abilities (`getTargetModuleOptObj`).
+        // Current ProcessProfile.doTaskAction writes ark_module.json before
+        // processFormExtensionAbilities. Therefore a HAP with formWidgetModule
+        // keeps its form extension ability in ark_module.json, while the
+        // process-profile restool input removes only `type: "form"` entries.
+        // Dependency HAR abilities are also appended after ark_module.json and
+        // must not leak back into that resource-stage artifact. Form widget HSPs
+        // additionally carry the HAP's reduced form abilities.
         let mut resource_ark_value = process_value.clone();
         self.retain_current_extension_abilities(
             &mut resource_ark_value,
@@ -500,7 +556,39 @@ impl IntermediateArtifactWriter {
         }
         self.write_json_minified(&module_layout.res_ark_module_json(), &resource_ark_value)?;
 
+        self.process_form_extension_abilities(&mut process_value);
+        self.write_profile_json(&module_layout.process_profile_module_json(), &process_value)?;
+
         Ok(())
+    }
+
+    /// `ProcessProfile.processFormExtensionAbilities`: a HAP declaring
+    /// `formWidgetModule` delegates form resources to its paired HSP, so the
+    /// process-profile input drops only form extension abilities. The earlier
+    /// ark-module snapshot and the final packaged profile retain them.
+    fn process_form_extension_abilities(&self, value: &mut serde_json::Value) {
+        let Some(module) = value
+            .get_mut("module")
+            .and_then(serde_json::Value::as_object_mut)
+        else {
+            return;
+        };
+        if module
+            .get("formWidgetModule")
+            .and_then(serde_json::Value::as_str)
+            .is_none()
+        {
+            return;
+        }
+        let Some(extension_abilities) = module
+            .get_mut("extensionAbilities")
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            return;
+        };
+        extension_abilities.retain(|ability| {
+            ability.get("type").and_then(serde_json::Value::as_str) != Some("form")
+        });
     }
 
     fn retain_current_extension_abilities(

@@ -335,6 +335,7 @@ impl BuildCoordinator {
                 manifest,
                 loader_json,
                 &module_context.deps,
+                module_context.module.module_json.as_ref(),
             );
             // Static `BaseMode` builds one dependency graph from the complete
             // `compileFiles` inventory and links it into `modules_static.abc`.
@@ -589,6 +590,7 @@ impl BuildCoordinator {
                 loader_json_path: &loader_json_out,
                 output_dir: PathBuf::from(&loader_json.ace_module_build),
                 config: module_config.as_ref(),
+                module_name: &module.name,
                 module_target_name,
                 custom_config: Some(custom_cfg),
                 module_analyzer,
@@ -616,7 +618,7 @@ impl BuildCoordinator {
             };
             if ohos_test_templates_after_migration {
                 // The ohosTest module's ets root is the generated template tree
-                // (`build/<product>/intermediates/src/ohosTest/ets`); entry page
+                // (`.test/<product>/intermediates/src/ohosTest/ets`); entry page
                 // paths resolve against it (`testability/pages/Index`).
                 let template_ets = ohos_test_template_layout.ohos_test_ets_root();
                 if template_ets.is_dir() {

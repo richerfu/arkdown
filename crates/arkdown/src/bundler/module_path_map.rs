@@ -61,7 +61,13 @@ pub(crate) struct HvigorModulePathMap {
     pub(crate) current_module_name: String,
     pub(crate) current_module_root: PathBuf,
     pub(crate) roots: Vec<HvigorModuleRoot>,
-    pub(crate) module_meta_info_ohm_urls: FxHashMap<PathBuf, String>,
+    pub(crate) module_meta_info: FxHashMap<PathBuf, ModuleMetaInfoOverride>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ModuleMetaInfoOverride {
+    pub(crate) ohm_url: String,
+    pub(crate) package_name: String,
 }
 
 impl HvigorModulePathMap {
@@ -150,25 +156,36 @@ impl HvigorModulePathMap {
         &mut self,
         files: &[crate::plan::BundleModuleMetaInfoFile],
     ) {
-        self.module_meta_info_ohm_urls.reserve(files.len());
+        self.module_meta_info.reserve(files.len());
         for file in files {
-            self.module_meta_info_ohm_urls
-                .insert(Self::canonical_root(&file.file_path), file.ohm_url.clone());
+            self.module_meta_info.insert(
+                Self::canonical_root(&file.file_path),
+                ModuleMetaInfoOverride {
+                    ohm_url: file.ohm_url.clone(),
+                    package_name: file.package_name.clone(),
+                },
+            );
         }
     }
 
     pub(crate) fn module_meta_info_ohm_url(&self, module_id: &str) -> Option<&str> {
-        self.module_meta_info_ohm_urls
+        self.module_meta_info
             .get(&Self::canonical_root(Path::new(module_id)))
-            .map(String::as_str)
+            .map(|info| info.ohm_url.as_str())
+    }
+
+    pub(crate) fn module_meta_info_package_name(&self, module_id: &str) -> Option<&str> {
+        self.module_meta_info
+            .get(&Self::canonical_root(Path::new(module_id)))
+            .map(|info| info.package_name.as_str())
     }
 
     pub(crate) fn rebuild_roots(&mut self, roots: Vec<HvigorModuleRoot>) {
         let current_module_name = self.current_module_name.clone();
         let current_module_root = self.current_module_root.clone();
-        let module_meta_info_ohm_urls = std::mem::take(&mut self.module_meta_info_ohm_urls);
+        let module_meta_info = std::mem::take(&mut self.module_meta_info);
         let mut rebuilt = Self::from_roots(current_module_name, current_module_root, roots);
-        rebuilt.module_meta_info_ohm_urls = module_meta_info_ohm_urls;
+        rebuilt.module_meta_info = module_meta_info;
         *self = rebuilt;
     }
 
@@ -217,7 +234,7 @@ impl HvigorModulePathMap {
             current_module_name,
             current_module_root,
             roots: merged_roots,
-            module_meta_info_ohm_urls: FxHashMap::default(),
+            module_meta_info: FxHashMap::default(),
         }
     }
 

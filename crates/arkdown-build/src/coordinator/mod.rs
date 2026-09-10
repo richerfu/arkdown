@@ -423,6 +423,7 @@ struct WidgetCompileArktsPass<'a> {
     manifest: &'a HapManifest,
     loader_json: &'a LoaderJson,
     dependencies: &'a arkdown_session::DependencyGraphSnapshot,
+    is_form_extension_module: bool,
 }
 
 impl<'a> WidgetCompileArktsPass<'a> {
@@ -432,6 +433,7 @@ impl<'a> WidgetCompileArktsPass<'a> {
         manifest: &'a HapManifest,
         loader_json: &'a LoaderJson,
         dependencies: &'a arkdown_session::DependencyGraphSnapshot,
+        source_module_json: Option<&arkdown_core::ModuleJson5>,
     ) -> Self {
         Self {
             config,
@@ -439,14 +441,22 @@ impl<'a> WidgetCompileArktsPass<'a> {
             manifest,
             loader_json,
             dependencies,
+            is_form_extension_module: matches!(
+                module.module_type,
+                OhosModuleType::Entry | OhosModuleType::Feature
+            ) && source_module_json
+                .is_some_and(|module_json| module_json.module.form_widget_module.is_some()),
         }
     }
 
     fn plan(&self) -> Result<Option<WidgetCompileArktsPlan>> {
-        // hvigor's widget compile pass (`needSubmitArkTsWidget`) runs on the
-        // form widget module itself — an HSP whose `module.json5` declares
-        // `formExtensionModule` (`isFormWidgetModule`), in addition to the HAP
-        // form extension module's own form-ability sources.
+        // `TargetTaskService.getFormJsonArr` returns no form profiles for a HAP
+        // declaring `formWidgetModule`; its paired HSP owns the widget pass.
+        // Ordinary modules with local ArkTS forms and HSPs declaring
+        // `formExtensionModule` still compile those forms into `widgets.abc`.
+        if self.is_form_extension_module {
+            return Ok(None);
+        }
         let module_layout = ModuleBuildLayout::new(&self.module.src_path);
         let form_sources = FormProfileProcessor::new()
             .collect_module_form_sources(ModuleFormProfileInput {
