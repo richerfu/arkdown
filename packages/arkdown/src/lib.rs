@@ -2319,6 +2319,8 @@ pub struct BuildConfig {
   pub is_crossplatform: Option<bool>,
   /// Match `ignoreCrossplatformCheck`: emit 11706007 as a warning instead of an error.
   pub ignore_crossplatform_check: Option<bool>,
+  /// Skip build diagnostics while retaining checker facts required by source transforms.
+  pub skip_checker: Option<bool>,
   pub cache: Option<bool>,
   /// Node executable of the JavaScript process that owns this build. The JS
   /// service wrapper injects `process.execPath`; SDK subprocesses must not
@@ -2440,6 +2442,7 @@ pub fn build<'a>(
     cache_file,
     is_crossplatform,
     ignore_crossplatform_check,
+    skip_checker,
     cache,
     node_executable,
     compile_plugin_path: _,
@@ -2495,6 +2498,7 @@ pub fn build<'a>(
     cache_file,
     is_crossplatform: is_crossplatform.unwrap_or(false),
     ignore_crossplatform_check: ignore_crossplatform_check.unwrap_or(false),
+    skip_checker: skip_checker.unwrap_or(false),
     cache: cache.unwrap_or(true),
     node_executable: node_executable.map(std::path::PathBuf::from),
     typescript_executable,
@@ -2565,6 +2569,7 @@ struct PackageBuildArgs {
   cache_file: Option<String>,
   is_crossplatform: bool,
   ignore_crossplatform_check: bool,
+  skip_checker: bool,
   cache: bool,
   node_executable: Option<std::path::PathBuf>,
   typescript_executable: Option<std::path::PathBuf>,
@@ -2617,6 +2622,7 @@ async fn run_build(
     abc_backend: AbcBackendChoice::Sdk,
     is_crossplatform: package_args.is_crossplatform,
     ignore_crossplatform_check: package_args.ignore_crossplatform_check,
+    skip_checker: package_args.skip_checker,
     cache: package_args.cache,
     // Hot-rebuild flags are always false when invoked via the Node.js API
     // — only the watch stage sets them for incremental rebuilds.

@@ -367,6 +367,17 @@ impl NativeDiagnostic {
     }
 }
 
+/// One source-ordered build diagnostic batch. The native compiler reuses the
+/// normal checker result produced for ArkTS strict-diagnostic comparison,
+/// matching the upstream BuilderProgram cache lifecycle.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct NativeArktsBuildDiagnostics {
+    pub linter_diagnostics: Vec<NativeDiagnostic>,
+    pub syntactic_diagnostics: Vec<NativeDiagnostic>,
+    pub semantic_diagnostics: Vec<NativeDiagnostic>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct NativeProgram {
     snapshot: u64,
@@ -806,8 +817,17 @@ impl NativeTypeSession {
         )
     }
 
-    /// Mirrors ets_checker.ts::processBuildHap: syntax then semantic diagnostics.
-    /// No per-root filtering: diagnostics in imported implementation files matter.
+    /// Mirrors ArkTSLinter_1_1/TSDiagnostics.ts::doAllGetDiagnostics followed
+    /// by ets_checker.ts::processBuildHap. The backend owns reuse of the normal
+    /// checker result across both source-defined phases.
+    pub fn arkts_build_diagnostics(
+        &mut self,
+        program: &NativeProgram,
+    ) -> Result<NativeArktsBuildDiagnostics, NativeCheckError> {
+        self.request("getArkTSBuildDiagnostics", serde_json::to_value(program)?)
+    }
+
+    /// General checker API used outside the ets2bundle build lifecycle.
     pub fn diagnostics(
         &mut self,
         program: &NativeProgram,

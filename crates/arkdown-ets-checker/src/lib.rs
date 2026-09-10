@@ -6,7 +6,7 @@ mod native;
 pub use native::{
     DiagnosticPosition, NativeAnnotationConstant, NativeAnnotationInfo, NativeAnnotationProperty,
     NativeAnnotationTransformImport, NativeAnnotationTransformInfo, NativeAnnotationTransformNode,
-    NativeArktsBuilderReceiverTypeFacts, NativeArktsPropertyTypeFacts,
+    NativeArktsBuildDiagnostics, NativeArktsBuilderReceiverTypeFacts, NativeArktsPropertyTypeFacts,
     NativeArktsTransformTypeFacts, NativeArktsTransformTypeQuery, NativeCheckError,
     NativeCompilerOptions, NativeDiagnostic, NativeOhSdkCheckPlugin, NativeOhSdkClassCheckPlugin,
     NativeOhSdkConfig, NativeOhSdkPluginHost, NativeOhSdkPluginRequest, NativeOhSdkPluginResponse,

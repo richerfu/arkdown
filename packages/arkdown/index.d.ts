@@ -117,6 +117,8 @@ export interface BuildConfig {
   isCrossplatform?: boolean
   /** Match `ignoreCrossplatformCheck`: emit 11706007 as a warning instead of an error. */
   ignoreCrossplatformCheck?: boolean
+  /** Skip build diagnostics while retaining checker facts required by source transforms. */
+  skipChecker?: boolean
   cache?: boolean
   /**
    * Node executable of the JavaScript process that owns this build. The JS
