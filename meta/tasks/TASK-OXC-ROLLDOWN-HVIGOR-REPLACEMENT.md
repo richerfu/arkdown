@@ -144,12 +144,21 @@ hash；macOS 平台包 dry-run 验证 `tsc` 和元数据会实际进入 npm tarb
 
 compiler roots 与 ets2bundle 保持同一所有权：Rust 从 loader 的
 `entryObj + ohExports` 收集 roots，TSGO 只展开和检查其可达 source graph；不得恢复
-全模块目录扫描。TSGO 的 OH 4.9 generic inference、common-supertype、signature
+全模块目录扫描。TSGO Program path 与 Rolldown snapshot path 是两种合法身份：前者
+用于 checker RPC，后者用于 OXC inventory 和 facts consumer。`SourceStore` 在启动时
+按照 `ets_checker.ts::getCanonicalFileName`/TSGO `tspath.GetCanonicalFileName` 一次性
+索引 symlink alias 和大小写规范路径；不得把它改成逐文件 `realpath`、字符串猜测或
+额外 compiler roots。TSGO 的 OH 4.9 generic inference、common-supertype、signature
 relation 与 subtype-union allocation-order 语义已经补齐，Rust/OXC 只消费查询事实。
 
 Arkdown 不调用 TSGO emit/transpile/printer/codegen；checker source graph 不替代
 Rust resolver/Rolldown graph，返回的 annotation/component 信息也只能作为
 Rust/OXC lowering 的 immutable semantic facts。JS 不参与上述代码处理。
+
+当 `shouldEmitJs === false` 时，namespace 等 TypeScript module source 必须像上游
+`rollup-plugin-ets-typescript.ts::transform` 一样原样进入 CompileArkTS。Rolldown 只负责
+扫描该源码的模块图，其未被产物消费的 JS 投影产生的 `TOLERATED_TRANSFORM` 不得暴露为
+构建 warning；其他可对应到上游 Rollup `onRollupWarn` 的诊断仍须保留。
 
 ESMODULE 的 `processImportModule` 不执行 legacy `validateModuleName`，OXC checker
 不得为 resolved ESMODULE import 添加内置组件同名错误。UI transform 诊断按
@@ -157,7 +166,12 @@ ESMODULE 的 `processImportModule` 不执行 legacy `validateModuleName`，OXC c
 各自源码定义的 `oh_modules` 筛选规则，不能把该规则扩大到 OXC transform 诊断。
 ObjectLink 严格消费 TSGO resolved type identity，并按
 `findNonNullType/checkObjectLinkType/checkTypes` 处理 nullable union、basic、
-ObservedV2 和 Function。
+ObservedV2 和 Function。跨文件 Builder 的 import 解析按
+`processImportModule/getDefinedNode/getIntegrationNodeInfo` 处理 named/default/namespace
+alias 与 re-export；namespace 调用必须保留限定 callee，SDK namespace component 必须
+携带对应 declaration metadata，不得要求业务源码改变合法 export，也不得用 JS 兜底。
+`FlowItem` 的 WaterFlow 父节点限制
+是上游 `checkNonspecificParents` 明确定义的源码诊断，不得作为 Arkdown 缺口放宽。
 
 ### ArkGuard
 

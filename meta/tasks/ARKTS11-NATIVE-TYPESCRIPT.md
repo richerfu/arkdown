@@ -35,6 +35,7 @@ OXC corpus 只验证 OH 已定义的输入，不用于发明 checker 规则。�
 | 工程 compiler options | ets2bundle `ets_checker.ts::setCompilerOptions` | target/lib/types/paths、ESMODULE→ES2020 module、Stage→`moduleJson` source model、JS HAR、flow depth、SDK/runtime/bundle/device、strict/Sendable/linter 和 diagnostic switches 从 Rust typed config 传入 |
 | OH resolver | OH `moduleNameResolver.ts`、ets2bundle resolver | `oh_modules`/`node_modules`、oh-package exports、kit/SDK fallback、external API、`.js → .d.ets`、`.so`、TS↔ETS/Sendable 已在 compiler owner 实现 |
 | 工程 root/source graph | ets2bundle `loadEntryObj/getEntryObj/rootFileNamesCollect` | Rust 从 loader 的 `entryObj + ohExports` 收集入口，TSGO 返回其可达 source graph；build/check 均不递归扫描整个模块目录作为 compiler roots |
+| compiler/snapshot 文件身份 | ets2bundle `ets_checker.ts::getCanonicalFileName`、TSGO `tspath.GetCanonicalFileName` | checker 请求始终使用 Program 返回的路径；`SourceStore` 在启动时一次性把 symlink alias 和 TypeScript 大小写规范路径映射回 Rolldown 实际快照路径，查询区间取自快照源码，返回 facts 也只按快照身份发布；热路径不访问文件系统 |
 | SDK callbacks | OH checker + ets2bundle `api_check_utils.ts`、`collectExternalApiCheckPlugin/collectExternalApiChecker` | Available/SuppressWarnings/since/syscap/permission/form/crossplatform/atomic-service/FA/Stage/apiAvailable/throws 已实现；Rust options 提供 closure inputs 和完整 compile `projectConfig`；TSGO 保留选择、比较和诊断 owner并经双向 API 批量回调，Rust 只路由，JS CLI 进程执行 SDK CommonJS function/class ABI 与 build-scoped 实例缓存；每次源码调用均执行，不缓存插件结果；strict checker clone 保留同一 callback executor |
 | SDK dependency collection | `checkCrossplatformValue/getApiPathFromNode` | checker 在真实 declaration-use 回调记录 `(apiModule,function)`；Rust 按 SDK `depsModuleConfig` 合并 module/component，不再伪造类型推断 |
 | ArkTS linter | `ArkTSLinter_1_1/LinterRunner.ts` | 独立 strict checker、ETS/TS 规则、strictCheckerOnly、OH module/path、Sendable/mix-compile 与筛选已实现；OH runner 定义的 1004 个 source case 全部执行并精确比对，无跳过 |
@@ -100,8 +101,11 @@ workspace、Clippy、rustfmt 和 diff check 均通过；清除开发覆盖环境
 能从本地 macOS 平台包发现 TSGO 并完成 `check`，npm dry-run 确认 `tsc`、clean
 revision 元数据和许可证进入平台 tarball。
 
-真实 12333-source 业务工程的 checker 调用从路径分类修复前超过 735 秒且未完成，
-下降到 214.21 秒完成；缓存只覆盖 Program 生命周期内不可变的 project/SDK 文件
-分类。SDK CommonJS 请求以 transport batch 合并，但仍按请求顺序逐次执行全部插件
-函数和 class `check`。Rust 为每个 TSGO 子进程分配独立 host scope，避免多模块并发
-时进程内 `sessionId` 重复污染 JS source/projectConfig intern 表。
+真实业务工程的带 trace 无缓存构建中，Program 含 13205 个 source，1739 个 OXC 文件
+产生 transform type queries；linter、semantic diagnostics 和 type facts 分别耗时
+136.266 秒、64.767 秒和 5.329 秒。最终 release 无缓存复验耗时 336.94 秒，随后缓存
+构建耗时 254.67 秒；两次均通过 JS CLI 生成同一输出位置的完整签名 HAP。
+缓存只覆盖 Program 生命周期内不可变的 project/SDK 文件分类。SDK CommonJS 请求以
+transport batch 合并，但仍按请求顺序逐次执行全部插件函数和 class `check`。Rust 为
+每个 TSGO 子进程分配独立 host scope，避免多模块并发时进程内 `sessionId` 重复污染
+JS source/projectConfig intern 表。

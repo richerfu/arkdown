@@ -23,7 +23,7 @@ checker 或插件结论。
 | 项目/模块/target 计划 | OHOS task 组装 loader、resource、compile、package、sign DAG | `arkdown-build` 与领域 crate | Rust 直接拥有，不保留 task facade |
 | 依赖解析 | loader config、OH resolver、package graph | `arkdown-session`、`arkdown-resolver`、TSGO OH resolver | 已接入已物化依赖；构建不隐式安装 |
 | ArkTS 1.1 checker | OH TypeScript parser/binder/checker/linter；ets2bundle `ets_checker.ts` | packaged TSGO + `ProjectSemanticChecker` | 源码定义能力差异为 0；固定 `noEmit`，ESMODULE 使用 ES2020 module，Stage/FA 使用源码的 `moduleJson` 分界，normal/strict checker 共享 callback executor；TSGO 经双向 API 回调 JS CLI 进程内的 SDK plugin host，自身不启动 Node；SDK class callback 接收同一份完整 compile `projectConfig`，旧 Rust subset checker 已删除 |
-| checker-driven transform | `ohApi.ts`、component transforms、`checkCrossplatformValue` | TSGO batched facts + OXC consumers | annotation、builder、enum、SDK dependency 已接通；Rust 不重做类型推断 |
+| checker-driven transform | `ohApi.ts`、component transforms、`checkCrossplatformValue`、`processImportModule` | TSGO batched facts + OXC consumers | annotation、builder、enum、SDK dependency 已接通；Builder 与 SDK component 的 named/default/namespace import 按 aliased declaration 解析；Program 路径经 SourceStore 映射回 Rolldown snapshot identity；Rust 不重做类型推断 |
 | compile-plugin | arkts-compose `getPlugins/doWrapper/getCompilePluginContext` | JS function ABI + N-API + Rolldown adapter | hook、顺序、share、cache、watch、TS/JS module loading 已接通 |
 | plugin `this.parse` | Rollup 4.23.0 `ParseAst` | OXC ESTree bridge | 已按源码只消费 `allowReturnOutsideFunction`；未知 Acorn 字段忽略；错误为 `RollupError/PARSE_ERROR` |
 | SDK/native tools | ets2bundle command builders、SDK binaries | typed Rust plans | restool/ABC/linker/signer/PandaGuard 等直接调用实际工具；不是 JS 兼容层 |
@@ -81,13 +81,41 @@ reduction 顺序，真实业务 `Map<string, ICanvasDraw<any>>` 构造不再被�
 穷举。ObjectLink 的 nullable/basic/ObservedV2/Function 身份由 TSGO 返回，Rust
 不再从类型语法猜测。
 
+真实业务工程暴露的 `@ObjectLink` 失败不是 checker 规则差异，而是文件身份断链：
+macOS 大小写不敏感文件系统上，TSGO Program 对目录入口返回 `index.ets`，Rolldown
+启动快照保留实际 `Index.ets`，导致 OXC 查询没有送入 checker。当前实现按照
+`ets_checker.ts::getCanonicalFileName` 与 TSGO `tspath.GetCanonicalFileName`，在
+`SourceStore` 启动阶段建立碰撞安全的 canonical-file 索引；RPC 使用 compiler path，
+OXC source range 与最终 facts 使用 snapshot path。该修复同时覆盖 ObjectLink、
+annotation、builder receiver、enum member 与 SDK dependency 等所有类型消费者。
+
+同轮源码审计确认：`processImportModule/getDefinedNode` 对 default import 使用
+`getAliasedSymbol` 取得被装饰的 Builder 声明，对 namespace import 则由
+`getIntegrationNodeInfo/processImportNode` 遍历导出并把 `usedPropName` 注册到
+`CUSTOM_BUILDER_METHOD`，`transferBuilderCall` 保留原始限定 callee。OXC 的
+module-export closure 和 SDK declaration metadata 现完整覆盖 named/default/namespace
+三种 Builder import；namespace SDK component 同样携带声明属性元数据，未使用 JS
+兜底。跨文件 default/namespace Builder 已由回归测试验证，default 路径同时经过真实
+业务构建验证。`FlowItem` 则由
+`process_component_build.ts::checkNonspecificParents` 和 `flow_item.json` 明确定义为
+只能位于 `WaterFlow` 内；上游会报 10905201，因此这属于业务源码错误，不是 Arkdown
+兼容缺口，也不得在 transform 中放宽。
+
 SDK function/class 回调现在由 TSGO checker workers 聚合成有序 transport batch，
 Rust typed boundary 转发给 JS runtime；batch 不去重、不缓存结果，每个源码调用仍按序
 执行。Source/projectConfig 只做 wire interning，并由 Rust 为每个 TSGO 进程分配唯一
-host scope，避免多模块并行构建中进程本地 session id 重复。真实 12333-source 工程
-在不可变 SDK/project 文件分类缓存后以 214.21 秒完成，旧路径超过 735 秒仍未完成；
-剩余耗时采样集中于正常类型关系、表达式和签名检查，不再是路径归一化或 JS transport
-阻塞。
+host scope，避免多模块并行构建中进程本地 session id 重复。真实工程带 trace 的无缓存
+构建包含 13205 个 Program source、1739 个 transform-query 文件：
+linter 136.266 秒、semantic diagnostics 64.767 秒、type facts 5.329 秒。最终 release
+无缓存复验为 336.94 秒，随后缓存构建为 254.67 秒；两次均成功生成完整签名 HAP。
+剩余耗时集中于正常 checker 与后续构建阶段，不再是路径归一化或 JS transport 阻塞。
+
+相邻审计还确认，未 emit 的 TypeScript namespace 与上游
+`rollup-plugin-ets-typescript.ts::transform` 一样以 AST/打印源码交给 CompileArkTS；
+Rolldown 在仅用于模块图扫描的 JS 投影上会为 namespace 内的 exported `let` 产生
+`TOLERATED_TRANSFORM`。该投影不参与 module-source/ABC 产物，因此 Arkdown 只在 scan
+warning 边界过滤这一 Rolldown 专属诊断，保留实际 TypeScript source 和其他具有上游
+Rollup 对应项的 warning。真实工程最终日志已验证该噪音诊断为 0。
 
 Rolldown 热路径也已按当前插件源码收口：
 `check-duplicate-filenames-plugin.js::load` 的 Map/Set 收集改为分片并发 facts，并在
