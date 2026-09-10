@@ -514,7 +514,17 @@ impl<'a, 'b> ImportedComponentNamesCollector<'a, 'b> {
                         self.update_props.insert(local, info.into());
                     }
                 }
-                ImportDeclarationSpecifier::ImportNamespaceSpecifier(_) => {}
+                ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
+                    let Some(components) = self.options.component_metadata.sdk_components(source)
+                    else {
+                        continue;
+                    };
+                    for (exported, info) in components {
+                        let local = format!("{}.{}", specifier.local.name, exported);
+                        self.names.insert(local.clone());
+                        self.update_props.insert(local, info.into());
+                    }
+                }
             }
         }
     }
@@ -822,20 +832,34 @@ impl<'a> BuilderFunctionNameCollector<'a> {
             let Some(specifiers) = &import.specifiers else {
                 continue;
             };
-            for specifier in specifiers {
-                let ImportDeclarationSpecifier::ImportSpecifier(specifier) = specifier else {
-                    continue;
-                };
-                if specifier.import_kind.is_type() {
-                    continue;
-                }
-                let imported = ComponentModuleExportName::value(&specifier.imported);
-                if self
-                    .options
-                    .component_metadata
-                    .is_sdk_builder_function(import.source.value.as_str(), &imported)
-                {
-                    names.insert(specifier.local.name.to_string());
+            if let Some(sdk_builders) = self
+                .options
+                .component_metadata
+                .sdk_builder_function_names(import.source.value.as_str())
+            {
+                for specifier in specifiers {
+                    match specifier {
+                        ImportDeclarationSpecifier::ImportSpecifier(specifier)
+                            if !specifier.import_kind.is_type() =>
+                        {
+                            let imported = ComponentModuleExportName::value(&specifier.imported);
+                            if sdk_builders.contains(&imported) {
+                                names.insert(specifier.local.name.to_string());
+                            }
+                        }
+                        ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier)
+                            if sdk_builders.contains(ComponentModuleExportName::DEFAULT) =>
+                        {
+                            names.insert(specifier.local.name.to_string());
+                        }
+                        ImportDeclarationSpecifier::ImportNamespaceSpecifier(_) => {
+                            // ets2bundle `getIntegrationNodeInfo/processImportNode`
+                            // records the exported property name (not the
+                            // namespace-qualified path) in CUSTOM_BUILDER_METHOD.
+                            names.extend(sdk_builders.iter().cloned());
+                        }
+                        _ => {}
+                    }
                 }
             }
             let Some(target) = resolver.resolve(import.source.value.as_str()) else {
@@ -849,15 +873,31 @@ impl<'a> BuilderFunctionNameCollector<'a> {
                 continue;
             }
             for specifier in specifiers {
-                let ImportDeclarationSpecifier::ImportSpecifier(specifier) = specifier else {
-                    continue;
-                };
-                if specifier.import_kind.is_type() {
-                    continue;
-                }
-                let imported = ComponentModuleExportName::value(&specifier.imported);
-                if target_builders.contains(&imported) {
-                    names.insert(specifier.local.name.to_string());
+                match specifier {
+                    ImportDeclarationSpecifier::ImportSpecifier(specifier)
+                        if !specifier.import_kind.is_type() =>
+                    {
+                        let imported = ComponentModuleExportName::value(&specifier.imported);
+                        if target_builders.contains(&imported) {
+                            names.insert(specifier.local.name.to_string());
+                        }
+                    }
+                    ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier)
+                        if target_builders.contains(ComponentModuleExportName::DEFAULT) =>
+                    {
+                        // ets2bundle `processImportModule/getDefinedNode` asks
+                        // TypeScript for the aliased declaration of a default
+                        // import and records the local name when it is a
+                        // decorated Builder function.
+                        names.insert(specifier.local.name.to_string());
+                    }
+                    ImportDeclarationSpecifier::ImportNamespaceSpecifier(_) => {
+                        // `processImportNode` stores `usedPropName` for a
+                        // namespace-imported Builder and transferBuilderCall
+                        // retains the original qualified callee.
+                        names.extend(target_builders.iter().cloned());
+                    }
+                    _ => {}
                 }
             }
         }

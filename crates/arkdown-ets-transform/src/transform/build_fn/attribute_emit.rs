@@ -598,6 +598,17 @@ impl ArkuiCallName {
         builder_methods.contains(name.as_str()).then_some(name)
     }
 
+    pub(super) fn builder_member(
+        expression: &Expression<'_>,
+        builder_methods: &FxHashSet<String>,
+    ) -> Option<String> {
+        let Expression::StaticMemberExpression(member) = expression else {
+            return None;
+        };
+        let name = member.property.name.to_string();
+        builder_methods.contains(name.as_str()).then_some(name)
+    }
+
     pub(super) fn this_member(expression: &Expression<'_>) -> Option<String> {
         let Expression::StaticMemberExpression(member) = expression else {
             return None;
@@ -1027,10 +1038,8 @@ impl<'a, 'ctx> AttributeBindingArgumentEmitter<'a, 'ctx> {
         expression: &Expression<'_>,
         allocator: &'b Allocator,
     ) -> Option<Expression<'b>> {
-        if let Some(name) = ArkuiCallName::this_member(expression) {
-            if self.builder_methods.contains(name.as_str()) {
-                return Some(expression.clone_in(allocator));
-            }
+        if ArkuiCallName::builder_member(expression, self.builder_methods).is_some() {
+            return Some(expression.clone_in(allocator));
         }
         let Expression::Identifier(identifier) = expression else {
             return None;
@@ -1045,10 +1054,8 @@ impl<'a, 'ctx> AttributeBindingArgumentEmitter<'a, 'ctx> {
         call: &CallExpression<'_>,
         allocator: &'b Allocator,
     ) -> Option<(Expression<'b>, String)> {
-        if let Some(name) = ArkuiCallName::this_member(&call.callee) {
-            if self.builder_methods.contains(name.as_str()) {
-                return Some((call.callee.clone_in(allocator), name));
-            }
+        if let Some(name) = ArkuiCallName::builder_member(&call.callee, self.builder_methods) {
+            return Some((call.callee.clone_in(allocator), name));
         }
         let Expression::Identifier(identifier) = &call.callee else {
             return None;

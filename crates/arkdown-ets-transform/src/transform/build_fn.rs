@@ -1039,22 +1039,22 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         // imported component and a local @Builder method share a name:
         // unqualified `Name()` is the component, while `this.Name()` is the
         // builder method.
-        if !is_namespace_component
-            && self.plan.builder_methods.contains(&name)
-            && !self.plan.custom_components.contains(&name)
+        if self.plan.builder_methods.contains(&name)
+            && !self.plan.custom_components.contains(&component_path)
         {
             if component.has_children {
                 return Err(BuildLoweringError::UnsupportedChild);
             }
-            statements.push(
-                BuilderMethodCallEmitter::new(
-                    BuilderMethodReceiver::Direct,
-                    &name,
-                    &component.arguments,
-                    context,
-                )
-                .statement(&AstBuilder::new(allocator), allocator),
+            let mut emitter = BuilderMethodCallEmitter::new(
+                BuilderMethodReceiver::Direct,
+                &name,
+                &component.arguments,
+                context,
             );
+            if is_namespace_component {
+                emitter = emitter.with_target(&component.callee);
+            }
+            statements.push(emitter.statement(&AstBuilder::new(allocator), allocator));
             return Ok(());
         }
         if self.plan.custom_components.contains(&component_path) || is_namespace_component {
@@ -2166,6 +2166,25 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
             );
             return true;
         }
+        if let Some(name) = ArkuiCallName::builder_member(&call.callee, &self.plan.builder_methods)
+        {
+            let Ok(path) = ArkuiCallName::component_path(&call.callee) else {
+                return false;
+            };
+            if !self.plan.custom_components.contains(&path) {
+                statements.push(
+                    BuilderMethodCallEmitter::new(
+                        BuilderMethodReceiver::Direct,
+                        &name,
+                        &call.arguments,
+                        context,
+                    )
+                    .with_target(&call.callee)
+                    .statement(&AstBuilder::new(allocator), allocator),
+                );
+                return true;
+            }
+        }
         if let Expression::Identifier(identifier) = &call.callee {
             let name = identifier.name.as_str();
             if self.plan.builder_methods.contains(name)
@@ -2196,19 +2215,25 @@ impl<'a, 'plan> BuildBodyAstLowerer<'a, 'plan> {
         if !call.optional {
             return false;
         }
-        let Some(name) =
-            ArkuiCallName::builder_method_member(&call.callee, &self.plan.builder_methods)
+        let Some(name) = ArkuiCallName::builder_member(&call.callee, &self.plan.builder_methods)
         else {
             return false;
         };
+        let receiver = if ArkuiCallName::this_member(&call.callee).is_some() {
+            BuilderMethodReceiver::This
+        } else {
+            let Ok(path) = ArkuiCallName::component_path(&call.callee) else {
+                return false;
+            };
+            if self.plan.custom_components.contains(&path) {
+                return false;
+            }
+            BuilderMethodReceiver::Direct
+        };
         statements.push(
-            BuilderMethodCallEmitter::new(
-                BuilderMethodReceiver::This,
-                &name,
-                &call.arguments,
-                context,
-            )
-            .optional_statement(&AstBuilder::new(allocator), allocator),
+            BuilderMethodCallEmitter::new(receiver, &name, &call.arguments, context)
+                .with_target(&call.callee)
+                .optional_statement(&AstBuilder::new(allocator), allocator),
         );
         true
     }
