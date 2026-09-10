@@ -110,7 +110,7 @@ files、共享状态和逐插件 cache 必须继续通过 typed bridge 持久化
 metadata 由 Rust/OXC/Rolldown 实现，按需消费类型查询结果。
 
 `arkdown-ets-checker` 已接入 TypeScript
-`94e2465a5f92c50eb86a000eb1c4fb95adac3fd0` 原生 API。Rust 管理
+`0780074afa51745e9be859be1ad9400a7f61dbf6` 原生 API。Rust 管理
 工程输入、源码 snapshot、进程和 OXC consumer，Go 负责 parser/binder/type
 checker、OH resolver、SDK callback 选择和独立 ArkTS 1.1 linter；TSGO 不启动
 Node、不嵌入 JS，也不保留旧 isolated-declarations/Unknown checker 兜底。SDK
@@ -136,11 +136,21 @@ source graph、声明诊断和源码定义的诊断筛选已经贯通。三平�
 linter、type-facts 和 source-graph 刷新顺序。源码合同和验证说明见
 [`crates/arkdown-ets-checker/DESIGN.md`](../../crates/arkdown-ets-checker/DESIGN.md)。
 
-当前 clean TSGO revision `94e2465a5f92c50eb86a000eb1c4fb95adac3fd0`
+当前 clean TSGO revision `0780074afa51745e9be859be1ad9400a7f61dbf6`
 已经生成 macOS arm64、Linux x64 GNU 和 Windows x64 MSVC 发行件并通过 archive
 hash；macOS 平台包 dry-run 验证 `tsc` 和元数据会实际进入 npm tarball，且 JS CLI
 在清除开发覆盖环境变量后能从本地平台包完成 `check`。Linux/Windows 只完成交叉
 构建与元数据校验，不把它们记录为目标平台运行验证。
+
+完整 build 通过 TSGO `getArkTSBuildDiagnostics` 保留 OH
+`TSDiagnostics.ts::doAllGetDiagnostics` 的 normal semantic → syntactic → strict
+semantic 顺序，并把 normal 结果直接交给 `processBuildHap`，禁止恢复独立 linter 与
+semantic RPC 的重复检查。构建请求使用 TSGO 依赖图分区编译池并按 source index
+确定性合并；API/LSP 单 checker 诊断池只服务交互式 API。
+
+`build --skip-checker` 是显式 opt-in：跳过 linter、syntactic/semantic/declaration
+diagnostics，但不得跳过 annotation/component transform type facts。独立 `check`
+始终完整检查。该开关不改变默认 Hvigor 对齐路径，也不得演变为 OXC/Rust 伪类型推断。
 
 compiler roots 与 ets2bundle 保持同一所有权：Rust 从 loader 的
 `entryObj + ohExports` 收集 roots，TSGO 只展开和检查其可达 source graph；不得恢复

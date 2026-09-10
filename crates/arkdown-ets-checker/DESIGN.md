@@ -4,7 +4,7 @@
 
 ArkTS 1.1 的解析、绑定、类型推断、语义诊断、OH resolver、SDK JSDoc 回调和
 独立 linter 由适配后的原生 TSGO 提供。当前发行基线是 TypeScript 提交
-`94e2465a5f92c50eb86a000eb1c4fb95adac3fd0`。Arkdown 通过
+`0780074afa51745e9be859be1ad9400a7f61dbf6`。Arkdown 通过
 `--api --async` JSON-RPC 启动它，不调用 tsgolint，也不解析 `tsc` 控制台文字。
 只有 SDK 明确配置 CommonJS `apiCheckPlugin`、`annotationCheckPlugin` 或
 `apiCheckPlugins` 时，TSGO 才通过同一双向 JSON-RPC session 发出类型检查回调。
@@ -83,6 +83,20 @@ snapshot 读取，后端磁盘/内嵌 lib 只处理 snapshot 未拥有的文件�
 - 在 SDK callback 处已经解析 overload/alias/return type 后得到的
   `(apiModule, function)` 依赖事实。
 
+完整 build 使用 TSGO 的 `getArkTSBuildDiagnostics` 一次返回 linter、syntactic 和
+semantic 三个通道。该请求严格保留
+`ArkTSLinter_1_1/TSDiagnostics.ts::doAllGetDiagnostics` 的 normal semantic →
+syntactic → strict semantic 执行顺序，并把 normal semantic 结果直接交给后续
+`ets_checker.ts::processBuildHap` 消费，不能再通过第二个 RPC 重跑普通语义检查。
+API/LSP 的单 checker 诊断池不适用于构建；build 请求使用 TSGO 自带的依赖图分区
+编译池 pool，并按 Program source index 确定性合并诊断。
+
+JS CLI 的 `build --skip-checker` 是用户明确要求的 Arkdown opt-in 构建模式，不改变
+默认的 Hvigor 对齐路径。它跳过 ArkTS linter、syntactic/semantic/declaration
+diagnostics 及其 SDK JS 回调，但仍查询 OXC lowering 必需的 annotation/component
+类型事实；完全停用 TSGO 会改变 `@ObjectLink`、跨文件 `@Builder`、enum 等生成行为，
+因此不属于可接受的“直接打包”。独立 `check` 服务始终执行完整检查。
+
 诊断保留 code/category、UTF-16 范围、行列、message chain 和 related
 information。`DiagnosticResponse.pos/end` 按 TSGO 的有符号 `int` 保留，因此无源码
 compiler diagnostic 的 `UndefinedTextRange(-1, -1)` 不会在协议边界被误判为非法数字。
@@ -115,8 +129,9 @@ Rust/OXC 不再重做 TypeScript symbol 或返回类型推断。
 删除。它们不是兼容层，也不再作为备用路径存在。watch 按 ets2bundle
 `etsChecker` 生命周期由 Rust 长驻每个模块/目标的 session，后续 source snapshot
 通过 old Program 与 modified/created/deleted file changes 更新；新 Program 创建后
-释放旧 snapshot。每轮完整重取 linter、diagnostics、source graph 和 facts，JS 只
-继续承载 SDK CommonJS callback ABI。
+释放旧 snapshot。默认构建每轮完整重取 linter、diagnostics、source graph 和 facts；
+`--skip-checker` 的 watch 重建继续跳过诊断、保留 facts。JS 只继续承载 SDK
+CommonJS callback ABI。
 
 ## 发行与验证
 
