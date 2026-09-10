@@ -59,9 +59,12 @@ pub struct PackInput {
     pub module_name: String,
     /// Effective Hvigor target name used by MakePackInfo archive identity.
     pub target_name: String,
-    /// Path to the SDK frontend's merged ABC. Dynamic ArkTS produces
-    /// `modules.abc`; static ArkTS produces `modules_static.abc`.
-    pub abc_path: PathBuf,
+    /// Path to the SDK frontend's merged ABC when CompileArkTS ran. Dynamic
+    /// ArkTS produces `modules.abc`; static ArkTS produces
+    /// `modules_static.abc`. Hvigor omits `--ets-path` entirely when the
+    /// selected source set has no ETS code model, so source-less HAP/HSP
+    /// modules carry no ABC.
+    pub abc_path: Option<PathBuf>,
     /// Other merged ABCs produced for the same module. ArkTS 1.2 hybrid
     /// modules package dynamic `modules.abc` and static
     /// `modules_static.abc` together, matching Hvigor's `--ets-path` input.

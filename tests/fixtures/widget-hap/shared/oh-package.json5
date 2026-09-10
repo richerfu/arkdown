@@ -1,0 +1,7 @@
+{
+  "modelVersion": "6.0.0",
+  "name": "shared",
+  "version": "1.0.0",
+  "description": "Shared module for project APP parity",
+  "dependencies": {}
+}

@@ -1,0 +1,7 @@
+{
+  "modelVersion": "6.0.0",
+  "name": "feature",
+  "version": "1.0.0",
+  "description": "Feature module for project APP parity",
+  "dependencies": {}
+}

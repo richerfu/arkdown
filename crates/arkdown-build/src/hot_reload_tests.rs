@@ -7,7 +7,7 @@ use serde_json::json;
 
 use super::hot_reload::{
     HotReloadCompileInput, HotReloadCompilePhase, HotReloadProcessor, HotReloadTaskBoundary,
-    HotReloadTaskPlan, ReloadResourceTaskPlan,
+    HotReloadTaskPlan, ReloadImporterStateWriter, ReloadResourceTaskPlan,
 };
 use super::layout::ModuleBuildLayout;
 use super::request::BuildAction;
@@ -43,6 +43,102 @@ fn hot_reload_task_plan_preserves_targetless_build_boundary_and_resource_hook() 
     assert!(action.is_hot_reload());
     assert!(ReloadResourceTaskPlan::requested(action));
     assert!(!ReloadResourceTaskPlan::requested(BuildAction::Assemble));
+}
+
+#[test]
+fn reload_importer_state_records_the_initial_reachable_graph() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let module_root = temp.path().join("entry");
+    let layout = ModuleBuildLayout::for_target_product(&module_root, "free", "default");
+    let source_root = layout.source().ets();
+    let entry = source_root
+        .join("pages/Index.ets")
+        .to_string_lossy()
+        .into_owned();
+    let dependency = source_root
+        .join("model/State.ets")
+        .to_string_lossy()
+        .into_owned();
+    let sdk = "\0hvigor_ignore_sdk/@ohos.hilog.d.ts".to_string();
+    let entries = vec![entry.clone()];
+    let imports = rustc_hash::FxHashMap::from_iter([
+        (entry.clone(), vec![dependency.clone(), sdk.clone()]),
+        (dependency.clone(), Vec::new()),
+    ]);
+    let patch_config = json!({
+      "mode": "hotReload",
+      "oldMapFilePath": temp.path().join("old-map")
+    });
+
+    ReloadImporterStateWriter::new(
+        &layout,
+        &source_root,
+        Some(&patch_config),
+        &entries,
+        &imports,
+    )
+    .write(false)
+    .expect("write initial importer state");
+
+    let state: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(layout.patch_ets_state_json()).expect("read ets state"),
+    )
+    .expect("parse ets state");
+    assert_eq!(
+        state,
+        json!({ "compiledFileList": [entry, dependency, sdk] })
+    );
+}
+
+#[test]
+fn reload_importer_state_filters_new_sources_and_detects_new_imports() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let module_root = temp.path().join("entry");
+    let layout = ModuleBuildLayout::for_target_product(&module_root, "free", "default");
+    let source_root = layout.source().ets();
+    let entry = source_root
+        .join("pages/Index.ets")
+        .to_string_lossy()
+        .into_owned();
+    let new_dependency = source_root
+        .join("model/NewState.ets")
+        .to_string_lossy()
+        .into_owned();
+    write_file(
+        &layout.patch_ets_state_json(),
+        serde_json::to_vec(&json!({ "compiledFileList": [entry] })).expect("ets state"),
+    );
+    let changed_file_list = layout.patch_changed_file_list();
+    write_file(
+        &changed_file_list,
+        serde_json::to_vec(&json!({
+          "modifiedFiles": ["pages/Index.ets", "model/NewState.ets"],
+          "removedFiles": []
+        }))
+        .expect("changed list"),
+    );
+    let imports = rustc_hash::FxHashMap::from_iter([(entry.clone(), vec![new_dependency])]);
+    let patch_config = json!({
+      "mode": "coldReload",
+      "oldMapFilePath": temp.path().join("old-map"),
+      "changedFileList": changed_file_list
+    });
+
+    ReloadImporterStateWriter::new(&layout, &source_root, Some(&patch_config), &[], &imports)
+        .write(true)
+        .expect("write reload importer state");
+
+    let state: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(layout.patch_ets_state_json()).expect("read ets state"),
+    )
+    .expect("parse ets state");
+    assert_eq!(state["compiledFileList"], json!([entry]));
+    assert_eq!(state["isImportNewFile"], json!(true));
+    let changed: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(layout.patch_changed_file_list()).expect("read changed list"),
+    )
+    .expect("parse changed list");
+    assert_eq!(changed["modifiedFiles"], json!(["pages/Index.ets"]));
 }
 
 #[test]

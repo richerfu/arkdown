@@ -66,7 +66,7 @@ use crate::compile_context::{
 use crate::har_dedup::HarDedupProjectPlan;
 use crate::hot_reload::{
     HotReloadCompileInput, HotReloadCompilePhase, HotReloadProcessor, HotReloadTaskPlan,
-    ReloadResourceTaskPlan,
+    ReloadImporterStateWriter, ReloadResourceTaskPlan,
 };
 use crate::intermediates::{
     IntermediateArtifactWriter, PackageMetadataInput, RelatedEntryMetadata, ResourceConfigInput,
@@ -1876,20 +1876,50 @@ impl<'a> BuildPolicy<'a> {
         )
     }
 
-    /// Match hvigor's HAR task graph: an original source HAR is linted and
-    /// packaged directly, while obfuscated and bytecode HAR variants depend on
-    /// HarCompileArkTS/CompileArkTS and es2abc.
-    fn module_requires_arkts_compilation(&self, module: &ModuleConfig) -> Result<bool> {
+    /// Match hvigor's ArkTS task enablement and HAR task graph.
+    ///
+    /// Current `ArkCompile.taskShouldDo()` enables the task when the selected
+    /// source set has an ETS `CodeModel` or the package `main` file exists.
+    /// `CoreSourceSetImpl.initCodeMap()` creates the model from the physical
+    /// `<source-set>/ets` directory, while `checkPackageMain()` defaults the
+    /// package entry to `Index.ets`. A generated `ResourceTable.ts` compile
+    /// entry alone therefore does not enable CompileArkTS. Original source
+    /// HARs additionally bypass HarCompileArkTS/CompileArkTS regardless of
+    /// their source tree.
+    fn module_requires_arkts_compilation(
+        &self,
+        module: &ModuleConfig,
+        target_name: &str,
+        package_main: Option<&str>,
+    ) -> bool {
         if !matches!(self.config.output_target, OutputTarget::Har)
             || !matches!(module.module_type, OhosModuleType::Har)
         {
-            return Ok(true);
+            let source = ModuleSourceLayout::new(&module.src_path);
+            let ets_source = if target_name == "ohosTest" {
+                source.target_ets(target_name)
+            } else {
+                source.ets()
+            };
+            return ets_source.is_dir()
+                || module
+                    .src_path
+                    .join(package_main.unwrap_or("Index.ets"))
+                    .is_file();
         }
 
-        Ok(!matches!(
+        if matches!(
             self.config.product.build_option.har_artifact_type,
             HarArtifactType::Original
-        ))
+        ) {
+            return false;
+        }
+
+        ModuleSourceLayout::new(&module.src_path).ets().is_dir()
+            || module
+                .src_path
+                .join(package_main.unwrap_or("Index.ets"))
+                .is_file()
     }
 
     fn validate_integrated_hsp_api(&self, has_integrated_hsp: bool) -> Result<()> {

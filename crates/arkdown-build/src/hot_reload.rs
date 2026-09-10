@@ -5,7 +5,7 @@
 //! - `tasks/hot-reload-ark-compile.js`
 //! - SDK `module_hotreload_mode.js`
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::path::{Component, Path, PathBuf};
 
 use arkdown_abc::bytecode::{Ts2abcReloadMode, Ts2abcReloadPlan};
@@ -13,6 +13,7 @@ use arkdown_core::HvigorModuleSourceFile;
 use arkdown_path::lexical_normalize;
 use arkdown_watcher::{WatchEvent, WatchEventKind};
 use indexmap::IndexSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::layout::ModuleBuildLayout;
 use crate::request::BuildAction;
@@ -137,6 +138,218 @@ struct HotReloadChangedFiles {
 pub struct HotReloadProcessor<'a> {
     layout: &'a ModuleBuildLayout<'a>,
     project_root: &'a Path,
+}
+
+/// Persists the source-graph state shared by HotReload and ColdReload.
+///
+/// The behavior is owned by current ets2bundle
+/// `collect-importers-plugin.js`: the initial build records every module
+/// reachable from the Rolldown inputs, while a reload filters newly-added
+/// source files from `changedFileList.json` and records whether an existing
+/// changed source imports a module absent from the initial graph.
+pub struct ReloadImporterStateWriter<'a> {
+    layout: &'a ModuleBuildLayout<'a>,
+    source_root: &'a Path,
+    patch_config: Option<&'a serde_json::Value>,
+    entry_module_ids: &'a [String],
+    module_imports: &'a FxHashMap<String, Vec<String>>,
+}
+
+impl<'a> ReloadImporterStateWriter<'a> {
+    pub fn new(
+        layout: &'a ModuleBuildLayout<'a>,
+        source_root: &'a Path,
+        patch_config: Option<&'a serde_json::Value>,
+        entry_module_ids: &'a [String],
+        module_imports: &'a FxHashMap<String, Vec<String>>,
+    ) -> Self {
+        Self {
+            layout,
+            source_root,
+            patch_config,
+            entry_module_ids,
+            module_imports,
+        }
+    }
+
+    pub fn write(&self, is_reload: bool) -> HotReloadResult<()> {
+        let Some(config) = self.patch_config.and_then(serde_json::Value::as_object) else {
+            return Ok(());
+        };
+        if config
+            .get("oldMapFilePath")
+            .and_then(serde_json::Value::as_str)
+            .is_none_or(str::is_empty)
+            || !config.contains_key("mode")
+        {
+            return Ok(());
+        }
+
+        let state_path = self.layout.patch_ets_state_json();
+        if let Some(parent) = state_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| HotReloadError::Io {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        if !is_reload {
+            let compiled_file_list = self.compiled_file_list();
+            return self.write_json(
+                &state_path,
+                &serde_json::json!({ "compiledFileList": compiled_file_list }),
+            );
+        }
+
+        let mut state = if state_path.is_file() {
+            self.read_json(&state_path)?
+        } else {
+            serde_json::json!({})
+        };
+        let state_object =
+            state
+                .as_object_mut()
+                .ok_or_else(|| HotReloadError::InvalidChangedList {
+                    path: state_path.clone(),
+                    message: "ets.json root must be an object".to_string(),
+                })?;
+        let compiled_file_list = state_object
+            .get("compiledFileList")
+            .and_then(serde_json::Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let compiled = compiled_file_list
+            .iter()
+            .map(String::as_str)
+            .collect::<FxHashSet<_>>();
+        let modified = self.filter_modified_files(config, &compiled)?;
+        let is_import_new_file = modified.iter().any(|relative| {
+            let absolute = self.resolve_source_path(relative);
+            self.module_imports
+                .get(absolute.as_str())
+                .is_some_and(|imports| {
+                    imports
+                        .iter()
+                        .any(|imported| !compiled.contains(imported.as_str()))
+                })
+        });
+        state_object.insert(
+            "isImportNewFile".to_string(),
+            serde_json::Value::Bool(is_import_new_file),
+        );
+        self.write_json(&state_path, &state)
+    }
+
+    fn compiled_file_list(&self) -> Vec<String> {
+        let mut compiled = IndexSet::new();
+        let mut pending = self
+            .entry_module_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<VecDeque<_>>();
+        while let Some(module_id) = pending.pop_front() {
+            if !compiled.insert(module_id.to_string()) {
+                continue;
+            }
+            if let Some(imports) = self.module_imports.get(module_id) {
+                pending.extend(imports.iter().map(String::as_str));
+            }
+        }
+        compiled.into_iter().collect()
+    }
+
+    fn filter_modified_files(
+        &self,
+        config: &serde_json::Map<String, serde_json::Value>,
+        compiled: &FxHashSet<&str>,
+    ) -> HotReloadResult<Vec<String>> {
+        let Some(changed_file_list) = config
+            .get("changedFileList")
+            .and_then(serde_json::Value::as_str)
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+        else {
+            return Ok(Vec::new());
+        };
+        if !changed_file_list.is_file() {
+            return Ok(Vec::new());
+        }
+        let mut changed = self.read_json(&changed_file_list)?;
+        let changed_object =
+            changed
+                .as_object_mut()
+                .ok_or_else(|| HotReloadError::InvalidChangedList {
+                    path: changed_file_list.clone(),
+                    message: "root must be an object".to_string(),
+                })?;
+        let modified = changed_object
+            .get("modifiedFiles")
+            .and_then(serde_json::Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let retained = modified
+            .iter()
+            .filter(|relative| compiled.contains(self.resolve_source_path(relative).as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if retained.len() != modified.len() {
+            changed_object.insert(
+                "modifiedFiles".to_string(),
+                serde_json::Value::Array(
+                    retained
+                        .iter()
+                        .cloned()
+                        .map(serde_json::Value::String)
+                        .collect(),
+                ),
+            );
+            self.write_json(&changed_file_list, &changed)?;
+        }
+        Ok(retained)
+    }
+
+    fn resolve_source_path(&self, path: &str) -> String {
+        let path = Path::new(path);
+        let resolved = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.source_root.join(path)
+        };
+        lexical_normalize(&resolved).to_string_lossy().into_owned()
+    }
+
+    fn read_json(&self, path: &Path) -> HotReloadResult<serde_json::Value> {
+        let bytes = std::fs::read(path).map_err(|source| HotReloadError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        serde_json::from_slice(&bytes).map_err(|source| HotReloadError::Json {
+            path: path.to_path_buf(),
+            source,
+        })
+    }
+
+    fn write_json(&self, path: &Path, value: &serde_json::Value) -> HotReloadResult<()> {
+        let bytes = serde_json::to_vec_pretty(value).map_err(|source| HotReloadError::Json {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        std::fs::write(path, bytes).map_err(|source| HotReloadError::Io {
+            path: path.to_path_buf(),
+            source,
+        })
+    }
 }
 
 impl<'a> HotReloadProcessor<'a> {

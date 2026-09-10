@@ -62,11 +62,14 @@ napi-build = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+aes-gcm = { workspace = true }
 arkdown-config = { workspace = true }
 arkdown-cache = { workspace = true }
 arkdown-profile = { workspace = true }
 arkdown-sign = { workspace = true }
+hapsigner = { workspace = true }
 hex = { workspace = true }
+pbkdf2 = { workspace = true }
 serde = { workspace = true }
 json5 = { workspace = true }
 walkdir = { workspace = true }

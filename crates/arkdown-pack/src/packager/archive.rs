@@ -88,8 +88,9 @@ impl Packager {
 }
 
 /// Resolves optional pack inputs from the typed CompileArkTS output layout.
-/// This deliberately starts from `abc_path`; it never reverse-engineers a
-/// module root from the final output filename or embeds a product/build path.
+/// This deliberately starts from an available `abc_path`; it never
+/// reverse-engineers a module root from the final output filename or embeds a
+/// product/build path.
 struct PackAuxiliaryArtifacts<'a> {
     input: &'a PackInput,
 }
@@ -108,7 +109,7 @@ impl<'a> PackAuxiliaryArtifacts<'a> {
     }
 
     fn loader_target_dir(&self) -> Option<&Path> {
-        let ets_dir = self.input.abc_path.parent()?;
+        let ets_dir = self.input.abc_path.as_deref()?.parent()?;
         (ets_dir.file_name() == Some(std::ffi::OsStr::new("ets")))
             .then(|| ets_dir.parent())
             .flatten()

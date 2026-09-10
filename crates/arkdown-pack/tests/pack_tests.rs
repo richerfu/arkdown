@@ -184,7 +184,7 @@ fn minimal_pack_input(
     PackInput {
         module_name: "entry".into(),
         target_name: "default".into(),
-        abc_path: abc,
+        abc_path: Some(abc),
         additional_abc_paths: Vec::new(),
         resources_index: res,
         module_json: modj,
@@ -232,6 +232,26 @@ fn test_hap_output_is_valid_zip() {
         b"PK\x03\x04",
         "HAP file must begin with ZIP local file header magic (PK\\x03\\x04)"
     );
+}
+
+#[test]
+fn test_hap_without_arkts_source_omits_ets_assets() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (abc, res, modj) = write_minimal_inputs(tmp.path());
+    let out = tmp.path().join("resource-only.hap");
+    let mut input = minimal_pack_input(abc, res, modj, out.clone());
+    input.abc_path = None;
+
+    Packager::new(make_config())
+        .pack_hap(input)
+        .expect("pack resource-only HAP");
+
+    let file = fs::File::open(&out).expect("open resource-only HAP");
+    let archive = zip::ZipArchive::new(file).expect("read resource-only HAP");
+    let names = archive.file_names().map(str::to_string).collect::<Vec<_>>();
+    assert!(!names.iter().any(|path| path.starts_with("ets/")));
+    assert!(names.iter().any(|path| path == "module.json"));
+    assert!(names.iter().any(|path| path == "resources.index"));
 }
 
 #[test]
@@ -1142,7 +1162,7 @@ fn test_hap_resource_files_copied_from_processed_dir() {
         .pack_hap(PackInput {
             module_name: "entry".into(),
             target_name: "default".into(),
-            abc_path: abc,
+            abc_path: Some(abc),
             additional_abc_paths: Vec::new(),
             resources_index: res,
             module_json: modj,
@@ -1212,7 +1232,7 @@ fn test_missing_abc_returns_missing_input_error() {
     let result = Packager::new(make_config()).pack_hap(PackInput {
         module_name: "entry".into(),
         target_name: "default".into(),
-        abc_path: tmp.path().join("missing.abc"), // does not exist
+        abc_path: Some(tmp.path().join("missing.abc")), // does not exist
         additional_abc_paths: Vec::new(),
         resources_index: res,
         module_json: modj,
@@ -1250,7 +1270,7 @@ fn test_missing_module_json_returns_missing_input_error() {
     let result = Packager::new(make_config()).pack_hap(PackInput {
         module_name: "entry".into(),
         target_name: "default".into(),
-        abc_path: tmp.path().join("m.abc"),
+        abc_path: Some(tmp.path().join("m.abc")),
         additional_abc_paths: Vec::new(),
         resources_index: tmp.path().join("m.index"),
         module_json: tmp.path().join("m.json"), // does not exist
@@ -1295,7 +1315,7 @@ fn test_hsp_output_is_valid_zip() {
         .pack_hsp(PackInput {
             module_name: "shared".into(),
             target_name: "default".into(),
-            abc_path: abc,
+            abc_path: Some(abc),
             additional_abc_paths: Vec::new(),
             resources_index: res,
             module_json: modj,
@@ -1337,7 +1357,7 @@ fn test_hsp_pack_info_keeps_app_bundle_type_and_uses_shared_module_type() {
         .pack_hsp(PackInput {
             module_name: "shared".into(),
             target_name: "default".into(),
-            abc_path: abc,
+            abc_path: Some(abc),
             additional_abc_paths: Vec::new(),
             resources_index: res,
             module_json: modj,
@@ -1770,7 +1790,7 @@ fn test_pack_hap_embeds_integrated_hsp() {
         .pack_hap(PackInput {
             module_name: "entry".into(),
             target_name: "default".into(),
-            abc_path: abc,
+            abc_path: Some(abc),
             additional_abc_paths: Vec::new(),
             resources_index: res,
             module_json: modj,

@@ -271,9 +271,6 @@ pub struct RawProduct {
     /// Reference to a signing config by name (looks up `app.signingConfigs`).
     #[serde(default)]
     pub signing_config: Option<String>,
-    /// Kept for backward compatibility (old format embedded signingConfigs in products).
-    #[serde(default)]
-    pub signing_configs: Vec<RawSigningConfigEntry>,
     #[serde(default)]
     pub build_option: Option<RawBuildOption>,
     /// Optional product-level `versionCode` override.
@@ -309,18 +306,11 @@ pub struct RawBuildMode {
     pub name: String,
 }
 
-/// Per-product signing config entry (old / backward-compat format).
-#[derive(Debug, Deserialize)]
-pub struct RawSigningConfigEntry {
-    pub name: String,
-    pub material: Option<RawSigningMaterial>,
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RawSigningMaterial {
-    /// Real OHOS projects write `certpath` (lowercase p); old format uses `certPath` (camelCase).
-    #[serde(alias = "certpath", default)]
+    /// Current `MaterialBuildOpt` spelling in the Hvigor OHOS plugin.
+    #[serde(rename = "certpath", default)]
     pub cert_path: String,
     #[serde(default)]
     pub key_alias: String,
@@ -3169,7 +3159,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_build_profile_with_signing() {
+    fn test_product_embedded_signing_configs_are_not_part_of_current_hvigor_schema() {
         let json = r#"{
             app: {
                 products: [{
@@ -3219,10 +3209,8 @@ mod tests {
         let profile =
             RawBuildProfile::parse(json, std::path::Path::new("build-profile.json5")).unwrap();
         let product = &profile.app.products[0];
-        assert_eq!(product.signing_configs.len(), 1);
-        let material = product.signing_configs[0].material.as_ref().unwrap();
-        assert_eq!(material.cert_path, "/path/to/cert");
-        assert_eq!(material.sign_alg, "SHA256withECDSA");
+        assert!(product.signing_config.is_none());
+        assert!(profile.app.signing_configs.is_empty());
         let build_option = product.build_option.as_ref().unwrap();
         let strict = build_option.strict_mode.as_ref().unwrap();
         assert!(strict.case_sensitive_check);

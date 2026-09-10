@@ -122,7 +122,7 @@ mod tests {
         let result = packager.pack_hap(PackInput {
             module_name: "entry".to_string(),
             target_name: "default".to_string(),
-            abc_path: abc,
+            abc_path: Some(abc),
             additional_abc_paths: Vec::new(),
             resources_index: res,
             module_json: modj,
@@ -199,7 +199,7 @@ mod tests {
             .pack_hap(PackInput {
                 module_name: "entry".to_string(),
                 target_name: "default".to_string(),
-                abc_path: abc,
+                abc_path: Some(abc),
                 additional_abc_paths: Vec::new(),
                 resources_index: res,
                 module_json: modj,
@@ -243,7 +243,7 @@ mod tests {
         let result = packager.pack_hap(PackInput {
             module_name: "entry".to_string(),
             target_name: "default".to_string(),
-            abc_path: tmp.path().join("missing.abc"),
+            abc_path: Some(tmp.path().join("missing.abc")),
             additional_abc_paths: Vec::new(),
             resources_index: tmp.path().join("missing.index"),
             module_json: tmp.path().join("missing.json"),
@@ -346,7 +346,7 @@ mod tests {
         let result = packager.pack_hsp(PackInput {
             module_name: "shared".to_string(),
             target_name: "default".to_string(),
-            abc_path: abc,
+            abc_path: Some(abc),
             additional_abc_paths: Vec::new(),
             resources_index: res,
             module_json: modj,
@@ -397,7 +397,7 @@ mod tests {
             .pack_hap(PackInput {
                 module_name: "entry".to_string(),
                 target_name: "default".to_string(),
-                abc_path: abc,
+                abc_path: Some(abc),
                 additional_abc_paths: Vec::new(),
                 resources_index: res,
                 module_json: modj,
@@ -453,7 +453,7 @@ mod tests {
             .pack_hap(PackInput {
                 module_name: "entry".to_string(),
                 target_name: "default".to_string(),
-                abc_path: abc,
+                abc_path: Some(abc),
                 additional_abc_paths: Vec::new(),
                 resources_index: res,
                 module_json: modj,

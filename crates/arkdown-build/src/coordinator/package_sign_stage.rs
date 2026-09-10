@@ -920,7 +920,7 @@ impl BuildCoordinator {
                         vec![packed]
                     }
                     _ => {
-                        if module_json.exists() && modules_abc.exists() {
+                        if module_json.exists() {
                             if !resources_index.exists() {
                                 if let Some(parent) = resources_index.parent() {
                                     std::fs::create_dir_all(parent)?;
@@ -970,7 +970,9 @@ impl BuildCoordinator {
                                     let pack_input = PackInput {
                                         module_name: module.name.clone(),
                                         target_name: artifact_target_label.clone(),
-                                        abc_path: modules_abc.clone(),
+                                        abc_path: modules_abc
+                                            .is_file()
+                                            .then(|| modules_abc.clone()),
                                         additional_abc_paths: additional_abc_paths.clone(),
                                         resources_index: resources_index.clone(),
                                         module_json: module_json.clone(),
