@@ -53,7 +53,7 @@ platform package dry-run 同时包含原生绑定、`tsc`、clean revision 构�
 
 ### TSGO：源码定义能力差异为 0
 
-当前适配后的 TSGO 提交 `94e2465a5f92c50eb86a000eb1c4fb95adac3fd0` 已覆盖 OH parser、
+当前适配后的 TSGO 提交 `0780074afa51745e9be859be1ad9400a7f61dbf6` 已覆盖 OH parser、
 binder、checker、ArkTS 1.1 linter、OH resolver、SDK function/class callback、
 诊断筛选、retention 与 Rust/OXC 所需类型消费者。OH linter 当前源码语料共
 1004 个 source case，1004/1004 执行且无跳过；两份只承载 JSON 数据、没有
@@ -104,11 +104,17 @@ module-export closure 和 SDK declaration metadata 现完整覆盖 named/default
 SDK function/class 回调现在由 TSGO checker workers 聚合成有序 transport batch，
 Rust typed boundary 转发给 JS runtime；batch 不去重、不缓存结果，每个源码调用仍按序
 执行。Source/projectConfig 只做 wire interning，并由 Rust 为每个 TSGO 进程分配唯一
-host scope，避免多模块并行构建中进程本地 session id 重复。真实工程带 trace 的无缓存
-构建包含 13205 个 Program source、1739 个 transform-query 文件：
-linter 136.266 秒、semantic diagnostics 64.767 秒、type facts 5.329 秒。最终 release
-无缓存复验为 336.94 秒，随后缓存构建为 254.67 秒；两次均成功生成完整签名 HAP。
-剩余耗时集中于正常 checker 与后续构建阶段，不再是路径归一化或 JS transport 阻塞。
+host scope，避免多模块并行构建中进程本地 session id 重复。build 现在通过单个
+`getArkTSBuildDiagnostics` 请求复用 OH `TSDiagnostics.ts` 已计算的 normal semantic
+结果，并使用 TSGO 依赖图分区编译池，避免 API/LSP 单 checker 串行路径。真实工程
+13205 个 Program source、1739 个 transform-query 文件上，checker 从旧链路约
+206.4 秒降至约 133.4 秒，减少约 73 秒（35%）；完整缓存构建 208.78 秒并成功生成签名
+HAP。SDK 插件仍逐次执行，未以缓存返回值换取性能。
+
+用户显式选择 `build --skip-checker` 时，Arkdown 跳过 linter、syntactic/semantic/
+declaration diagnostics，但保留 OXC 生成所需 TSGO type facts；该模式实测 checker
+约 7.2 秒、完整无缓存构建 167.56 秒并生成签名 HAP。它是 opt-in 扩展，默认构建仍
+执行源码定义的完整 checker，独立 `check` 不受影响。
 
 相邻审计还确认，未 emit 的 TypeScript namespace 与上游
 `rollup-plugin-ets-typescript.ts::transform` 一样以 AST/打印源码交给 CompileArkTS；

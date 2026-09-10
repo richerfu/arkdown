@@ -84,6 +84,10 @@ or `--build-target-name` to select a more specific build configuration. Run `npx
 the complete option list. Pass `--enable-zig` to compile native C/C++ sources with `zig cc` and `zig c++`;
 the Zig executable must be available on `PATH`. ArkUI-X builds opt in with `--crossplatform`; add
 `--ignore-crossplatform-check` only when `11706007` should be reported as a warning instead of an error.
+Use `--skip-checker` for an explicit package-first build that omits ArkTS linter and TypeScript
+diagnostics. Arkdown still queries the type facts required by OXC transforms, so generated behavior
+for `@ObjectLink`, imported builders, annotations, and enums remains unchanged. The standalone
+`check` command always performs full validation.
 
 The selected product's `arkTSVersion` chooses ArkTS 1.1 or 1.2; products that
 omit it retain the 1.1 schema default. `--arkts-version` is an explicit build
