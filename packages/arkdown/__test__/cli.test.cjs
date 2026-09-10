@@ -23,6 +23,7 @@ test('package CLI parses native build options and explicit ArkTS 1.2', () => {
     '--check-entry',
     '--crossplatform',
     '--ignore-crossplatform-check',
+    '--skip-checker',
   ])
 
   assert.deepEqual(config, {
@@ -34,6 +35,7 @@ test('package CLI parses native build options and explicit ArkTS 1.2', () => {
     checkEntry: true,
     isCrossplatform: true,
     ignoreCrossplatformCheck: true,
+    skipChecker: true,
   })
 })
 

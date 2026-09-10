@@ -61,6 +61,18 @@ pub struct ProjectSemanticCheckReport {
     pub type_facts: ArktsTypeFactsSnapshot,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProjectSemanticMode {
+    Full,
+    TransformFactsOnly,
+}
+
+impl ProjectSemanticMode {
+    fn checks_diagnostics(self) -> bool {
+        matches!(self, Self::Full)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct ProjectSemanticRuntimeKey {
     project_root: PathBuf,
@@ -554,21 +566,30 @@ impl<'a> ProjectSemanticChecker<'a> {
     }
 
     pub fn run(&self) -> Result<ProjectSemanticCheckReport> {
-        self.run_inner(None, None)
+        self.run_inner(None, None, ProjectSemanticMode::Full)
     }
 
-    pub(crate) fn run_with_runtime(
+    pub(crate) fn run_for_build(
+        &self,
+        mode: ProjectSemanticMode,
+    ) -> Result<ProjectSemanticCheckReport> {
+        self.run_inner(None, None, mode)
+    }
+
+    pub(crate) fn run_for_build_with_runtime(
         &self,
         runtime: &mut ProjectSemanticRuntime,
         invalidation: Option<&WatchInvalidationBatch>,
+        mode: ProjectSemanticMode,
     ) -> Result<ProjectSemanticCheckReport> {
-        self.run_inner(Some(runtime), invalidation)
+        self.run_inner(Some(runtime), invalidation, mode)
     }
 
     fn run_inner(
         &self,
         runtime: Option<&mut ProjectSemanticRuntime>,
         invalidation: Option<&WatchInvalidationBatch>,
+        mode: ProjectSemanticMode,
     ) -> Result<ProjectSemanticCheckReport> {
         let mut roots = self
             .root_files
@@ -690,7 +711,7 @@ impl<'a> ProjectSemanticChecker<'a> {
             let changes = ProjectSemanticRuntime::file_changes(invalidation);
             let (session, program) =
                 runtime.program(key, &executable, self.project_root, &prepared, &changes)?;
-            return self.check_program(session, &program, &prepared);
+            return self.check_program(session, &program, &prepared, mode);
         }
         let mut session = NativeTypeSession::start(
             &executable,
@@ -699,7 +720,7 @@ impl<'a> ProjectSemanticChecker<'a> {
             prepared.sdk_plugin_host.clone(),
         )?;
         let program = session.create_program(&prepared.roots, &prepared.options)?;
-        let report = self.check_program(&mut session, &program, &prepared)?;
+        let report = self.check_program(&mut session, &program, &prepared, mode)?;
         session.release(program)?;
         Ok(report)
     }
@@ -709,6 +730,7 @@ impl<'a> ProjectSemanticChecker<'a> {
         session: &mut NativeTypeSession,
         program: &NativeProgram,
         prepared: &PreparedSemanticCheck,
+        mode: ProjectSemanticMode,
     ) -> Result<ProjectSemanticCheckReport> {
         let source_graph = session.source_graph(program)?;
         let mut source_identities = source_graph
@@ -727,29 +749,33 @@ impl<'a> ProjectSemanticChecker<'a> {
             .filter(|source| Self::is_checkable_root(&source.snapshot_path))
             .map(|source| source.snapshot_path.clone())
             .collect::<Vec<_>>();
-        let linter_started = Instant::now();
-        let linter = session.arkts_linter_diagnostics(program)?;
-        tracing::info!(
-            elapsed_ms = linter_started.elapsed().as_millis(),
-            files = source_graph.files.len(),
-            "ArkTS linter diagnostics completed"
-        );
-        let diagnostics_started = Instant::now();
-        let mut result = session.diagnostics(program)?;
-        if self.check_declarations {
-            let declaration_sources = source_graph
-                .files
-                .iter()
-                .map(|file| file.file_name.clone())
-                .filter(|file| Self::is_declaration_diagnostic_source(file))
-                .collect::<Vec<_>>();
-            result.extend(session.declaration_diagnostics(program, &declaration_sources)?);
-        }
-        tracing::info!(
-            elapsed_ms = diagnostics_started.elapsed().as_millis(),
-            files = source_graph.files.len(),
-            "ArkTS semantic diagnostics completed"
-        );
+        let (mut linter, mut result) = if mode.checks_diagnostics() {
+            let diagnostics_started = Instant::now();
+            let diagnostics = session.arkts_build_diagnostics(program)?;
+            let mut result = diagnostics.syntactic_diagnostics;
+            result.extend(diagnostics.semantic_diagnostics);
+            if self.check_declarations {
+                let declaration_sources = source_graph
+                    .files
+                    .iter()
+                    .map(|file| file.file_name.clone())
+                    .filter(|file| Self::is_declaration_diagnostic_source(file))
+                    .collect::<Vec<_>>();
+                result.extend(session.declaration_diagnostics(program, &declaration_sources)?);
+            }
+            tracing::info!(
+                elapsed_ms = diagnostics_started.elapsed().as_millis(),
+                files = source_graph.files.len(),
+                "ArkTS build diagnostics completed"
+            );
+            (diagnostics.linter_diagnostics, result)
+        } else {
+            tracing::info!(
+                files = source_graph.files.len(),
+                "ArkTS diagnostics skipped; retaining transform type inference"
+            );
+            (Vec::new(), Vec::new())
+        };
         let annotation_sources = source_identities
             .iter()
             .filter(|source| Self::is_type_script_preprocess_source(&source.snapshot_path))
@@ -800,12 +826,22 @@ impl<'a> ProjectSemanticChecker<'a> {
             &self.crossplatform_dependencies,
         )
         .convert(native_type_facts, native_transform_type_facts)?;
-        let mut linter = self.prepare_linter_diagnostics(linter)?;
-        self.apply_ui_diagnostic_rules(&mut linter, &prepared.ui_props, &prepared.new_extend_names);
-        self.apply_ui_diagnostic_rules(&mut result, &prepared.ui_props, &prepared.new_extend_names);
-        let ignored = self.ignored_diagnostic_files(&source_graph);
-        linter.retain(|diagnostic| self.keep_diagnostic(diagnostic, &ignored));
-        result.retain(|diagnostic| self.keep_diagnostic(diagnostic, &ignored));
+        if mode.checks_diagnostics() {
+            linter = self.prepare_linter_diagnostics(linter)?;
+            self.apply_ui_diagnostic_rules(
+                &mut linter,
+                &prepared.ui_props,
+                &prepared.new_extend_names,
+            );
+            self.apply_ui_diagnostic_rules(
+                &mut result,
+                &prepared.ui_props,
+                &prepared.new_extend_names,
+            );
+            let ignored = self.ignored_diagnostic_files(&source_graph);
+            linter.retain(|diagnostic| self.keep_diagnostic(diagnostic, &ignored));
+            result.retain(|diagnostic| self.keep_diagnostic(diagnostic, &ignored));
+        }
         let mut report = ProjectSemanticCheckReport {
             checked_sources,
             type_facts,

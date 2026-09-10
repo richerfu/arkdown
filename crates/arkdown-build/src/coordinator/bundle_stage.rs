@@ -314,10 +314,19 @@ impl BuildCoordinator {
                         std::iter::empty(),
                     )
                 };
-                let semantic = if let Some(runtime) = semantic_runtime.as_deref_mut() {
-                    semantic.run_with_runtime(runtime, args.watch_invalidation.as_ref())?
+                let semantic_mode = if args.skip_checker {
+                    crate::project_checker::ProjectSemanticMode::TransformFactsOnly
                 } else {
-                    semantic.run()?
+                    crate::project_checker::ProjectSemanticMode::Full
+                };
+                let semantic = if let Some(runtime) = semantic_runtime.as_deref_mut() {
+                    semantic.run_for_build_with_runtime(
+                        runtime,
+                        args.watch_invalidation.as_ref(),
+                        semantic_mode,
+                    )?
+                } else {
+                    semantic.run_for_build(semantic_mode)?
                 };
                 for warning in &semantic.warnings {
                     tracing::warn!(module = %module.name, diagnostic = warning, "ArkTS native checker warning");

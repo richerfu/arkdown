@@ -68,6 +68,7 @@ pub(super) struct WatchStageInput {
     pub(super) cache_file: Option<PathBuf>,
     pub(super) is_crossplatform: bool,
     pub(super) ignore_crossplatform_check: bool,
+    pub(super) skip_checker: bool,
     pub(super) cache: bool,
     pub(super) package_plugins: Vec<PackagePlugin>,
     pub(super) node_executable: Option<PathBuf>,
@@ -150,6 +151,7 @@ impl WatchStageInput {
             cache_file,
             is_crossplatform: args.is_crossplatform,
             ignore_crossplatform_check: args.ignore_crossplatform_check,
+            skip_checker: args.skip_checker,
             cache: args.cache,
             package_plugins,
             node_executable: args.node_executable.clone(),
@@ -211,6 +213,7 @@ impl WatchStage {
         let cache_file = input.cache_file;
         let is_crossplatform = input.is_crossplatform;
         let ignore_crossplatform_check = input.ignore_crossplatform_check;
+        let skip_checker = input.skip_checker;
         let cache = input.cache;
         let package_plugins = input.package_plugins;
         let node_executable = input.node_executable;
@@ -375,6 +378,7 @@ impl WatchStage {
                     abc_backend,
                     is_crossplatform,
                     ignore_crossplatform_check,
+                    skip_checker,
                     cache,
                     skip_resource: is_hot,
                     skip_profile: is_hot,

@@ -165,6 +165,44 @@ const methods: Map<string, CanvasMethod<any>> = new Map([
     session.release(program).unwrap();
 }
 
+#[test]
+#[ignore = "requires ARKDOWN_TYPESCRIPT_PATH native compiler"]
+fn native_build_diagnostics_preserve_linter_and_typescript_channels() {
+    let project = tempfile::tempdir().unwrap();
+    let source_path = project.path().join("entry.ets");
+    let source = Arc::<str>::from(
+        "var value: string | undefined;\nconst copy: string = value;\nconst wrong: number = 'text';\n",
+    );
+    let mut session = NativeTypeSession::start(
+        &NativeTypeSession::executable().unwrap(),
+        project.path(),
+        BTreeMap::from([(source_path.clone(), source)]),
+        None,
+    )
+    .unwrap();
+    let program = session
+        .create_program(
+            std::slice::from_ref(&source_path),
+            &NativeCompilerOptions::arkts11(project.path()),
+        )
+        .unwrap();
+    let diagnostics = session.arkts_build_diagnostics(&program).unwrap();
+    assert!(diagnostics.syntactic_diagnostics.is_empty());
+    assert!(
+        diagnostics
+            .linter_diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == 5)
+    );
+    assert!(
+        diagnostics
+            .semantic_diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == 2322)
+    );
+    session.release(program).unwrap();
+}
+
 #[derive(Debug)]
 struct SincePluginHost;
 

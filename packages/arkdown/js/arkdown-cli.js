@@ -35,6 +35,7 @@ const BUILD_FLAG_OPTIONS = new Map([
   ['--disable-abc-cache', 'disableAbcCache'],
   ['--crossplatform', 'isCrossplatform'],
   ['--ignore-crossplatform-check', 'ignoreCrossplatformCheck'],
+  ['--skip-checker', 'skipChecker'],
   ['--cache', 'cache'],
 ])
 const BUILD_APPEND_OPTIONS = new Map([
@@ -292,6 +293,8 @@ Options:
   --crossplatform     Enable ArkUI-X cross-platform API validation.
   --ignore-crossplatform-check
                       Downgrade cross-platform API errors to warnings.
+  --skip-checker      Skip ArkTS linter and TypeScript build diagnostics while
+                      retaining type facts required for correct transforms.
   --cache-file <path> Override es2abc cache file.
   --hvigor-plugin-file <path>
                       Load a compatible TS/JS compile-plugin module.

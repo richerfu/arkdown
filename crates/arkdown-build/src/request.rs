@@ -292,6 +292,10 @@ pub struct BuildRequest {
     /// Downgrade cross-platform API contract errors to warnings, matching
     /// `projectConfig.ignoreCrossplatformCheck`.
     pub ignore_crossplatform_check: bool,
+    /// Skip ArkTS linter and TypeScript build diagnostics while retaining the
+    /// checker-owned type facts required by OXC transforms. This affects build
+    /// validation only; emitted-source behavior stays identical.
+    pub skip_checker: bool,
     /// Enable coarse build cache and ABC ProgramCache handoff.
     pub cache: bool,
 
