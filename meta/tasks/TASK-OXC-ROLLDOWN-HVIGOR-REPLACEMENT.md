@@ -132,9 +132,10 @@ annotation retention/常量、Mutable/WrappedBuilder、enum member、SDK
 crossplatform dependency 等类型事实已批量接入 OXC。SDK dependency 身份直接
 来自上游 `checkCrossplatformValue` 所在的 declaration-use 回调，Rust 不再
 重建 overload、alias 或 factory-return 推断。build/check compiler options、
-source graph、声明诊断和源码定义的诊断筛选已经贯通。三平台 clean TSGO 产物
-随 N-API 平台包发布；正常安装无需环境变量，`ARKDOWN_TYPESCRIPT_PATH` 只用于
-开发覆盖。watch 已按 ets2bundle 生命周期长驻复用 Program，并保留原有诊断、
+source graph、声明诊断和源码定义的诊断筛选已经贯通。TypeScript 以
+`third_party/typescript` gitlink 固定，发布链先从该 clean revision 构建三平台
+TSGO，再组装并校验 N-API 平台包；不接受外部 dist。正常安装无需环境变量，
+`ARKDOWN_TYPESCRIPT_PATH` 只用于开发覆盖。watch 已按 ets2bundle 生命周期长驻复用 Program，并保留原有诊断、
 linter、type-facts 和 source-graph 刷新顺序。源码合同和验证说明见
 [`crates/arkdown-ets-checker/DESIGN.md`](../../crates/arkdown-ets-checker/DESIGN.md)。
 

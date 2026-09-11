@@ -156,10 +156,18 @@ stdio policy, process lifecycle, and exit codes.
 ### Build from source
 
 ```sh
+git submodule update --init --checkout
 cd packages/arkdown
 pnpm install
 pnpm build
 pnpm test
 ```
+
+The adapted TypeScript/TSGO source is pinned at `third_party/typescript` as a
+git submodule. `pnpm build:typescript` builds its clean macOS arm64, Linux x64
+GNU, and Windows x64 MSVC distributions. `pnpm publish:local --dry-run` always
+prepares that pinned TSGO distribution before assembling the three N-API
+platform packages; release packaging does not accept an external TypeScript
+distribution path.
 
 The package is distributed as `UNLICENSED`.

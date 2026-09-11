@@ -48,6 +48,7 @@
     "artifacts": "napi artifacts",
     "build": "napi build --platform --release",
     "build:debug": "napi build --platform",
+    "build:typescript": "node scripts/build-typescript-dist.mjs",
     "test": "node --test",
     "smoke": "node -e \"const arkdown = require('./js/runtime-entry.js'); if (typeof arkdown.build !== 'function') process.exit(1)\" && node js/arkdown-cli.js --help",
     "publish:local": "bash scripts/publish-local.sh",
