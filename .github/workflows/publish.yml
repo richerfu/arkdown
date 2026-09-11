@@ -347,7 +347,7 @@ jobs:
           node scripts/attach-typescript-dist.mjs \
             "${{ steps.typescript.outputs.distribution }}" \
             npm
-          for child_directory in npm/darwin-arm64 npm/linux-x64-gnu npm/win32-x64-msvc; do
+          for child_directory in ./npm/darwin-arm64 ./npm/linux-x64-gnu ./npm/win32-x64-msvc; do
             npm pack "$child_directory" --dry-run --ignore-scripts --json >/dev/null
           done
           npm pack . --dry-run --ignore-scripts --json >/dev/null
@@ -362,7 +362,7 @@ jobs:
           echo "Publishing with npm dist-tag: ${NPM_TAG}"
           export npm_config_tag="${NPM_TAG}"
           export NPM_CONFIG_PROVENANCE=true
-          for child_directory in npm/darwin-arm64 npm/linux-x64-gnu npm/win32-x64-msvc; do
+          for child_directory in ./npm/darwin-arm64 ./npm/linux-x64-gnu ./npm/win32-x64-msvc; do
             npm publish "$child_directory" --ignore-scripts --provenance --access public --tag "${NPM_TAG}"
           done
           npm publish --ignore-scripts --provenance --access public --tag "${NPM_TAG}"
