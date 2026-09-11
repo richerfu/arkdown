@@ -45,7 +45,7 @@ OXC corpus 只验证 OH 已定义的输入，不用于发明 checker 规则。�
 | OH 4.9 enum flow | OH checker `getEnumKind/getDeclaredTypeOfEnum` | 含计算 numeric member 的 enum 保持普通 numeric enum，不采用新版 TS 的 member-literal union 穷举收窄；普通 TypeScript 模式仍使用 TSGO 默认语义 |
 | ObjectLink 类型事实 | ets2bundle `checkObjectLinkType/checkTypes/isObservedV2/isFunctionType` | TSGO 返回 nullable/basic/ObservedV2/Function 与 union constituent identity；Rust 只执行源码布尔规则，不解析类型文本或重做推断 |
 | 生命周期 | TSGO API session/callbackfs | create/update/release、old Program/file changes、内存 snapshot、compiler-owned source graph、EOF/协议失败和进程回收已实现；与源码一样不对完整工程 checker 增加固定超时 |
-| 发布 | TSGO package script、npm platform packages | 三平台 clean build + SHA-256 元数据；`tsc/tsc.exe` 与 N-API 同目录发布；环境变量仅作开发覆盖 |
+| 发布 | `third_party/typescript` gitlink、TSGO package script、npm platform packages | 固定 submodule revision 先完成三平台 clean build + SHA-256 元数据，再组装 N-API 平台包；`tsc/tsc.exe` 与 binding 同目录发布；不接受外部 dist，运行时环境变量仅作开发覆盖 |
 
 ## 架构删除结果
 
@@ -80,11 +80,12 @@ source graph、build diagnostic batch、declaration diagnostics 和 OXC 所需�
 ## 本轮验证命令
 
 ```sh
-# TypeScript repo
-go test ./tsc/internal/...
+# Arkdown repo 中固定的 TypeScript submodule
+git submodule update --init --checkout
+go -C third_party/typescript test ./tsc/internal/...
 OH_TYPESCRIPT_SOURCE=/tmp/arkdown-oh-typescript-source \
-  go test ./tsc/internal/compiler -run TestArkTSLinterOpenHarmonyCorpus -count=1
-node tools/scripts/package-arkts.mjs
+  go -C third_party/typescript test ./tsc/internal/compiler -run TestArkTSLinterOpenHarmonyCorpus -count=1
+pnpm --dir packages/arkdown build:typescript
 
 # Arkdown repo
 ARKDOWN_TYPESCRIPT_PATH=/path/to/583e9e8b54/arm_darwin/tsc \

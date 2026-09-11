@@ -28,6 +28,9 @@ Arkdown 不调用 TSGO 的 `emit`、`transpile`、printer 或 JavaScript codegen
 平台包。N-API 从当前模块文件定位同目录编译器并将绝对路径传给 Rust 请求。
 `ARKDOWN_TYPESCRIPT_PATH` 只允许开发和测试覆盖；正常安装不依赖环境变量，
 也不会从 `PATH` 猜测一个不匹配协议的 TypeScript。
+适配后的 TypeScript 源码以 `third_party/typescript` git submodule 固定；npm
+打包只能从 parent gitlink 指向的 clean revision 先构建三平台 TSGO，再组装 N-API
+平台包，不接受外部 dist 路径或按发布环境选择另一份 checker。
 
 本合同只描述 ArkTS 1.1。ArkTS 1.2 的静态编译后端和版本选择不属于本 crate。
 
@@ -146,10 +149,12 @@ CommonJS callback ABI。
 
 ## 发行与验证
 
-TSGO 仓库运行 `node tools/scripts/package-arkts.mjs` 生成 macOS arm64、Linux
-x64 GNU 和 Windows x64 MSVC 三个平台目录。`BUILD.json` 必须声明 clean
-commit、内嵌 TypeScript libs 和二进制 SHA-256；Arkdown 发布脚本再次验证后才
-复制进 npm 平台包。交叉构建只证明可打包，不等于异平台运行测试。
+Arkdown 仓库运行 `pnpm --dir packages/arkdown build:typescript`，从固定的
+`third_party/typescript` gitlink 调用上游 `tools/scripts/package-arkts.mjs`，生成
+macOS arm64、Linux x64 GNU 和 Windows x64 MSVC 三个平台目录。`BUILD.json`
+必须声明同一 clean commit、内嵌 TypeScript libs 和二进制 SHA-256；Arkdown
+发布脚本再次验证后才复制进 npm 平台包。交叉构建只证明可打包，不等于异平台
+运行测试。
 
 ```sh
 ARKDOWN_TYPESCRIPT_PATH=/path/to/tsc \

@@ -40,6 +40,29 @@ test('public JavaScript is limited to entry, CLI, and plugin compatibility', () 
   }
 })
 
+test('npm release packages the pinned TypeScript submodule before native platform packages', () => {
+  const workspaceRoot = path.resolve(__dirname, '../../..')
+  const packageRoot = path.resolve(__dirname, '..')
+  const gitmodules = fs.readFileSync(path.join(workspaceRoot, '.gitmodules'), 'utf8')
+  const manifest = JSON.parse(fs.readFileSync(path.join(packageRoot, 'package.json'), 'utf8'))
+  const builder = fs.readFileSync(path.join(packageRoot, 'scripts/build-typescript-dist.mjs'), 'utf8')
+  const localPublish = fs.readFileSync(path.join(packageRoot, 'scripts/publish-local.sh'), 'utf8')
+  const workflow = fs.readFileSync(path.join(workspaceRoot, '.github/workflows/publish.yml'), 'utf8')
+
+  assert.match(gitmodules, /path = third_party\/typescript/)
+  assert.match(gitmodules, /url = https:\/\/github\.com\/ohos-rs\/TypeScript\.git/)
+  assert.equal(manifest.scripts['build:typescript'], 'node scripts/build-typescript-dist.mjs')
+  assert.match(builder, /gitlink/)
+  assert.match(builder, /tools\/scripts\/package-arkts\.mjs/)
+  assert.doesNotMatch(localPublish, /ARKDOWN_TYPESCRIPT_DIST/)
+  assert.ok(localPublish.indexOf('build-typescript-dist.mjs') < localPublish.indexOf('cargo clean'))
+  assert.match(workflow, /submodules: recursive/)
+  assert.match(workflow, /go-version-file: third_party\/typescript\/tsc\/go\.mod/)
+  assert.ok(workflow.indexOf('Build pinned native TypeScript distribution') < workflow.indexOf('Download all bindings'))
+  assert.match(workflow, /attach-typescript-dist\.mjs/)
+  assert.match(workflow, /napi pre-publish --no-gh-release -t npm --skip-optional-publish/)
+})
+
 test('plugin adapter exposes the complete supported lifecycle through one typed dispatcher', () => {
   const root = path.resolve(__dirname, '..', '..', '..')
   const adapter = fs.readFileSync(path.resolve(__dirname, '../js/plugin-adapter.js'), 'utf8')

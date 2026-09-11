@@ -34,6 +34,8 @@ checker 或插件结论。
 
 TSGO 完成矩阵、发布方式和回归见
 [ArkTS 1.1 原生 TypeScript 对齐合同](ARKTS11-NATIVE-TYPESCRIPT.md)。
+TypeScript 源码由 `third_party/typescript` gitlink 固定；本地和 CI npm 打包都先
+构建该 clean revision 的三平台 TSGO，再组装 N-API 平台包，不再接收外部 dist。
 
 本轮发行门禁已通过：N-API release 构建、JS 28/28、Rust workspace test、
 Clippy `-D warnings`、rustfmt 和 diff check 均成功；不设置
