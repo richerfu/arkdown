@@ -44,7 +44,7 @@ mod visual_codegen;
 pub use checker::{ArktsSourceChecker, EtsCheckReport, EtsChecker};
 pub use coverage::CoverageInstrumenter;
 pub use har_declaration::HarDeclarationGenerator;
-pub use module_rewrite::{ModuleAnalyzerKind, StaticModuleSpecifierRewrite};
+pub use module_rewrite::StaticModuleSpecifierRewrite;
 pub use resource_transform::{
     ResourceModuleReference, ResourceReference, ResourceTransformContext,
 };

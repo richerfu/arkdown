@@ -93,6 +93,18 @@ impl InsightIntentProfileProcessor {
         &self,
         input: InsightIntentProfileInput<'_>,
     ) -> Result<InsightIntentProfileOutput> {
+        let dependency_profiles = self.read_dependency_profiles(&input.dependency_profiles)?;
+        // `rollup-plugin-ets-typescript.ts::afterBuildEnd` calls
+        // `writeUserIntentJsonFile` only when the current compile extracted an
+        // intent, incremental cache state exists, or a bytecode HAR contributed
+        // non-empty intent data. Preserve that source-owned gate so ordinary
+        // cold builds do not read and rewrite profile/module metadata.
+        if !input.cache_path.is_file()
+            && input.modules.iter().all(|module| module.intents.is_empty())
+            && dependency_profiles.is_empty()
+        {
+            return Ok(InsightIntentProfileOutput::default());
+        }
         let mut state = self.current_state(&input.modules)?;
         self.merge_incremental_cache(input.cache_path, &input.modules, &mut state)?;
         self.retain_entity_owners(&mut state);
@@ -115,7 +127,7 @@ impl InsightIntentProfileProcessor {
             profile.remove("extractInsightIntents");
         }
         self.merge_dependency_profiles(
-            &input.dependency_profiles,
+            &dependency_profiles,
             input.bundle_name,
             input.module_name,
             preserve_extract_field,
@@ -383,7 +395,7 @@ impl InsightIntentProfileProcessor {
 
     fn merge_dependency_profiles(
         &self,
-        paths: &[PathBuf],
+        dependencies: &[Map<String, Value>],
         bundle_name: &str,
         module_name: &str,
         preserve_empty_extract_field: bool,
@@ -395,10 +407,7 @@ impl InsightIntentProfileProcessor {
         let Some(output) = output.as_array_mut() else {
             anyhow::bail!("InsightIntent extractInsightIntents must be an array");
         };
-        for path in paths {
-            let Some(dependency) = self.read_object(path)? else {
-                continue;
-            };
+        for dependency in dependencies {
             let Some(intents) = dependency
                 .get("extractInsightIntents")
                 .and_then(Value::as_array)
@@ -424,6 +433,19 @@ impl InsightIntentProfileProcessor {
             profile.remove("extractInsightIntents");
         }
         Ok(())
+    }
+
+    fn read_dependency_profiles(&self, paths: &[PathBuf]) -> Result<Vec<Map<String, Value>>> {
+        let mut profiles = Vec::with_capacity(paths.len());
+        for path in paths {
+            if let Some(profile) = self
+                .read_object(path)?
+                .filter(|profile| !profile.is_empty())
+            {
+                profiles.push(profile);
+            }
+        }
+        Ok(profiles)
     }
 
     fn validate_unique_intent_names(&self, profile: &Map<String, Value>) -> Result<()> {
@@ -556,6 +578,35 @@ impl InsightIntentProfileProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cold_build_without_intent_inputs_preserves_existing_profile_state() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let profile = temp.path().join("insight_intent.json");
+        let cache = temp.path().join("missing/insight_compile_cache.json");
+        let module_json = temp.path().join("module.json");
+        let profile_source = r#"{"insightIntents":[{"intentName":"Manual"}]}"#;
+        let module_source = r#"{"module":{"name":"entry","hasInsightIntent":true}}"#;
+        fs_err::write(&profile, profile_source).expect("profile");
+        fs_err::write(&module_json, module_source).expect("module json");
+
+        let output = InsightIntentProfileProcessor::new()
+            .process(InsightIntentProfileInput {
+                profile_path: &profile,
+                cache_path: &cache,
+                module_json_path: &module_json,
+                bundle_name: "bundle",
+                module_name: "entry",
+                modules: vec![InsightIntentModuleInput::default()],
+                dependency_profiles: vec![],
+            })
+            .expect("source-owned afterBuildEnd gate");
+
+        assert_eq!(output, InsightIntentProfileOutput::default());
+        assert_eq!(fs_err::read_to_string(profile).unwrap(), profile_source);
+        assert_eq!(fs_err::read_to_string(module_json).unwrap(), module_source);
+        assert!(!cache.exists());
+    }
 
     #[test]
     fn writes_profile_cache_and_module_metadata() {

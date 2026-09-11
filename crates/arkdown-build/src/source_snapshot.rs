@@ -148,6 +148,7 @@ impl<'a> TransformSourceSnapshotBuilder<'a> {
                 resolved_static_modules,
                 runtime_source_paths,
             )
+            .with_path_aliases(self.source_path_aliases())
             .with_sdk_declaration_roots(self.sdk_declaration_roots.to_vec())
             .with_package_roots(
                 self.package_roots
@@ -156,6 +157,53 @@ impl<'a> TransformSourceSnapshotBuilder<'a> {
                     .collect(),
             ),
         )
+    }
+
+    fn source_path_aliases(&self) -> Vec<(PathBuf, PathBuf)> {
+        let source_paths = self
+            .module_roots
+            .iter()
+            .map(|(_, root)| root)
+            .chain(self.dependency_source_roots.iter())
+            .chain(self.native_declaration_roots.iter())
+            .chain(self.sdk_declaration_roots.iter())
+            .chain(self.custom_type_declaration_inputs.iter())
+            .chain(
+                self.source_set_overlays
+                    .iter()
+                    .flat_map(|(base, target)| [base, target]),
+            )
+            .chain(self.package_roots.iter().map(|(_, root)| root))
+            .chain(self.test_source_roots.iter())
+            .map(|path| lexical_normalize(path))
+            .collect::<BTreeSet<_>>();
+        let ancestor_paths = source_paths
+            .iter()
+            .flat_map(|path| path.ancestors().map(Path::to_path_buf))
+            .collect::<BTreeSet<_>>();
+        let mut candidates = ancestor_paths
+            .into_iter()
+            .filter_map(|alias| {
+                let canonical = canonicalize_or_owned(&alias);
+                (canonical != alias).then_some((alias, canonical))
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        candidates.sort_by_key(|(alias, _)| alias.components().count());
+
+        let mut aliases = Vec::<(PathBuf, PathBuf)>::new();
+        for (alias, canonical) in candidates {
+            let covered = aliases.iter().any(|(parent_alias, parent_canonical)| {
+                alias.strip_prefix(parent_alias).is_ok_and(|relative| {
+                    lexical_normalize(&parent_canonical.join(relative)) == canonical
+                })
+            });
+            if !covered {
+                aliases.push((alias, canonical));
+            }
+        }
+        aliases
     }
 
     fn collect_source_root(

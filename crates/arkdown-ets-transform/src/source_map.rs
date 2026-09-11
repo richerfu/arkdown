@@ -10,7 +10,11 @@ use rustc_hash::FxHashMap;
 
 /// Convert a byte `offset` in `source` to a `(0-based line, 0-based col)` pair.
 pub fn offset_to_line_col(source: &str, offset: u32) -> (u32, u32) {
-    SourceOffsetMapper::new(source).line_col(offset)
+    let mut offset = (offset as usize).min(source.len());
+    while offset > 0 && !source.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    SourceMapLineOffsets::new(source).line_col(offset as u32)
 }
 
 struct SourceOffsetMapper<'a> {
@@ -20,22 +24,6 @@ struct SourceOffsetMapper<'a> {
 impl<'a> SourceOffsetMapper<'a> {
     fn new(source: &'a str) -> Self {
         Self { source }
-    }
-
-    fn line_col(&self, offset: u32) -> (u32, u32) {
-        let offset = offset as usize;
-        let clamped = self.previous_char_boundary(offset.min(self.source.len()));
-        let mut line = 0;
-        let mut col = 0;
-        for byte in self.source.bytes().take(clamped) {
-            if byte == b'\n' {
-                line += 1;
-                col = 0;
-            } else {
-                col += 1;
-            }
-        }
-        (line, col)
     }
 
     fn previous_char_boundary(&self, mut offset: usize) -> usize {
@@ -705,6 +693,7 @@ impl<'a> HvigorStandardSourceMapBuilder<'a> {
         let original_import_end = SourceMapImportPrefix::new(self.original, self.id).original_end();
         let original_bindings =
             OriginalImportBindingCollector::new(self.original, self.id).collect();
+        let original_line_offsets = SourceMapLineOffsets::new(self.original);
         let mut entries = MapEntryCollector::default();
         let original_import_tokens = original_tokens
             .iter()
@@ -717,9 +706,9 @@ impl<'a> HvigorStandardSourceMapBuilder<'a> {
             .filter(|token| token.start < generated_import_end)
         {
             if let Some((source_start, source_end)) = original_bindings.get(token.text) {
-                let (src_line, src_col) = offset_to_line_col(self.original, *source_start);
+                let (src_line, src_col) = original_line_offsets.line_col(*source_start);
                 entries.push(token.line, token.col, src_line, src_col);
-                let (src_line, src_col) = offset_to_line_col(self.original, *source_end);
+                let (src_line, src_col) = original_line_offsets.line_col(*source_end);
                 entries.push(token.end_line, token.end_col, src_line, src_col);
                 continue;
             }
@@ -1474,22 +1463,27 @@ impl MapEntryCollector {
     }
 }
 
-struct SourceMapLineOffsets {
+pub(crate) struct SourceMapLineOffsets {
+    source_len: u32,
     offsets: Vec<u32>,
 }
 
 impl SourceMapLineOffsets {
-    fn new(source: &str) -> Self {
+    pub(crate) fn new(source: &str) -> Self {
         let mut offsets = vec![0u32];
         for (index, byte) in source.bytes().enumerate() {
             if byte == b'\n' {
                 offsets.push((index + 1) as u32);
             }
         }
-        Self { offsets }
+        Self {
+            source_len: source.len().min(u32::MAX as usize) as u32,
+            offsets,
+        }
     }
 
-    fn line_col(&self, offset: u32) -> (u32, u32) {
+    pub(crate) fn line_col(&self, offset: u32) -> (u32, u32) {
+        let offset = offset.min(self.source_len);
         let line = self
             .offsets
             .partition_point(|&line_offset| line_offset <= offset)

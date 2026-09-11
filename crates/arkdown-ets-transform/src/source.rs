@@ -205,6 +205,7 @@ pub struct TransformSourceSnapshot {
     resolved_static_modules: Arc<Vec<TransformResolvedStaticModuleScope>>,
     sdk_declaration_roots: Arc<Vec<PathBuf>>,
     visual_sources: Arc<FxHashMap<PathBuf, VisualGeneratedSource>>,
+    visual_lookup_paths: Arc<FxHashMap<PathBuf, PathBuf>>,
 }
 
 impl TransformSourceSnapshot {
@@ -244,7 +245,34 @@ impl TransformSourceSnapshot {
             resolved_static_modules: Arc::new(resolved_static_modules),
             sdk_declaration_roots: Arc::default(),
             visual_sources: Arc::default(),
+            visual_lookup_paths: Arc::default(),
         }
+    }
+
+    /// Pre-index lexical path aliases while the build snapshot is being
+    /// assembled. Source roots can enter through `oh_modules` symlinks while
+    /// the immutable source store owns their canonical paths; transform hooks
+    /// must resolve both identities without calling `realpath` per module.
+    pub fn with_path_aliases(mut self, aliases: Vec<(PathBuf, PathBuf)>) -> Self {
+        if aliases.is_empty() {
+            return self;
+        }
+        let mut lookup_paths = (*self.lookup_paths).clone();
+        for (alias, target) in aliases {
+            let alias = lexical_normalize(&alias);
+            let target = canonicalize_or_owned(&lexical_normalize(&target));
+            for indexed_path in self.files.keys() {
+                let Some(relative) = indexed_path.strip_prefix(&target).ok() else {
+                    continue;
+                };
+                lookup_paths.insert(
+                    lexical_normalize(&alias.join(relative)),
+                    indexed_path.clone(),
+                );
+            }
+        }
+        self.lookup_paths = Arc::new(lookup_paths);
+        self
     }
 
     /// Attach the Visual/SuperVisual fragments generated once before
@@ -254,20 +282,29 @@ impl TransformSourceSnapshot {
         mut self,
         sources: FxHashMap<PathBuf, VisualGeneratedSource>,
     ) -> Self {
-        self.visual_sources = Arc::new(
-            sources
-                .into_iter()
-                .map(|(path, source)| (canonicalize_or_owned(&lexical_normalize(&path)), source))
-                .collect(),
-        );
+        let mut visual_sources = FxHashMap::default();
+        let mut visual_lookup_paths = FxHashMap::default();
+        for (path, source) in sources {
+            let lexical_path = lexical_normalize(&path);
+            let indexed_path = self
+                .indexed_path(&path)
+                .cloned()
+                .unwrap_or_else(|| canonicalize_or_owned(&lexical_path));
+            visual_sources.insert(indexed_path.clone(), source);
+            visual_lookup_paths.insert(path, indexed_path.clone());
+            visual_lookup_paths.insert(lexical_path, indexed_path.clone());
+            visual_lookup_paths.insert(indexed_path.clone(), indexed_path);
+        }
+        self.visual_sources = Arc::new(visual_sources);
+        self.visual_lookup_paths = Arc::new(visual_lookup_paths);
         self
     }
 
     pub(crate) fn visual_source(&self, path: &Path) -> Option<&VisualGeneratedSource> {
-        self.visual_sources
-            .get(path)
-            .or_else(|| self.visual_sources.get(&lexical_normalize(path)))
-            .or_else(|| self.visual_sources.get(&canonicalize_or_owned(path)))
+        self.indexed_path(path)
+            .or_else(|| self.visual_lookup_paths.get(path))
+            .or_else(|| self.visual_lookup_paths.get(&lexical_normalize(path)))
+            .and_then(|indexed| self.visual_sources.get(indexed))
     }
 
     /// Attach the ordered SDK declaration roots inventoried by the build
@@ -357,7 +394,6 @@ impl TransformSourceSnapshot {
         self.indexed_path(path)
             .and_then(|indexed| self.files.get(indexed))
             .map(Arc::clone)
-            .or_else(|| self.files.get(&canonicalize_or_owned(path)).map(Arc::clone))
     }
 
     pub fn source_text_for_indexed_path(&self, path: &Path) -> Option<Arc<str>> {
@@ -447,7 +483,7 @@ impl TransformSourceSnapshot {
             return None;
         }
         let importer = self
-            .indexed_path_or_canonical(importer)
+            .indexed_path_owned(importer)
             .unwrap_or_else(|| lexical_normalize(importer));
         let base = importer.parent()?;
         SourceSnapshotPathCandidates::new(lexical_normalize(&base.join(specifier)), mode)
@@ -478,7 +514,7 @@ impl TransformSourceSnapshot {
         specifier: &str,
     ) -> Option<TransformSourceFile> {
         let importer = self
-            .indexed_path_or_canonical(importer)
+            .indexed_path_owned(importer)
             .unwrap_or_else(|| lexical_normalize(importer));
         self.resolved_static_modules
             .iter()
@@ -511,7 +547,7 @@ impl TransformSourceSnapshot {
     }
 
     fn source_file(&self, path: PathBuf) -> Option<TransformSourceFile> {
-        let path = self.indexed_path_or_canonical(&path)?;
+        let path = self.indexed_path_owned(&path)?;
         self.files.get(&path).map(|source| TransformSourceFile {
             path,
             source: Arc::clone(source),
@@ -524,11 +560,8 @@ impl TransformSourceSnapshot {
             .or_else(|| self.lookup_paths.get(&lexical_normalize(path)))
     }
 
-    fn indexed_path_or_canonical(&self, path: &Path) -> Option<PathBuf> {
-        self.indexed_path(path).cloned().or_else(|| {
-            let canonical = canonicalize_or_owned(path);
-            self.indexed_path(&canonical).cloned()
-        })
+    fn indexed_path_owned(&self, path: &Path) -> Option<PathBuf> {
+        self.indexed_path(path).cloned()
     }
 }
 
@@ -1042,7 +1075,8 @@ mod tests {
             arkdown_path::canonicalize_or_owned(&declaration_path),
             Arc::<str>::from("export interface EncryptionResult {}"),
         );
-        let sources = TransformSourceSnapshot::new(files);
+        let sources = TransformSourceSnapshot::new(files)
+            .with_path_aliases(vec![(alias_root.clone(), real_root.clone())]);
 
         let resolved = sources
             .resolve_relative_with_declarations(

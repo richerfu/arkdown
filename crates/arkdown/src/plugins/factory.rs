@@ -1036,7 +1036,6 @@ impl<'a> PluginFactory<'a> {
         .with_system_api_context(self.input.system_api)
         .with_resource_context(self.input.resource_context)
         .with_tsc_target(self.input.tsc_target)
-        .with_module_analyzer(self.plan.module_analyzer)
         .with_auto_lazy_import(
             self.input.auto_lazy_import,
             self.input.auto_lazy_filter.clone(),
@@ -1335,7 +1334,6 @@ mod tests {
             bundle_name: "com.example.test".to_string(),
             use_normalized_ohm_url: true,
             should_emit_js: true,
-            module_analyzer: arkdown_ets_transform::ModuleAnalyzerKind::default(),
             output_target: OutputTarget::Hap,
             preview_mode: false,
             check_entry: false,

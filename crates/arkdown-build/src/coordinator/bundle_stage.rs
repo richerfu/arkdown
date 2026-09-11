@@ -76,7 +76,6 @@ pub(super) struct CoordinatorBundleStageInput<'a> {
     pub(super) watch_changed_files: Vec<PathBuf>,
     pub(super) coverage_mode: bool,
     pub(super) disable_abc_cache: bool,
-    pub(super) module_analyzer: ModuleAnalyzerKind,
     pub(super) checker_mode: CheckerMode,
     pub(super) project_root: &'a Path,
     pub(super) progress: &'a mut Progress,
@@ -115,7 +114,6 @@ impl BuildCoordinator {
             watch_changed_files,
             coverage_mode,
             disable_abc_cache,
-            module_analyzer,
             checker_mode,
             project_root,
             progress,
@@ -398,7 +396,6 @@ impl BuildCoordinator {
             .build()?;
             let task_inputs =
                 TaskInputs::compute(module_config.as_ref(), loader_json, &task_input_snapshot)
-                    .with_module_analyzer(module_analyzer)
                     .with_arkts_language_version(self.session.arkts_language_version)
                     .with_effective_obfuscation(
                         module_obfuscation.config.as_ref(),
@@ -607,7 +604,6 @@ impl BuildCoordinator {
                 module_name: &module.name,
                 module_target_name,
                 custom_config: Some(custom_cfg),
-                module_analyzer,
                 arkts_language_version: self.session.arkts_language_version,
                 should_emit_js: coverage_mode,
                 package_info: BundlePlanPackageInfo::from_module_context(

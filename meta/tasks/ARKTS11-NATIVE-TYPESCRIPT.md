@@ -103,13 +103,42 @@ workspace、Clippy、rustfmt 和 diff check 均通过；清除开发覆盖环境
 能从本地 macOS 平台包发现 TSGO 并完成 `check`，npm dry-run 确认 `tsc`、clean
 revision 元数据和许可证进入平台 tarball。
 
-真实业务工程的带 trace 构建中，Program 含 13205 个 source，1739 个 OXC 文件产生
-transform type queries。旧链路分别执行 linter 136.266 秒、semantic 64.767 秒和
-type facts 5.329 秒，checker 合计约 206.4 秒。build diagnostic batch 复用 normal
-semantic 并改用 TSGO 编译 checker pool 后，diagnostic batch 为 126.780 秒、facts
-为 6.682 秒，checker 合计约 133.4 秒，减少约 73 秒（35%）；完整缓存构建 208.78 秒并
-生成签名 HAP。`--skip-checker` 的 facts 阶段为 7.191 秒，完整无缓存构建 167.56 秒并
-生成签名 HAP。测量用于验证阶段归属，不建立工程路径或固定耗时合同。
+真实业务工程的 Program 含 13205 个 source，1739 个 OXC 文件产生 transform type
+queries。2026-09-11 在 Apple M2 Pro（12 核、16 GiB）上使用真实 Hvigor 6.21.1 和
+Arkdown 0.0.1-beta.11 各完成一轮 debug HAP 对比；两端都从 JS CLI 启动，使用同一
+product/module/target，关闭 Hvigor daemon，并将“冷构建”定义为对应公开 `clean` 后
+构建、“热构建”定义为源码不变时立即重复构建：
+
+| 实现 | clean 后墙钟 | 无变更热构建 | clean 后峰值 RSS | 热构建峰值 RSS |
+| --- | ---: | ---: | ---: | ---: |
+| Hvigor | 445.27 s | 4.42 s | 4.23 GiB | 0.55 GiB |
+| Arkdown 完整 checker | 305.37 s | 167.92 s | 3.54 GiB | 3.40 GiB |
+| Arkdown `--skip-checker` | 158.21 s | 36.53 s | 2.45 GiB | 2.21 GiB |
+| Arkdown `--skip-checker`（本轮最终 release） | 71.40 s | 38.73 s | 2.14 GiB | 2.05 GiB |
+
+完整 checker 的 clean 构建比 Hvigor 少 139.90 秒（31.42%，1.46 倍），显式
+`--skip-checker` 少 287.06 秒（64.47%，2.81 倍）。热构建则分别比 Hvigor 慢
+37.99 倍和 8.26 倍：完整 checker 每个新进程仍执行 130.510 秒 build diagnostics
+及 5.881 秒 facts；skip 路径仍执行 6.139 秒 facts，且两条路径都会重新 pack/sign。
+Hvigor 的 CompileArkTS、PackageHap、SignHap 均命中 UP-TO-DATE。
+
+本轮 clean 完整构建中，Arkdown build diagnostics 为 133.447 秒、facts 为 6.923
+秒、Rolldown bundle 为 122.240 秒、ABC 为 9.176 秒、pack/sign 为 17.430 秒；skip
+路径依次为 6.274、109.048、9.999、18.639 秒。Hvigor CompileArkTS 为 400.796 秒，
+PackageHap 为 13.181 秒，SignHap 为 21.631 秒。以上是单轮阶段快照，用于定位优化
+所有权，不建立工程路径、固定耗时或跨机器性能合同；OS page cache、已安装依赖和 SDK
+保持物化，未将其伪装成首次下载环境。
+
+本轮 `--skip-checker` 使用当前可用的 DevEco 26 SDK，因此与上表旧 SDK 数据不是
+严格同环境对比；同一 Arkdown 工程和公开 clean 口径下，墙钟由 158.21 秒降至
+71.40 秒，减少 86.81 秒（54.87%，2.22 倍）。源码快照、export binding kind 和
+symlink identity 现均在 Rolldown 启动前并行预计算，transform hook 不再递归解析
+re-export 或逐文件访问文件系统；Rolldown scan 从原 53–61 秒降至 2.645 秒。
+content-addressed transform object 不再逐个执行 `sync_all`，只在 manifest 发布边界
+持久化并原子替换，11841 个 object 的 commit 从 37–48 秒降至 3.042 秒。该轮 facts
+为 6.649 秒、bundle 12.372 秒、ABC 12.120 秒、pack/sign 17.557 秒；Node 进程线程数
+由约 151 降至 38。热构建已绕过 Rolldown 与 ABC，但仍由 facts 6.551 秒和 pack/sign
+18.850 秒主导，所以 38.73 秒不能表述为热路径完成。
 缓存只覆盖 Program 生命周期内不可变的 project/SDK 文件分类。SDK CommonJS 请求以
 transport batch 合并，但仍按请求顺序逐次执行全部插件函数和 class `check`。Rust 为
 每个 TSGO 子进程分配独立 host scope，避免多模块并发时进程内 `sessionId` 重复污染

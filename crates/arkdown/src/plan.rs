@@ -29,7 +29,6 @@ use std::path::PathBuf;
 use arkdown_core::{
     ArkdownError, ArktsLanguageVersion, BuildMode, InsightIntentFormBinding, OutputTarget,
 };
-use arkdown_ets_transform::ModuleAnalyzerKind;
 use rustc_hash::FxHashMap;
 
 // ---------------------------------------------------------------------------
@@ -391,8 +390,6 @@ pub struct BundlePlan {
     /// Corresponds to hvigor `projectConfig.shouldEmitJs`, which is derived in
     /// `AbstractCompileNode.initCommonArkConfig()`.
     pub should_emit_js: bool,
-    /// Module analyzer used for hvigor type/value split parity.
-    pub module_analyzer: ModuleAnalyzerKind,
     /// Output target kind (HAP / HSP / HAR).
     ///
     /// Used by the plugin factory to decide whether to activate
@@ -528,7 +525,6 @@ mod tests {
             bundle_name: "com.example.app".to_string(),
             use_normalized_ohm_url: true,
             should_emit_js: false,
-            module_analyzer: ModuleAnalyzerKind::default(),
             output_target: OutputTarget::Hap,
             preview_mode: false,
             check_entry: false,

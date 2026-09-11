@@ -102,9 +102,9 @@ use arkdown_native::{
 };
 
 use arkdown::plugins::ets_transform::{
-    CheckerMode, ComponentMetadata, InsightIntentSchemaCatalog, ModuleAnalyzerKind,
-    NavigationRouteMap, ResourceModuleReference, ResourceReference, ResourceTransformContext,
-    SystemApiCheckOptions, SystemResourceReferenceLoader,
+    CheckerMode, ComponentMetadata, InsightIntentSchemaCatalog, NavigationRouteMap,
+    ResourceModuleReference, ResourceReference, ResourceTransformContext, SystemApiCheckOptions,
+    SystemResourceReferenceLoader,
 };
 use arkdown::plugins::ohos_resolve::{ProcessImporteeConfig, ProcessImporteeRunner};
 use arkdown_cache::{CacheGroupKey, CacheGroupSnapshot, HarImporteeCache};

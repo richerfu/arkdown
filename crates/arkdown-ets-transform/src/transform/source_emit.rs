@@ -24,8 +24,11 @@ use oxc_codegen::{Codegen, CodegenOptions, CommentOptions};
 use oxc_parser::Parser;
 use oxc_semantic::Scoping;
 use oxc_span::{GetSpan, SourceType, Span};
-use rolldown_sourcemap::SourceMapBuilder;
+use rolldown_sourcemap::{collapse_sourcemaps, SourceMap, SourceMapBuilder};
 use rustc_hash::{FxHashMap, FxHashSet};
+use string_wizard::{Hires, MagicString, SourceMapOptions};
+
+use crate::source_map::SourceMapLineOffsets;
 
 pub struct HvigorTypescriptPrinter;
 
@@ -121,6 +124,35 @@ impl HvigorTypescriptPrinter {
         )
         .format();
         let source_map = generated.map.map(|source_map| {
+            let source_map = match layout.source_map.as_ref() {
+                Some(layout_map) => {
+                    // MagicString's boundary map also contains anchors that
+                    // OXC codegen never emitted. Keep only anchors that trace
+                    // an actual OXC token; otherwise the layout pass would
+                    // increase map granularity and change debugger behavior.
+                    let codegen_positions = source_map
+                        .get_tokens()
+                        .map(|token| (token.get_dst_line(), token.get_dst_col()))
+                        .collect::<FxHashSet<_>>();
+                    let mut filtered = SourceMapBuilder::default();
+                    filtered.set_source_and_content("", "");
+                    for token in layout_map.get_tokens().filter(|token| {
+                        codegen_positions.contains(&(token.get_src_line(), token.get_src_col()))
+                    }) {
+                        filtered.add_token(
+                            token.get_dst_line(),
+                            token.get_dst_col(),
+                            token.get_src_line(),
+                            token.get_src_col(),
+                            token.get_source_id(),
+                            token.get_name_id(),
+                        );
+                    }
+                    let filtered = filtered.into_sourcemap();
+                    collapse_sourcemaps(&[&source_map, &filtered])
+                }
+                None => source_map.into_owned(),
+            };
             let supplemental = source_text
                 .map(|source_text| {
                     TypeScriptSourceBoundaryMapper::new(
@@ -135,19 +167,14 @@ impl HvigorTypescriptPrinter {
                 .unwrap_or_default();
             let mut tokens = source_map
                 .get_tokens()
-                .map(|token| {
-                    let (dst_line, dst_col) = layout
-                        .offset_map
-                        .remap_line_col(token.get_dst_line(), token.get_dst_col());
-                    HvigorSourceMapToken {
-                        dst_line,
-                        dst_col,
-                        src_line: token.get_src_line(),
-                        src_col: token.get_src_col(),
-                        source_id: token.get_source_id(),
-                        name_id: token.get_name_id(),
-                        supplemental: false,
-                    }
+                .map(|token| HvigorSourceMapToken {
+                    dst_line: token.get_dst_line(),
+                    dst_col: token.get_dst_col(),
+                    src_line: token.get_src_line(),
+                    src_col: token.get_src_col(),
+                    source_id: token.get_source_id(),
+                    name_id: token.get_name_id(),
+                    supplemental: false,
                 })
                 .filter(|token| {
                     !supplemental
@@ -913,6 +940,8 @@ impl TypeScriptSourceBoundaryInventory<'_> {
 struct TypeScriptSourceBoundaryMapper<'a> {
     source: &'a str,
     generated: &'a str,
+    source_line_offsets: SourceMapLineOffsets,
+    generated_line_offsets: SourceMapLineOffsets,
     original: &'a [TypeScriptSourceBoundary],
     source_comments: &'a TypeScriptSourceCommentSnapshot,
     source_tree_kind: TypeScriptSourceTreeKind,
@@ -929,10 +958,33 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
         Self {
             source,
             generated,
+            source_line_offsets: SourceMapLineOffsets::new(source),
+            generated_line_offsets: SourceMapLineOffsets::new(generated),
             original,
             source_comments,
             source_tree_kind,
         }
+    }
+
+    fn source_position(&self, offset: u32) -> (u32, u32) {
+        self.source_line_offsets.line_col(offset)
+    }
+
+    fn generated_position(&self, offset: u32) -> (u32, u32) {
+        self.generated_line_offsets.line_col(offset)
+    }
+
+    fn source_map_entry(
+        &self,
+        generated_offset: u32,
+        source_offset: u32,
+    ) -> TypeScriptSourceMapEntry {
+        TypeScriptSourceMapEntry::from_offsets(
+            &self.generated_line_offsets,
+            generated_offset,
+            &self.source_line_offsets,
+            source_offset,
+        )
     }
 
     fn mappings(&self) -> TypeScriptSourceBoundaryMappings {
@@ -953,7 +1005,7 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
         let mut suppressed_generated_positions = generated
             .accessor_prefixes
             .iter()
-            .map(|span| crate::source_map::offset_to_line_col(self.generated, span.start))
+            .map(|span| self.generated_position(span.start))
             .collect::<FxHashSet<_>>();
         let mut generated_by_kind =
             HashMap::<TypeScriptSourceBoundaryKind, VecDeque<TypeScriptSourceBoundary>>::new();
@@ -982,36 +1034,22 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
             match original.kind {
                 TypeScriptSourceBoundaryKind::ClassHeritageClause => {
                     if !original.span.is_empty() && !generated_span.is_empty() {
-                        entries.push(TypeScriptSourceMapEntry::from_offsets(
-                            self.generated,
+                        entries.push(self.source_map_entry(
                             generated_span.start.saturating_sub(1),
-                            self.source,
                             original.span.start,
                         ));
-                        entries.push(TypeScriptSourceMapEntry::from_offsets(
-                            self.generated,
-                            generated_span.end,
-                            self.source,
-                            original.span.end,
-                        ));
+                        entries.push(self.source_map_entry(generated_span.end, original.span.end));
                     }
                     continue;
                 }
                 TypeScriptSourceBoundaryKind::ClassBodyOpen => {
-                    suppressed_generated_positions.insert(crate::source_map::offset_to_line_col(
-                        self.generated,
-                        generated_span.start,
-                    ));
+                    suppressed_generated_positions
+                        .insert(self.generated_position(generated_span.start));
                     continue;
                 }
                 TypeScriptSourceBoundaryKind::ModifierClosure(_)
                 | TypeScriptSourceBoundaryKind::TypeMemberClosure(_) => {
-                    entries.push(TypeScriptSourceMapEntry::from_offsets(
-                        self.generated,
-                        generated_span.start,
-                        self.source,
-                        original.span.start,
-                    ));
+                    entries.push(self.source_map_entry(generated_span.start, original.span.start));
                     continue;
                 }
                 TypeScriptSourceBoundaryKind::ArrowFunction => {
@@ -1034,12 +1072,12 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
                 }
                 TypeScriptSourceBoundaryKind::AssignmentOperator => {
                     if !original.span.is_empty() {
-                        entries.push(TypeScriptSourceMapEntry::from_offsets(
-                            self.generated,
-                            generated_boundary.span.start,
-                            self.source,
-                            original.span.start,
-                        ));
+                        entries.push(
+                            self.source_map_entry(
+                                generated_boundary.span.start,
+                                original.span.start,
+                            ),
+                        );
                     }
                     continue;
                 }
@@ -1071,12 +1109,7 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
                     continue;
                 }
                 TypeScriptSourceBoundaryKind::CatchClause => {
-                    entries.push(TypeScriptSourceMapEntry::from_offsets(
-                        self.generated,
-                        generated_span.start,
-                        self.source,
-                        original.span.start,
-                    ));
+                    entries.push(self.source_map_entry(generated_span.start, original.span.start));
                     continue;
                 }
                 TypeScriptSourceBoundaryKind::ParenthesizedExpression => {
@@ -1086,43 +1119,26 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
                             (generated_span.end - 1, original.span.end - 1),
                             (generated_span.end, original.span.end),
                         ] {
-                            entries.push(TypeScriptSourceMapEntry::from_offsets(
-                                self.generated,
-                                generated_offset,
-                                self.source,
-                                source_offset,
-                            ));
+                            entries.push(self.source_map_entry(generated_offset, source_offset));
                         }
                     }
                     continue;
                 }
                 TypeScriptSourceBoundaryKind::ObjectExpressionClosure => {
                     let position = generated_span.end.saturating_sub(1);
-                    suppressed_generated_positions.insert(crate::source_map::offset_to_line_col(
-                        self.generated,
-                        position,
-                    ));
+                    suppressed_generated_positions.insert(self.generated_position(position));
                     if !original.span.is_empty() && !generated_span.is_empty() {
                         // emitter.ts wraps every object literal in the generic
                         // source-map pipeline. `emitObjectLiteralExpression`
                         // writes the closing brace through `emitList`, then
                         // `emitSourceMapsAfterNode` records the range end at
                         // the writer position immediately after that brace.
-                        entries.push(TypeScriptSourceMapEntry::from_offsets(
-                            self.generated,
-                            generated_span.end,
-                            self.source,
-                            original.span.end,
-                        ));
+                        entries.push(self.source_map_entry(generated_span.end, original.span.end));
                     }
-                    let (source_start_line, _) =
-                        crate::source_map::offset_to_line_col(self.source, original.span.start);
-                    let (source_end_line, _) =
-                        crate::source_map::offset_to_line_col(self.source, original.span.end);
-                    let (generated_start_line, _) =
-                        crate::source_map::offset_to_line_col(self.generated, generated_span.start);
-                    let (generated_end_line, _) =
-                        crate::source_map::offset_to_line_col(self.generated, generated_span.end);
+                    let (source_start_line, _) = self.source_position(original.span.start);
+                    let (source_end_line, _) = self.source_position(original.span.end);
+                    let (generated_start_line, _) = self.generated_position(generated_span.start);
+                    let (generated_end_line, _) = self.generated_position(generated_span.end);
                     if source_start_line == source_end_line
                         && generated_start_line == generated_end_line
                         && original.span.end >= 2
@@ -1138,21 +1154,16 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
                             .get(original.span.end.saturating_sub(2) as usize)
                             .is_some_and(u8::is_ascii_whitespace)
                     {
-                        entries.push(TypeScriptSourceMapEntry::from_offsets(
-                            self.generated,
-                            generated_span.end - 2,
-                            self.source,
-                            original.span.end - 2,
-                        ));
+                        entries.push(
+                            self.source_map_entry(generated_span.end - 2, original.span.end - 2),
+                        );
                     }
                     continue;
                 }
                 TypeScriptSourceBoundaryKind::TemplateInterpolationClosure
                 | TypeScriptSourceBoundaryKind::LineBrokenMember(_) => {
-                    suppressed_generated_positions.insert(crate::source_map::offset_to_line_col(
-                        self.generated,
-                        generated_span.start,
-                    ));
+                    suppressed_generated_positions
+                        .insert(self.generated_position(generated_span.start));
                     continue;
                 }
                 TypeScriptSourceBoundaryKind::IfStatementClosure
@@ -1161,18 +1172,9 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
                         continue;
                     }
                     if !generated_span.is_empty() {
-                        suppressed_generated_positions.insert(
-                            crate::source_map::offset_to_line_col(
-                                self.generated,
-                                generated_span.end - 1,
-                            ),
-                        );
-                        entries.push(TypeScriptSourceMapEntry::from_offsets(
-                            self.generated,
-                            generated_span.end,
-                            self.source,
-                            original.span.end,
-                        ));
+                        suppressed_generated_positions
+                            .insert(self.generated_position(generated_span.end - 1));
+                        entries.push(self.source_map_entry(generated_span.end, original.span.end));
                     }
                     continue;
                 }
@@ -1194,12 +1196,7 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
                 original.kind,
                 TypeScriptSourceBoundaryKind::MethodClosure { .. }
             ) {
-                entries.push(TypeScriptSourceMapEntry::from_offsets(
-                    self.generated,
-                    generated_span.end,
-                    self.source,
-                    original.span.end,
-                ));
+                entries.push(self.source_map_entry(generated_span.end, original.span.end));
                 continue;
             }
             if matches!(
@@ -1219,10 +1216,7 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
             }
             if matches!(original.kind, TypeScriptSourceBoundaryKind::Method { .. }) {
                 if let Some(body) = generated_boundary.method_body_span {
-                    suppressed_generated_positions.insert(crate::source_map::offset_to_line_col(
-                        self.generated,
-                        body.start,
-                    ));
+                    suppressed_generated_positions.insert(self.generated_position(body.start));
                 }
             }
             if matches!(
@@ -1238,15 +1232,9 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
                 );
             }
             let source_offset = original.span.start;
-            let generated_start =
-                crate::source_map::offset_to_line_col(self.generated, generated_span.start);
+            let generated_start = self.generated_position(generated_span.start);
             if !suppressed_generated_positions.contains(&generated_start) {
-                entries.push(TypeScriptSourceMapEntry::from_offsets(
-                    self.generated,
-                    generated_span.start,
-                    self.source,
-                    source_offset,
-                ));
+                entries.push(self.source_map_entry(generated_span.start, source_offset));
             }
             if matches!(
                 original.kind,
@@ -1255,21 +1243,12 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
                     ..
                 }
             ) {
-                suppressed_generated_positions.insert(crate::source_map::offset_to_line_col(
-                    self.generated,
-                    generated_span.end,
-                ));
+                suppressed_generated_positions.insert(self.generated_position(generated_span.end));
                 continue;
             }
-            let generated_end =
-                crate::source_map::offset_to_line_col(self.generated, generated_span.end);
+            let generated_end = self.generated_position(generated_span.end);
             if !suppressed_generated_positions.contains(&generated_end) {
-                entries.push(TypeScriptSourceMapEntry::from_offsets(
-                    self.generated,
-                    generated_span.end,
-                    self.source,
-                    original.span.end,
-                ));
+                entries.push(self.source_map_entry(generated_span.end, original.span.end));
             }
         }
 
@@ -1317,12 +1296,7 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
                 (generated_comment.span.start, source_comment.span.start),
                 (generated_comment.span.end, source_comment.span.end),
             ] {
-                entries.push(TypeScriptSourceMapEntry::from_offsets(
-                    self.generated,
-                    generated_offset,
-                    self.source,
-                    source_offset,
-                ));
+                entries.push(self.source_map_entry(generated_offset, source_offset));
             }
         }
     }
@@ -1364,12 +1338,7 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
             (generated_operator, source_operator),
             (generated_operator + 2, source_operator + 2),
         ] {
-            entries.push(TypeScriptSourceMapEntry::from_offsets(
-                self.generated,
-                generated_offset,
-                self.source,
-                source_offset,
-            ));
+            entries.push(self.source_map_entry(generated_offset, source_offset));
         }
         let generated_body = self
             .generated
@@ -1377,27 +1346,16 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
             .and_then(|tail| tail.find('{'))
             .map(|offset| generated_operator + 2 + offset as u32);
         if let Some(generated_body) = generated_body {
-            suppressed.insert(crate::source_map::offset_to_line_col(
-                self.generated,
-                generated_body,
-            ));
+            suppressed.insert(self.generated_position(generated_body));
         }
         if !original.span.is_empty() && !generated.span.is_empty() {
             // `emitArrowFunction` is also surrounded by the generic source-map
             // pipeline. A block body writes `}` before
             // `emitSourceMapsAfterNode` records the ArrowFunction range end.
-            entries.push(TypeScriptSourceMapEntry::from_offsets(
-                self.generated,
-                generated.span.end,
-                self.source,
-                original.span.end,
-            ));
+            entries.push(self.source_map_entry(generated.span.end, original.span.end));
         }
         if !source_prefix.contains('(') && !generated_prefix.contains('(') {
-            suppressed.insert(crate::source_map::offset_to_line_col(
-                self.generated,
-                generated_parameter + 1,
-            ));
+            suppressed.insert(self.generated_position(generated_parameter + 1));
         }
     }
 
@@ -1440,34 +1398,16 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
             .get(generated.span.start as usize..generated.span.end as usize)
             .unwrap_or_default();
         if source_call.ends_with("()") && generated_call.ends_with("()") {
-            entries.push(TypeScriptSourceMapEntry::from_offsets(
-                self.generated,
-                generated.span.end - 2,
-                self.source,
-                original.span.end - 2,
-            ));
-            entries.push(TypeScriptSourceMapEntry::from_offsets(
-                self.generated,
-                generated.span.end,
-                self.source,
-                original.span.end,
-            ));
-            suppressed.insert(crate::source_map::offset_to_line_col(
-                self.generated,
-                generated.span.end - 1,
-            ));
+            entries.push(self.source_map_entry(generated.span.end - 2, original.span.end - 2));
+            entries.push(self.source_map_entry(generated.span.end, original.span.end));
+            suppressed.insert(self.generated_position(generated.span.end - 1));
             return;
         }
         // `process_module_files.ts::genContentAndSourceMapInfo` writes the
         // transformed SourceFile with TypeScript's printer. Its generic
         // `emitSourceMapsAfterNode` records every source-backed call's end;
         // `emitIfStatement` does not add a separate mapping for `)`.
-        entries.push(TypeScriptSourceMapEntry::from_offsets(
-            self.generated,
-            generated.span.end,
-            self.source,
-            original.span.end,
-        ));
+        entries.push(self.source_map_entry(generated.span.end, original.span.end));
     }
 
     fn map_statement_closure(
@@ -1496,29 +1436,17 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
             || generated.span.end.saturating_sub(1),
             |_| self.statement_generated_end_boundary(generated.span),
         );
-        entries.push(TypeScriptSourceMapEntry::from_offsets(
-            self.generated,
-            generated_end_boundary,
-            self.source,
-            source_end_boundary,
-        ));
+        entries.push(self.source_map_entry(generated_end_boundary, source_end_boundary));
         if trailing_argument_end.is_some() {
             // The source and generated statement closures remain mapped in
             // addition to the last-argument anchor above. TypeScript emits
             // both tokens when it removes the trailing argument comma.
-            entries.push(TypeScriptSourceMapEntry::from_offsets(
-                self.generated,
+            entries.push(self.source_map_entry(
                 generated.span.end.saturating_sub(1),
-                self.source,
                 original.span.end.saturating_sub(1),
             ));
         }
-        entries.push(TypeScriptSourceMapEntry::from_offsets(
-            self.generated,
-            generated.span.end,
-            self.source,
-            original.span.end,
-        ));
+        entries.push(self.source_map_entry(generated.span.end, original.span.end));
     }
 
     fn statement_generated_end_boundary(&self, span: Span) -> u32 {
@@ -1583,10 +1511,7 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
             .get(generated.span.start as usize..generated.span.end as usize)
             .unwrap_or_default();
         if source_text.ends_with("};") && generated_text.ends_with("};") {
-            suppressed.insert(crate::source_map::offset_to_line_col(
-                self.generated,
-                generated.span.end - 2,
-            ));
+            suppressed.insert(self.generated_position(generated.span.end - 2));
         }
     }
 
@@ -1609,25 +1534,12 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
             .get(generated.span.start as usize..generated.span.end as usize)
             .unwrap_or_default();
         if source_text.starts_with("async ") && generated_text.starts_with("async ") {
-            entries.push(TypeScriptSourceMapEntry::from_offsets(
-                self.generated,
-                generated.span.start + 5,
-                self.source,
-                original.span.start + 5,
-            ));
+            entries.push(self.source_map_entry(generated.span.start + 5, original.span.start + 5));
         }
         if let Some(open_brace) = generated_text.find('{') {
-            suppressed.insert(crate::source_map::offset_to_line_col(
-                self.generated,
-                generated.span.start + open_brace as u32,
-            ));
+            suppressed.insert(self.generated_position(generated.span.start + open_brace as u32));
         }
-        entries.push(TypeScriptSourceMapEntry::from_offsets(
-            self.generated,
-            generated.span.end,
-            self.source,
-            original.span.end,
-        ));
+        entries.push(self.source_map_entry(generated.span.end, original.span.end));
     }
 
     fn map_export_default_function(
@@ -1641,29 +1553,18 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
         const DEFAULT_START: u32 = 7;
         const DEFAULT_END: u32 = 14;
         for offset in [0, EXPORT_END, DEFAULT_START, DEFAULT_END] {
-            entries.push(TypeScriptSourceMapEntry::from_offsets(
-                self.generated,
-                generated.span.start + offset,
-                self.source,
-                original.span.start + offset,
-            ));
+            entries.push(
+                self.source_map_entry(generated.span.start + offset, original.span.start + offset),
+            );
         }
-        entries.push(TypeScriptSourceMapEntry::from_offsets(
-            self.generated,
-            generated.span.end,
-            self.source,
-            original.span.end,
-        ));
+        entries.push(self.source_map_entry(generated.span.end, original.span.end));
         let generated_source = self
             .generated
             .get(generated.span.start as usize..generated.span.end as usize)
             .unwrap_or_default();
         for marker in ["function", "{"] {
             if let Some(offset) = generated_source.find(marker) {
-                suppressed.insert(crate::source_map::offset_to_line_col(
-                    self.generated,
-                    generated.span.start + offset as u32,
-                ));
+                suppressed.insert(self.generated_position(generated.span.start + offset as u32));
             }
         }
     }
@@ -1676,12 +1577,9 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
         suppressed: &mut FxHashSet<(u32, u32)>,
     ) {
         for offset in [0, 6, 7, 14] {
-            entries.push(TypeScriptSourceMapEntry::from_offsets(
-                self.generated,
-                generated.span.start + offset,
-                self.source,
-                original.span.start + offset,
-            ));
+            entries.push(
+                self.source_map_entry(generated.span.start + offset, original.span.start + offset),
+            );
         }
         let original_text = self
             .source
@@ -1695,14 +1593,11 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
             if let (Some(source_heritage), Some(generated_heritage)) =
                 (original_text.find(heritage), generated_text.find(heritage))
             {
-                suppressed.insert(crate::source_map::offset_to_line_col(
-                    self.generated,
+                suppressed.insert(self.generated_position(
                     generated.span.start + generated_heritage.saturating_sub(1) as u32,
                 ));
-                entries.push(TypeScriptSourceMapEntry::from_offsets(
-                    self.generated,
+                entries.push(self.source_map_entry(
                     generated.span.start + generated_heritage.saturating_sub(1) as u32,
-                    self.source,
                     original.span.start + source_heritage as u32,
                 ));
                 break;
@@ -1710,23 +1605,12 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
         }
         for marker in ["class", "{"] {
             if let Some(offset) = generated_text.find(marker) {
-                suppressed.insert(crate::source_map::offset_to_line_col(
-                    self.generated,
-                    generated.span.start + offset as u32,
-                ));
+                suppressed.insert(self.generated_position(generated.span.start + offset as u32));
             }
         }
         if !generated.span.is_empty() {
-            suppressed.insert(crate::source_map::offset_to_line_col(
-                self.generated,
-                generated.span.end - 1,
-            ));
-            entries.push(TypeScriptSourceMapEntry::from_offsets(
-                self.generated,
-                generated.span.end,
-                self.source,
-                original.span.end,
-            ));
+            suppressed.insert(self.generated_position(generated.span.end - 1));
+            entries.push(self.source_map_entry(generated.span.end, original.span.end));
         }
     }
 
@@ -1766,20 +1650,9 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
             return;
         }
 
-        entries.push(TypeScriptSourceMapEntry::from_offsets(
-            self.generated,
-            generated_anchor,
-            self.source,
-            source_anchor,
-        ));
-        suppressed.insert(crate::source_map::offset_to_line_col(
-            self.generated,
-            generated_key.start,
-        ));
-        suppressed.insert(crate::source_map::offset_to_line_col(
-            self.generated,
-            generated_key.end,
-        ));
+        entries.push(self.source_map_entry(generated_anchor, source_anchor));
+        suppressed.insert(self.generated_position(generated_key.start));
+        suppressed.insert(self.generated_position(generated_key.end));
     }
 
     fn map_declare_prefix(
@@ -1797,10 +1670,8 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
             return;
         }
         for offset in [DECLARE.len(), DECLARE.len() + 1] {
-            entries.push(TypeScriptSourceMapEntry::from_offsets(
-                self.generated,
+            entries.push(self.source_map_entry(
                 generated.span.start + offset as u32,
-                self.source,
                 original.span.start + offset as u32,
             ));
         }
@@ -1822,15 +1693,13 @@ struct TypeScriptSourceMapEntry {
 
 impl TypeScriptSourceMapEntry {
     fn from_offsets(
-        generated: &str,
+        generated: &SourceMapLineOffsets,
         generated_offset: u32,
-        source: &str,
+        source: &SourceMapLineOffsets,
         source_offset: u32,
     ) -> Self {
-        let (generated_line, generated_col) =
-            crate::source_map::offset_to_line_col(generated, generated_offset);
-        let (source_line, source_col) =
-            crate::source_map::offset_to_line_col(source, source_offset);
+        let (generated_line, generated_col) = generated.line_col(generated_offset);
+        let (source_line, source_col) = source.line_col(source_offset);
         Self {
             generated_line,
             generated_col,
@@ -2441,8 +2310,8 @@ impl<'a> HvigorTypescriptLayout<'a> {
         let parsed = Parser::new(&allocator, &self.code, SourceType::ets()).parse();
         if parsed.panicked || !parsed.diagnostics.is_empty() {
             return HvigorTypescriptLayoutOutput {
-                offset_map: HvigorLayoutOffsetMap::identity(&self.code),
                 code: self.code,
+                source_map: None,
             };
         }
 
@@ -2457,113 +2326,7 @@ impl<'a> HvigorTypescriptLayout<'a> {
 
 struct HvigorTypescriptLayoutOutput {
     code: String,
-    offset_map: HvigorLayoutOffsetMap,
-}
-
-struct HvigorLayoutOffsetMap {
-    original_line_offsets: Vec<usize>,
-    formatted: String,
-    edits: Vec<HvigorAppliedTextEdit>,
-}
-
-impl HvigorLayoutOffsetMap {
-    fn identity(source: &str) -> Self {
-        Self {
-            original_line_offsets: Self::line_offsets(source),
-            formatted: source.to_string(),
-            edits: Vec::new(),
-        }
-    }
-
-    fn new(original: &str, formatted: String, edits: Vec<HvigorAppliedTextEdit>) -> Self {
-        Self {
-            original_line_offsets: Self::line_offsets(original),
-            formatted,
-            edits,
-        }
-    }
-
-    fn remap_line_col(&self, line: u32, col: u32) -> (u32, u32) {
-        let Some(line_start) = self.original_line_offsets.get(line as usize).copied() else {
-            return (line, col);
-        };
-        let original_offset = line_start.saturating_add(col as usize);
-        let formatted_offset = self.remap_offset(original_offset);
-        crate::source_map::offset_to_line_col(&self.formatted, formatted_offset as u32)
-    }
-
-    fn remap_offset(&self, original_offset: usize) -> usize {
-        let mut delta = 0isize;
-        for edit in &self.edits {
-            let start = edit.span.start as usize;
-            let end = edit.span.end as usize;
-            if original_offset < start {
-                break;
-            }
-            if original_offset <= end {
-                return (start as isize + delta + edit.remap_inside(original_offset - start)).max(0)
-                    as usize;
-            }
-            delta += edit.replacement.len() as isize - (end - start) as isize;
-        }
-        (original_offset as isize + delta).max(0) as usize
-    }
-
-    fn line_offsets(source: &str) -> Vec<usize> {
-        let mut offsets = vec![0];
-        offsets.extend(
-            source
-                .bytes()
-                .enumerate()
-                .filter_map(|(index, byte)| (byte == b'\n').then_some(index + 1)),
-        );
-        offsets
-    }
-}
-
-struct HvigorAppliedTextEdit {
-    span: Span,
-    original: String,
-    replacement: String,
-}
-
-impl HvigorAppliedTextEdit {
-    fn remap_inside(&self, original_offset: usize) -> isize {
-        if original_offset >= self.original.len() {
-            return self.replacement.len() as isize;
-        }
-
-        let rank = self.original.as_bytes()[..original_offset]
-            .iter()
-            .filter(|byte| !byte.is_ascii_whitespace())
-            .count();
-        let original_non_whitespace = self
-            .original
-            .bytes()
-            .filter(|byte| !byte.is_ascii_whitespace())
-            .collect::<Vec<_>>();
-        let replacement_non_whitespace = self
-            .replacement
-            .bytes()
-            .filter(|byte| !byte.is_ascii_whitespace())
-            .collect::<Vec<_>>();
-        if original_non_whitespace == replacement_non_whitespace {
-            if rank == replacement_non_whitespace.len() {
-                return self.replacement.len() as isize;
-            }
-            if let Some((index, _)) = self
-                .replacement
-                .bytes()
-                .enumerate()
-                .filter(|(_, byte)| !byte.is_ascii_whitespace())
-                .nth(rank)
-            {
-                return index as isize;
-            }
-        }
-
-        original_offset.min(self.replacement.len()) as isize
-    }
+    source_map: Option<SourceMap>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2888,36 +2651,39 @@ impl<'a> HvigorLayoutInventory<'a> {
         self.edits
             .sort_by_key(|edit| (edit.span.start, edit.span.end));
 
-        let applied_edits = self
-            .edits
-            .iter()
-            .filter_map(|edit| {
-                let original = self
-                    .source
-                    .get(edit.span.start as usize..edit.span.end as usize)?;
-                Some(HvigorAppliedTextEdit {
-                    span: edit.span,
-                    original: original.to_string(),
-                    replacement: edit.replacement.clone(),
-                })
-            })
-            .collect::<Vec<_>>();
-
-        let mut code = self.source.to_string();
-        let mut last_start = code.len();
+        // Preserve the old reverse-application conflict rule: an edit is kept
+        // only when it does not overlap the next selected edit. The selected
+        // set is then applied in source order through Rolldown's MagicString
+        // implementation so code and patch sourcemap share one owner.
+        let mut selected = Vec::with_capacity(self.edits.len());
+        let mut last_start = self.source.len().min(u32::MAX as usize) as u32;
         for edit in self.edits.into_iter().rev() {
-            let start = edit.span.start as usize;
-            let end = edit.span.end as usize;
-            if start > end || end > last_start {
+            if edit.span.start > edit.span.end || edit.span.end > last_start {
                 continue;
             }
-            code.replace_range(start..end, &edit.replacement);
-            last_start = start;
+            last_start = edit.span.start;
+            selected.push(edit);
         }
-        HvigorTypescriptLayoutOutput {
-            offset_map: HvigorLayoutOffsetMap::new(self.source, code.clone(), applied_edits),
-            code,
+        selected.reverse();
+
+        let mut magic_string = MagicString::new(self.source);
+        for edit in &selected {
+            let result = if edit.span.is_empty() {
+                magic_string.append_left(edit.span.start, edit.replacement.as_str())
+            } else {
+                magic_string.update(edit.span.start, edit.span.end, edit.replacement.as_str())
+            };
+            debug_assert!(result.is_ok(), "validated layout edits must be applicable");
         }
+        let code = magic_string.to_string();
+        let source_map = (!selected.is_empty()).then(|| {
+            magic_string.source_map(SourceMapOptions {
+                include_content: false,
+                source: "".into(),
+                hires: Hires::Boundary,
+            })
+        });
+        HvigorTypescriptLayoutOutput { code, source_map }
     }
 }
 

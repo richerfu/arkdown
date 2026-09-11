@@ -41,6 +41,20 @@ pub struct ModuleTransformCacheCommit<'a, T> {
     pub source_snapshot_hashes: &'a BTreeMap<String, String>,
 }
 
+/// Observable work performed while publishing one transform-cache generation.
+///
+/// Artifact files are immutable and content-addressed. `artifact_count` and
+/// `artifact_bytes` therefore include only cache objects that were absent and
+/// written by this commit, while `record_count` describes the complete
+/// manifest generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModuleTransformCacheCommitStats {
+    pub record_count: usize,
+    pub artifact_count: usize,
+    pub artifact_bytes: u64,
+    pub manifest_bytes: u64,
+}
+
 /// Valid transform records loaded before Rolldown enters its hook hot path.
 #[derive(Debug)]
 pub struct LoadedModuleTransformCache<T> {
@@ -153,8 +167,11 @@ impl ModuleTransformCacheStore {
     pub fn commit<T: Serialize>(
         &self,
         input: ModuleTransformCacheCommit<'_, T>,
-    ) -> Result<(), CacheError> {
+    ) -> Result<ModuleTransformCacheCommitStats, CacheError> {
         fs_err::create_dir_all(self.root.join(Self::ARTIFACT_DIR))?;
+        let record_count = input.records.len();
+        let mut artifact_count = 0usize;
+        let mut artifact_bytes = 0u64;
         let mut artifact_by_module = BTreeMap::new();
         for record in input.records {
             let artifact = ModuleTransformCacheArtifact {
@@ -167,6 +184,8 @@ impl ModuleTransformCacheStore {
             let path = self.root.join(&relative);
             if !path.is_file() {
                 AtomicCacheFile::new(&path).write(&bytes)?;
+                artifact_count += 1;
+                artifact_bytes = artifact_bytes.saturating_add(bytes.len() as u64);
             }
             artifact_by_module.insert(
                 artifact.record.module_id.clone(),
@@ -205,7 +224,13 @@ impl ModuleTransformCacheStore {
             modules,
         };
         let bytes = serde_json::to_vec_pretty(&manifest)?;
-        AtomicManifestFile::new(&self.root).replace(&bytes)
+        AtomicManifestFile::new(&self.root).replace(&bytes)?;
+        Ok(ModuleTransformCacheCommitStats {
+            record_count,
+            artifact_count,
+            artifact_bytes,
+            manifest_bytes: bytes.len() as u64,
+        })
     }
 
     fn load_manifest(&self) -> Result<Option<ModuleTransformCacheManifest>, CacheError> {
@@ -301,7 +326,11 @@ impl<'a> AtomicCacheFile<'a> {
         let temporary = self.temporary_path();
         let mut file = std::fs::File::create(&temporary)?;
         file.write_all(bytes)?;
-        file.sync_all()?;
+        // Artifacts are immutable content-addressed objects and become visible
+        // only through the final manifest rename. A torn artifact is already
+        // treated as an ordinary cache miss by `load`, so forcing a storage
+        // barrier for every module adds no correctness guarantee. Durability
+        // belongs to the manifest publication boundary below.
         match fs_err::rename(&temporary, self.path) {
             Ok(()) => Ok(()),
             Err(_error) if self.path.is_file() => {
@@ -495,6 +524,33 @@ mod tests {
             .expect("corrupt artifact degrades to miss")
             .into_records()
             .is_empty());
+    }
+
+    #[test]
+    fn repeated_commit_reuses_immutable_content_addressed_artifacts() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = ModuleTransformCacheStore::new(temp.path().to_path_buf(), "env".to_string());
+        let hashes = BTreeMap::from([("entry".to_string(), "v1".to_string())]);
+        let imports = BTreeMap::new();
+        let active = ["entry".to_string()];
+        let commit = || ModuleTransformCacheCommit {
+            records: vec![record("entry", "v1", "v1")],
+            module_imports: &imports,
+            active_module_ids: &active,
+            source_snapshot_hashes: &hashes,
+        };
+
+        let first = store.commit(commit()).expect("first commit");
+        let second = store.commit(commit()).expect("repeat commit");
+
+        assert_eq!(first.record_count, 1);
+        assert_eq!(first.artifact_count, 1);
+        assert!(first.artifact_bytes > 0);
+        assert!(first.manifest_bytes > 0);
+        assert_eq!(second.record_count, 1);
+        assert_eq!(second.artifact_count, 0);
+        assert_eq!(second.artifact_bytes, 0);
+        assert_eq!(second.manifest_bytes, first.manifest_bytes);
     }
 
     #[test]

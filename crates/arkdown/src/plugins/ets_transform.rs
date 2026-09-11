@@ -32,11 +32,10 @@ pub use arkdown_ets_transform::error::{DiagnosticSeverity, EtsTransformError};
 pub use arkdown_ets_transform::transform;
 pub use arkdown_ets_transform::transform::component_meta::ComponentMetadata;
 pub use arkdown_ets_transform::{
-    ArktsSourceChecker, CheckerMode, InsightIntentSchemaCatalog, ModuleAnalyzerKind,
-    NavigationRouteMap, ResourceModuleReference, ResourceReference, ResourceTransformContext,
-    RolldownEtsTransformPlan, StaticModuleSpecifierRewrite, SystemApiCheckOptions,
-    SystemResourceReferenceLoader, TransformEntrySourceId, TransformResolvedStaticModule,
-    TransformSourceSnapshot,
+    ArktsSourceChecker, CheckerMode, InsightIntentSchemaCatalog, NavigationRouteMap,
+    ResourceModuleReference, ResourceReference, ResourceTransformContext, RolldownEtsTransformPlan,
+    StaticModuleSpecifierRewrite, SystemApiCheckOptions, SystemResourceReferenceLoader,
+    TransformEntrySourceId, TransformResolvedStaticModule, TransformSourceSnapshot,
 };
 
 /// ArkTS transform plugin adapter.

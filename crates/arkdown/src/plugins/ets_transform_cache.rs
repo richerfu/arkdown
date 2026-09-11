@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use arc_swap::ArcSwap;
 use arkdown_cache::{
@@ -293,21 +294,29 @@ impl EtsTransformCache {
             .collect::<BTreeMap<_, _>>();
         let source_hashes = plan.sources.transform_cache_source_hashes();
         let active_module_ids = active_module_ids.into_iter().collect::<Vec<_>>();
+        let started_at = Instant::now();
         let result = store.commit(ModuleTransformCacheCommit {
             records: records.into_values().collect(),
             module_imports: &module_imports,
             active_module_ids: &active_module_ids,
             source_snapshot_hashes: &source_hashes,
         });
-        if let Err(error) = result {
-            tracing::warn!(error = %error, "failed to commit OXC transform cache");
+        match result {
+            Ok(stats) => tracing::debug!(
+                hits = self.hit_count.load(Ordering::Relaxed),
+                misses = self.miss_count.load(Ordering::Relaxed),
+                records = stats.record_count,
+                artifacts_written = stats.artifact_count,
+                artifact_bytes = stats.artifact_bytes,
+                manifest_bytes = stats.manifest_bytes,
+                elapsed_ms = started_at.elapsed().as_millis(),
+                "OXC transform cache committed"
+            ),
+            Err(error) => {
+                tracing::warn!(error = %error, "failed to commit OXC transform cache");
+            }
         }
         self.pending.clear();
-        tracing::debug!(
-            hits = self.hit_count.load(Ordering::Relaxed),
-            misses = self.miss_count.load(Ordering::Relaxed),
-            "OXC transform cache committed"
-        );
     }
 
     fn environment_key(policy: &BundleCachePolicy) -> String {

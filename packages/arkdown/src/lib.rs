@@ -25,6 +25,33 @@
 #[global_allocator]
 static ALLOC: mimalloc_safe::MiMalloc = mimalloc_safe::MiMalloc;
 
+/// Use the same bounded N-API runtime contract as Rolldown's native binding.
+/// Rolldown performs CPU work on Tokio workers and uses `spawn_blocking` for a
+/// small amount of source I/O; Tokio's default allowance of 512 blocking
+/// threads otherwise lets a large cold graph create hundreds of parked stacks.
+#[napi_derive::module_init]
+fn initialize_async_runtime() {
+  #[cfg(not(target_family = "wasm"))]
+  {
+    let max_blocking_threads = std::env::var("ROLLDOWN_MAX_BLOCKING_THREADS")
+      .ok()
+      .and_then(|value| value.parse::<usize>().ok())
+      .unwrap_or(4);
+    let worker_threads = std::env::var("ROLLDOWN_WORKER_THREADS")
+      .ok()
+      .and_then(|value| value.parse::<usize>().ok())
+      .unwrap_or_else(|| num_cpus::get_physical() * 3 / 2);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+      .worker_threads(worker_threads)
+      .max_blocking_threads(max_blocking_threads)
+      .thread_name("arkdown-rolldown-worker")
+      .enable_all()
+      .build()
+      .expect("failed to initialize the Arkdown N-API runtime");
+    napi::bindgen_prelude::create_custom_tokio_runtime(runtime);
+  }
+}
+
 mod hvigor_plugin_plan;
 mod js_callback;
 mod package_layout;
