@@ -12,16 +12,24 @@ use super::CrossplatformSourceCollection;
 #[derive(Debug, Clone, Default)]
 pub struct ArktsTypeFactsSnapshot {
     files: Arc<FxHashMap<PathBuf, ArktsFileTypeFacts>>,
+    lookup_paths: Arc<FxHashMap<PathBuf, PathBuf>>,
 }
 
 impl ArktsTypeFactsSnapshot {
     pub fn new(files: FxHashMap<PathBuf, ArktsFileTypeFacts>) -> Self {
-        let files = files
-            .into_iter()
-            .map(|(path, facts)| (canonicalize_or_owned(&lexical_normalize(&path)), facts))
-            .collect();
+        let mut indexed_files = FxHashMap::default();
+        let mut lookup_paths = FxHashMap::default();
+        for (path, facts) in files {
+            let lexical = lexical_normalize(&path);
+            let canonical = canonicalize_or_owned(&lexical);
+            indexed_files.entry(canonical.clone()).or_insert(facts);
+            lookup_paths.insert(path, canonical.clone());
+            lookup_paths.insert(lexical, canonical.clone());
+            lookup_paths.insert(canonical.clone(), canonical);
+        }
         Self {
-            files: Arc::new(files),
+            files: Arc::new(indexed_files),
+            lookup_paths: Arc::new(lookup_paths),
         }
     }
 
@@ -30,10 +38,10 @@ impl ArktsTypeFactsSnapshot {
             .split_once('?')
             .map_or(source_id, |(path, _)| path);
         let path = Path::new(source_id);
-        self.files
+        self.lookup_paths
             .get(path)
-            .or_else(|| self.files.get(&lexical_normalize(path)))
-            .or_else(|| self.files.get(&canonicalize_or_owned(path)))
+            .or_else(|| self.lookup_paths.get(&lexical_normalize(path)))
+            .and_then(|indexed| self.files.get(indexed))
     }
 }
 

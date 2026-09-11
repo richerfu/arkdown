@@ -17,8 +17,8 @@ use crate::api_transform::event_emitter::EventEmitterImportRewriter;
 use crate::error::EtsTransformError;
 use crate::lazy_import::LazyImportRolldownAdapter;
 use crate::module_rewrite::{
-    ModuleAnalyzerKind, ModuleSourceFilePrinter, ModuleSourceFileSpanEraser,
-    TypeOnlyNamedImportSplitter, TypeOnlyReexportSplitter,
+    ModuleSourceFilePrinter, ModuleSourceFileSpanEraser, TypeOnlyNamedImportSplitter,
+    TypeOnlyReexportSplitter,
 };
 use crate::resource_transform::{
     ResourceReference, ResourceReferenceIndex, ResourceReferenceRewriter, ResourceTransformContext,
@@ -79,7 +79,6 @@ pub struct RolldownEtsTransformPlan {
     /// `arkOptions.tscConfig.targetESVersion` selected by the latest SDK
     /// checker before `etsTransform` emits JavaScript for suppression-pragmas.
     pub tsc_target: ArkTscTarget,
-    pub module_analyzer: ModuleAnalyzerKind,
     /// `arkOptions.autoLazyImport` + `autoLazyFilter` + module package name,
     /// forwarded to `TransformOptions` for the SDK `process_lazy_import.js`
     /// rewrite.
@@ -143,7 +142,6 @@ impl RolldownEtsTransformPlan {
             checker_mode: CheckerMode::Oxc,
             should_emit_js: false,
             tsc_target: ArkTscTarget::default(),
-            module_analyzer: ModuleAnalyzerKind::default(),
             auto_lazy_import: false,
             auto_lazy_filter: None,
             pkg_name: None,
@@ -240,11 +238,6 @@ impl RolldownEtsTransformPlan {
     /// Set the target used by the SDK's TypeScript JavaScript-emission path.
     pub fn with_tsc_target(mut self, tsc_target: ArkTscTarget) -> Self {
         self.tsc_target = tsc_target;
-        self
-    }
-
-    pub fn with_module_analyzer(mut self, module_analyzer: ModuleAnalyzerKind) -> Self {
-        self.module_analyzer = module_analyzer;
         self
     }
 
@@ -1054,9 +1047,8 @@ impl<'a, 'pipeline> HvigorPrepareSourcePass<'a, 'pipeline> {
         let reexports = TypeOnlyReexportSplitter::new(
             self.pipeline.id,
             &self.pipeline.transformer.plan.sources,
+            &self.pipeline.transformer.plan.module_exports,
         );
-        let reexports =
-            reexports.with_module_analyzer(self.pipeline.transformer.plan.module_analyzer);
         let allocator = Allocator::default();
         let source_type = self.source_type();
         let mut parsed = Parser::new(&allocator, source, source_type).parse();
@@ -1201,8 +1193,8 @@ impl<'a, 'pipeline> HvigorFinalizeSourcePass<'a, 'pipeline> {
         changed |= TypeOnlyNamedImportSplitter::new(
             self.pipeline.id,
             &self.pipeline.transformer.plan.sources,
+            &self.pipeline.transformer.plan.module_exports,
         )
-        .with_module_analyzer(self.pipeline.transformer.plan.module_analyzer)
         .split_program_with_inlined_const_enum_imports(
             &allocator,
             &mut parsed.program,

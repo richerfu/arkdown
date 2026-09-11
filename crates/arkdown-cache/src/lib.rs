@@ -40,8 +40,8 @@ pub use error::CacheError;
 pub use key::{compiler_cache_path, CacheFingerprint, CompileEnv, MSGPACK_COMPILE_CACHE_DIR_NAME};
 
 pub use module_transform::{
-    LoadedModuleTransformCache, ModuleTransformCacheCommit, ModuleTransformCacheRecord,
-    ModuleTransformCacheStore,
+    LoadedModuleTransformCache, ModuleTransformCacheCommit, ModuleTransformCacheCommitStats,
+    ModuleTransformCacheRecord, ModuleTransformCacheStore,
 };
 
 // plugin_context — opaque V8 plugin state, with Rust-owned persistence

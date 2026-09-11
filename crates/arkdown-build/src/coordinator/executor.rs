@@ -60,8 +60,6 @@ impl BuildCoordinator {
         let cli_cache_file = args.cache_file.clone();
         let abc_backend = args.abc_backend;
         let named_target = args.build_target_name.clone();
-        let module_analyzer = ModuleAnalyzerKind::Oxc;
-
         let checker_mode = CheckerMode::Oxc;
 
         let project_root = args
@@ -1942,7 +1940,6 @@ impl BuildCoordinator {
                 watch_changed_files,
                 coverage_mode,
                 disable_abc_cache,
-                module_analyzer,
                 checker_mode,
                 project_root: &project_root,
                 progress: &mut progress,
@@ -2172,7 +2169,6 @@ impl BuildCoordinator {
                 disable_abc_cache,
                 cli_cache_file: &cli_cache_file,
                 abc_backend,
-                module_analyzer,
                 project_root: &project_root,
                 progress: &mut progress,
                 intermediate_writer: &intermediate_writer,

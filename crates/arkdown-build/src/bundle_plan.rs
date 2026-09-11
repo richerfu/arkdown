@@ -11,9 +11,7 @@ use rolldown_plugin::__inner::SharedPluginable;
 use rustc_hash::FxHashSet;
 use thiserror::Error;
 
-use arkdown::plugins::ets_transform::{
-    EtsTransformPlugin, ModuleAnalyzerKind, RolldownEtsTransformPlan,
-};
+use arkdown::plugins::ets_transform::{EtsTransformPlugin, RolldownEtsTransformPlan};
 use arkdown::{
     BundleCachePolicy, BundleInput, BundleMockConfig, BundleModuleMetaInfoFile, BundleOutput,
     BundleOutputOptions, BundlePlan, BundlePluginSet, BundleRuntimePackageContext,
@@ -121,7 +119,6 @@ pub struct BundlePlanBuilderInput<'a> {
     pub module_name: &'a str,
     pub module_target_name: &'a str,
     pub custom_config: Option<&'a ArkdownCustomConfig>,
-    pub module_analyzer: ModuleAnalyzerKind,
     pub arkts_language_version: ArktsLanguageVersion,
     pub should_emit_js: bool,
     pub package_info: BundlePlanPackageInfo,
@@ -146,7 +143,6 @@ impl<'a> BundlePlanBuilder<'a> {
             module_name,
             module_target_name,
             custom_config,
-            module_analyzer,
             arkts_language_version,
             should_emit_js,
             package_info,
@@ -258,7 +254,6 @@ impl<'a> BundlePlanBuilder<'a> {
             // JavaScript for coverage builds (and still honors per-file suppression
             // directives when this project-level switch is false).
             should_emit_js,
-            module_analyzer,
             output_target: config.output_target.clone(),
             preview_mode: matches!(config.output_target, arkdown_core::OutputTarget::Preview),
             check_entry: false,

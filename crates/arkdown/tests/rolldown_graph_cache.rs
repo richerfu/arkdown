@@ -10,7 +10,6 @@ use arkdown::{
     LoaderResourceJoin, SourceMapPolicy,
 };
 use arkdown_core::{ArktsLanguageVersion, BuildMode, OutputTarget};
-use arkdown_ets_transform::ModuleAnalyzerKind;
 use rolldown_plugin::{
     HookCloseBundleArgs, HookTransformArgs, HookTransformReturn, HookUsage, Plugin, PluginContext,
     SharedTransformPluginContext,
@@ -122,7 +121,6 @@ fn graph_plan(root: &Path, entry: &Path) -> BundlePlan {
         bundle_name: "com.example.cache".to_string(),
         use_normalized_ohm_url: false,
         should_emit_js: true,
-        module_analyzer: ModuleAnalyzerKind::Oxc,
         output_target: OutputTarget::Hap,
         preview_mode: false,
         check_entry: false,

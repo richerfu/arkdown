@@ -165,6 +165,19 @@ Arkdown 不调用 TSGO emit/transpile/printer/codegen；checker source graph 不
 Rust resolver/Rolldown graph，返回的 annotation/component 信息也只能作为
 Rust/OXC lowering 的 immutable semantic facts。JS 不参与上述代码处理。
 
+代码与 sourcemap 使用同一所有权：OXC Codegen 生成代码和基础 map；只有上游
+TypeScript printer 已定义、且需要在生成前表达的源码区间布局编辑，才由 Rust
+`string_wizard::MagicString` 记录 span edit 并生成 patch map，随后通过 Rolldown
+`collapse_sourcemaps` 与 OXC map 折叠。不得让 TSGO/TypeScript emit 生成构建代码或
+sourcemap，也不得用手写行列偏移替代结构化 map。名称中引用 TypeScript printer
+表示对齐目标的源码 owner，不表示运行 TypeScript emit。
+
+Rolldown transform hook 只消费启动阶段构造的 immutable inventory。源码内容、
+symlink alias、模块 export binding kind 和 re-export closure 必须在 hook 外并行
+预计算；hook 内不得递归解析模块或执行 `canonicalize`/`realpath`。跨进程 transform
+cache 的 object 是内容寻址不可变数据，单个损坏 object 按 miss 重算；manifest 是
+唯一发布与持久化边界，因此只对 manifest 临时文件 `sync_all` 后原子替换。
+
 当 `shouldEmitJs === false` 时，namespace 等 TypeScript module source 必须像上游
 `rollup-plugin-ets-typescript.ts::transform` 一样原样进入 CompileArkTS。Rolldown 只负责
 扫描该源码的模块图，其未被产物消费的 JS 投影产生的 `TOLERATED_TRANSFORM` 不得暴露为

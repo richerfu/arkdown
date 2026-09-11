@@ -1,14 +1,14 @@
 use std::borrow::Cow;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use arkdown_path::ModuleSpecifierText;
 use oxc_allocator::{Allocator, Vec as OxcVec};
 use oxc_ast::ast::{
-    BindingPattern, Declaration, ExportAllDeclaration, ExportDefaultDeclarationKind,
-    ExportFromDeclaration, ExportNamedDeclaration, ImportDeclaration, ImportDeclarationSpecifier,
-    Program, Statement, StringLiteral, TSImportEqualsDeclaration, TSModuleReference, TSTypeName,
+    BindingPattern, Declaration, ExportAllDeclaration, ExportFromDeclaration,
+    ExportNamedDeclaration, ImportDeclaration, ImportDeclarationSpecifier, Program, Statement,
+    StringLiteral, TSImportEqualsDeclaration, TSModuleReference, TSTypeName,
 };
 use oxc_ast::builder::AstBuilder;
 use oxc_ast_visit::{walk, walk_mut, Visit, VisitMut};
@@ -25,19 +25,12 @@ use crate::module_emit::{
     ModuleStringLiteral, NamedImportBinding, ReExportSplitEmitter, TypeImportBinding,
     ValueImportBinding,
 };
-use crate::source::{
-    CompileArktsSourceType, SourceClassifier, TransformSourceFile, TransformSourceSnapshot,
-};
+use crate::source::{CompileArktsSourceType, SourceClassifier, TransformSourceSnapshot};
 use crate::transform::source_emit::{
     CodegenSourceText, HvigorTypescriptPrintOutput, HvigorTypescriptPrinter,
 };
+use crate::transform::ModuleExportIndex;
 use crate::ModuleExportNameText;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ModuleAnalyzerKind {
-    #[default]
-    Oxc,
-}
 
 /// Prints a plain ETS/TS source using the source-node ownership of hvigor's
 /// `ModuleSourceFile::processTransformedTsModuleRequest` +
@@ -162,30 +155,23 @@ impl<'a> VisitMut<'a> for ModuleSourceFileSpanEraser {
     }
 }
 
-impl ModuleAnalyzerKind {
-    pub fn as_str(self) -> &'static str {
-        "oxc"
-    }
-}
-
 pub(super) struct TypeOnlyNamedImportSplitter<'a> {
     id: &'a str,
     sources: &'a TransformSourceSnapshot,
-    module_analyzer: ModuleAnalyzerKind,
+    module_exports: &'a ModuleExportIndex,
 }
 
 impl<'a> TypeOnlyNamedImportSplitter<'a> {
-    pub(super) fn new(id: &'a str, sources: &'a TransformSourceSnapshot) -> Self {
+    pub(super) fn new(
+        id: &'a str,
+        sources: &'a TransformSourceSnapshot,
+        module_exports: &'a ModuleExportIndex,
+    ) -> Self {
         Self {
             id,
             sources,
-            module_analyzer: ModuleAnalyzerKind::default(),
+            module_exports,
         }
-    }
-
-    pub(super) fn with_module_analyzer(mut self, module_analyzer: ModuleAnalyzerKind) -> Self {
-        self.module_analyzer = module_analyzer;
-        self
     }
 
     /// Split imports after the SDK const-enum pass has replaced property
@@ -206,7 +192,7 @@ impl<'a> TypeOnlyNamedImportSplitter<'a> {
         let import_equals_usage = TypeOnlyImportEqualsUsage::new(program, scoping);
         let mut type_import_locals = FxHashSet::default();
         let mut binding_classifier =
-            ModuleBindingClassifier::new(self.sources, self.module_analyzer);
+            ModuleBindingClassifier::new(self.sources, self.module_exports);
         let mut split_plans = Vec::with_capacity(program.body.len());
         for statement in &program.body {
             let split_plan = match statement {
@@ -880,21 +866,20 @@ where
 pub(super) struct TypeOnlyReexportSplitter<'a> {
     id: &'a str,
     sources: &'a TransformSourceSnapshot,
-    module_analyzer: ModuleAnalyzerKind,
+    module_exports: &'a ModuleExportIndex,
 }
 
 impl<'a> TypeOnlyReexportSplitter<'a> {
-    pub(super) fn new(id: &'a str, sources: &'a TransformSourceSnapshot) -> Self {
+    pub(super) fn new(
+        id: &'a str,
+        sources: &'a TransformSourceSnapshot,
+        module_exports: &'a ModuleExportIndex,
+    ) -> Self {
         Self {
             id,
             sources,
-            module_analyzer: ModuleAnalyzerKind::default(),
+            module_exports,
         }
-    }
-
-    pub(super) fn with_module_analyzer(mut self, module_analyzer: ModuleAnalyzerKind) -> Self {
-        self.module_analyzer = module_analyzer;
-        self
     }
 
     pub(crate) fn split_program<'ast>(
@@ -903,7 +888,7 @@ impl<'a> TypeOnlyReexportSplitter<'a> {
         program: &mut Program<'ast>,
     ) -> bool {
         let mut binding_classifier =
-            ModuleBindingClassifier::new(self.sources, self.module_analyzer);
+            ModuleBindingClassifier::new(self.sources, self.module_exports);
         let mut split_plans = Vec::with_capacity(program.body.len());
         for statement in &program.body {
             let split_plan = match statement {
@@ -1003,7 +988,11 @@ impl ModuleBindingKind {
         self == Self::Type
     }
 
-    fn record(bindings: &mut FxHashMap<String, Self>, name: impl Into<String>, kind: Self) {
+    pub(crate) fn record(
+        bindings: &mut FxHashMap<String, Self>,
+        name: impl Into<String>,
+        kind: Self,
+    ) {
         let name = name.into();
         match bindings.get_mut(&name) {
             Some(existing) if *existing == Self::Value || kind == Self::Type => {}
@@ -1017,14 +1006,14 @@ impl ModuleBindingKind {
 
 struct ModuleBindingClassifier<'a> {
     sources: &'a TransformSourceSnapshot,
-    exports: FxHashMap<PathBuf, Option<FxHashMap<String, ModuleBindingKind>>>,
+    module_exports: &'a ModuleExportIndex,
 }
 
 impl<'a> ModuleBindingClassifier<'a> {
-    fn new(sources: &'a TransformSourceSnapshot, _module_analyzer: ModuleAnalyzerKind) -> Self {
+    fn new(sources: &'a TransformSourceSnapshot, module_exports: &'a ModuleExportIndex) -> Self {
         Self {
             sources,
-            exports: FxHashMap::default(),
+            module_exports,
         }
     }
 
@@ -1040,7 +1029,7 @@ impl<'a> ModuleBindingClassifier<'a> {
         let is_declaration = SourceClassifier::classify_path(&target.path).is_declaration();
         let is_runtime_backed_declaration =
             is_declaration && self.sources.declaration_has_runtime_source(&target.path);
-        let exports = self.classify_source_exports(target)?;
+        let exports = self.classify_source_exports(&target.path)?;
         if is_declaration
             && imported_name == "default"
             && NativeSharedObjectSpecifier::new(specifier).is_native_shared_object()
@@ -1068,34 +1057,18 @@ impl<'a> ModuleBindingClassifier<'a> {
         &mut self,
         importer: &Path,
         specifier: &str,
-    ) -> Option<FxHashMap<String, ModuleBindingKind>> {
+    ) -> Option<&FxHashMap<String, ModuleBindingKind>> {
         let target = self
             .sources
             .resolve_static_with_declarations(importer, specifier)?;
-        self.classify_source_exports(target)
+        self.classify_source_exports(&target.path)
     }
 
     fn classify_source_exports(
-        &mut self,
-        source: TransformSourceFile,
-    ) -> Option<FxHashMap<String, ModuleBindingKind>> {
-        if let Some(exports) = self.exports.get(&source.path) {
-            return exports.clone();
-        }
-
-        let path = source.path.clone();
-        let exports = self.analyze_source_exports(source);
-        self.exports.insert(path, exports.clone());
-        exports
-    }
-
-    fn analyze_source_exports(
-        &mut self,
-        source: TransformSourceFile,
-    ) -> Option<FxHashMap<String, ModuleBindingKind>> {
-        ModuleExportClassifier::new(source)
-            .with_sources(self.sources)
-            .analyze()
+        &self,
+        path: &Path,
+    ) -> Option<&FxHashMap<String, ModuleBindingKind>> {
+        self.module_exports.binding_exports(path)
     }
 }
 
@@ -1112,464 +1085,16 @@ impl<'a> NativeSharedObjectSpecifier<'a> {
         self.specifier.starts_with("lib") && self.specifier.ends_with(".so")
     }
 }
-
-struct ModuleExportClassifier<'a> {
-    source: TransformSourceFile,
-    sources: Option<&'a TransformSourceSnapshot>,
-}
-
-impl<'a> ModuleExportClassifier<'a> {
-    fn new(source: TransformSourceFile) -> Self {
-        Self {
-            source,
-            sources: None,
-        }
-    }
-
-    fn with_sources(mut self, sources: &'a TransformSourceSnapshot) -> Self {
-        self.sources = Some(sources);
-        self
-    }
-
-    fn analyze(&self) -> Option<FxHashMap<String, ModuleBindingKind>> {
-        let mut visited = FxHashSet::default();
-        self.analyze_with_visited(&mut visited)
-    }
-
-    fn analyze_with_visited(
-        &self,
-        visited: &mut FxHashSet<PathBuf>,
-    ) -> Option<FxHashMap<String, ModuleBindingKind>> {
-        let source_path = self.source.path.clone();
-        if !visited.insert(source_path.clone()) {
-            return None;
-        }
-
-        let allocator = Allocator::default();
-        let source_type = CompileArktsSourceType::from_path(&self.source.path);
-        let parsed = Parser::new(&allocator, &self.source.source, source_type).parse();
-        if !parsed.diagnostics.is_empty() {
-            visited.remove(&source_path);
-            return None;
-        }
-
-        let local_bindings = TopLevelBindingKindCollector::new(&parsed.program).collect();
-        let needed_import_locals = ExportImportLocalCollector::new(&parsed.program).collect();
-        let imported_bindings = ImportBindingKindAnalyzer::new(&self.source, self.sources, visited)
-            .analyze(&parsed.program, &needed_import_locals);
-        let mut exports = FxHashMap::default();
-        for statement in &parsed.program.body {
-            match statement {
-                Statement::ExportDeclaration(export) => {
-                    ExportedDeclarationCollector::new(&export.declaration, &mut exports).collect();
-                }
-                Statement::ExportNamedDeclaration(export) => {
-                    self.collect_local_named_export(
-                        export,
-                        &local_bindings,
-                        &imported_bindings,
-                        &mut exports,
-                    );
-                }
-                Statement::ExportFromDeclaration(export) => {
-                    self.collect_reexport(export, &imported_bindings, visited, &mut exports);
-                }
-                Statement::ExportDefaultDeclaration(export) => {
-                    DefaultExportBindingCollector::new(
-                        &export.declaration,
-                        &local_bindings,
-                        &imported_bindings,
-                        &mut exports,
-                    )
-                    .collect();
-                }
-                Statement::ExportAllDeclaration(export) => {
-                    self.collect_export_all(export, visited, &mut exports);
-                }
-                _ => {}
-            }
-        }
-        visited.remove(&source_path);
-        Some(exports)
-    }
-
-    fn collect_local_named_export(
-        &self,
-        export: &ExportNamedDeclaration<'_>,
-        local_bindings: &FxHashMap<String, ModuleBindingKind>,
-        imported_bindings: &FxHashMap<String, ModuleBindingKind>,
-        exports: &mut FxHashMap<String, ModuleBindingKind>,
-    ) {
-        for specifier in &export.specifiers {
-            let exported_name = ModuleExportNameText::new(&specifier.exported).binding_name();
-            let local_name = ModuleExportNameText::new(&specifier.local).binding_name();
-            if specifier.export_kind.is_type() || export.export_kind.is_type() {
-                ModuleBindingKind::record(exports, exported_name, ModuleBindingKind::Type);
-            } else if let Some(kind) = local_bindings.get(&local_name).copied() {
-                ModuleBindingKind::record(exports, exported_name, kind);
-            } else if let Some(kind) = exports.get(&local_name).copied() {
-                ModuleBindingKind::record(exports, exported_name, kind);
-            } else if let Some(kind) = imported_bindings.get(&local_name).copied() {
-                ModuleBindingKind::record(exports, exported_name, kind);
-            } else {
-                ModuleBindingKind::record(exports, exported_name, ModuleBindingKind::Value);
-            }
-        }
-    }
-
-    fn collect_reexport(
-        &self,
-        export: &ExportFromDeclaration<'_>,
-        imported_bindings: &FxHashMap<String, ModuleBindingKind>,
-        visited: &mut FxHashSet<PathBuf>,
-        exports: &mut FxHashMap<String, ModuleBindingKind>,
-    ) {
-        let reexport_bindings = (|| {
-            let sources = self.sources?;
-            let target = sources.resolve_static_with_declarations(
-                &self.source.path,
-                export.source.value.as_str(),
-            )?;
-            ModuleExportClassifier::new(target)
-                .with_sources(sources)
-                .analyze_with_visited(visited)
-        })();
-        for specifier in &export.specifiers {
-            let exported_name = ModuleExportNameText::new(&specifier.exported).binding_name();
-            let local_name = ModuleExportNameText::new(&specifier.local).binding_name();
-            if specifier.export_kind.is_type() || export.export_kind.is_type() {
-                ModuleBindingKind::record(exports, exported_name, ModuleBindingKind::Type);
-            } else if let Some(kind) = reexport_bindings
-                .as_ref()
-                .and_then(|bindings| bindings.get(&local_name))
-                .copied()
-            {
-                ModuleBindingKind::record(exports, exported_name, kind);
-            } else if let Some(kind) = exports.get(&local_name).copied() {
-                ModuleBindingKind::record(exports, exported_name, kind);
-            } else if let Some(kind) = imported_bindings.get(&local_name).copied() {
-                ModuleBindingKind::record(exports, exported_name, kind);
-            } else {
-                ModuleBindingKind::record(exports, exported_name, ModuleBindingKind::Value);
-            }
-        }
-    }
-
-    fn collect_export_all(
-        &self,
-        export: &ExportAllDeclaration<'_>,
-        visited: &mut FxHashSet<PathBuf>,
-        exports: &mut FxHashMap<String, ModuleBindingKind>,
-    ) {
-        if let Some(exported) = &export.exported {
-            let kind = if export.export_kind.is_type() {
-                ModuleBindingKind::Type
-            } else {
-                ModuleBindingKind::Value
-            };
-            ModuleBindingKind::record(
-                exports,
-                ModuleExportNameText::new(exported).binding_name(),
-                kind,
-            );
-            return;
-        }
-
-        let Some(sources) = self.sources else {
-            return;
-        };
-        let Some(target) = sources
-            .resolve_static_with_declarations(&self.source.path, export.source.value.as_str())
-        else {
-            return;
-        };
-        let target_exports = ModuleExportClassifier::new(target)
-            .with_sources(sources)
-            .analyze_with_visited(visited);
-        let Some(target_exports) = target_exports else {
-            return;
-        };
-        for (name, kind) in target_exports {
-            if name != "default" {
-                let export_kind = if export.export_kind.is_type() {
-                    ModuleBindingKind::Type
-                } else {
-                    kind
-                };
-                ModuleBindingKind::record(exports, name, export_kind);
-            }
-        }
-    }
-}
-
-struct DefaultExportBindingCollector<'a, 'b> {
-    declaration: &'a ExportDefaultDeclarationKind<'a>,
-    local_bindings: &'b FxHashMap<String, ModuleBindingKind>,
-    imported_bindings: &'b FxHashMap<String, ModuleBindingKind>,
-    exports: &'b mut FxHashMap<String, ModuleBindingKind>,
-}
-
-impl<'a, 'b> DefaultExportBindingCollector<'a, 'b> {
-    fn new(
-        declaration: &'a ExportDefaultDeclarationKind<'a>,
-        local_bindings: &'b FxHashMap<String, ModuleBindingKind>,
-        imported_bindings: &'b FxHashMap<String, ModuleBindingKind>,
-        exports: &'b mut FxHashMap<String, ModuleBindingKind>,
-    ) -> Self {
-        Self {
-            declaration,
-            local_bindings,
-            imported_bindings,
-            exports,
-        }
-    }
-
-    fn collect(&mut self) {
-        match self.declaration {
-            ExportDefaultDeclarationKind::TSInterfaceDeclaration(_) => {
-                ModuleBindingKind::record(self.exports, "default", ModuleBindingKind::Type);
-            }
-            ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
-                if !function.declare {
-                    ModuleBindingKind::record(self.exports, "default", ModuleBindingKind::Value);
-                }
-            }
-            ExportDefaultDeclarationKind::ClassDeclaration(class) => {
-                if !class.declare {
-                    ModuleBindingKind::record(self.exports, "default", ModuleBindingKind::Value);
-                }
-            }
-            ExportDefaultDeclarationKind::Identifier(identifier) => {
-                let local_name = identifier.name.as_str();
-                let kind = self
-                    .local_bindings
-                    .get(local_name)
-                    .or_else(|| self.imported_bindings.get(local_name))
-                    .copied()
-                    .unwrap_or(ModuleBindingKind::Value);
-                ModuleBindingKind::record(self.exports, "default", kind);
-            }
-            _ => {
-                ModuleBindingKind::record(self.exports, "default", ModuleBindingKind::Value);
-            }
-        }
-    }
-}
-
-struct ImportBindingKindAnalyzer<'a> {
-    source: &'a TransformSourceFile,
-    sources: Option<&'a TransformSourceSnapshot>,
-    visited: &'a mut FxHashSet<PathBuf>,
-}
-
-impl<'a> ImportBindingKindAnalyzer<'a> {
-    fn new(
-        source: &'a TransformSourceFile,
-        sources: Option<&'a TransformSourceSnapshot>,
-        visited: &'a mut FxHashSet<PathBuf>,
-    ) -> Self {
-        Self {
-            source,
-            sources,
-            visited,
-        }
-    }
-
-    fn analyze(
-        &mut self,
-        program: &Program<'_>,
-        needed_locals: &FxHashSet<String>,
-    ) -> FxHashMap<String, ModuleBindingKind> {
-        let mut imports = FxHashMap::default();
-        for statement in &program.body {
-            let Statement::ImportDeclaration(import) = statement else {
-                continue;
-            };
-            self.collect_import(import, needed_locals, &mut imports);
-        }
-        imports
-    }
-
-    fn collect_import(
-        &mut self,
-        import: &ImportDeclaration<'_>,
-        needed_locals: &FxHashSet<String>,
-        imports: &mut FxHashMap<String, ModuleBindingKind>,
-    ) {
-        let Some(specifiers) = &import.specifiers else {
-            return;
-        };
-        if !ImportLocalNeed::new(specifiers, needed_locals).has_needed_local() {
-            return;
-        }
-        if import.import_kind.is_type() {
-            for specifier in specifiers {
-                self.collect_explicit_type_import(specifier, needed_locals, imports);
-            }
-            return;
-        }
-
-        let Some(sources) = self.sources else {
-            return;
-        };
-        let Some(target) = sources
-            .resolve_static_with_declarations(&self.source.path, import.source.value.as_str())
-        else {
-            return;
-        };
-        let target_exports = ModuleExportClassifier::new(target)
-            .with_sources(sources)
-            .analyze_with_visited(self.visited);
-        let Some(target_exports) = target_exports else {
-            return;
-        };
-
-        for specifier in specifiers {
-            match specifier {
-                ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
-                    let imported_name =
-                        ModuleExportNameText::new(&specifier.imported).binding_name();
-                    let local_name = specifier.local.name.to_string();
-                    if !needed_locals.contains(&local_name) {
-                        continue;
-                    }
-                    if specifier.import_kind.is_type()
-                        || target_exports
-                            .get(&imported_name)
-                            .is_some_and(|kind| *kind == ModuleBindingKind::Type)
-                    {
-                        imports.insert(local_name, ModuleBindingKind::Type);
-                    }
-                }
-                ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
-                    let local_name = specifier.local.name.to_string();
-                    if !needed_locals.contains(&local_name) {
-                        continue;
-                    }
-                    if target_exports
-                        .get("default")
-                        .is_some_and(|kind| *kind == ModuleBindingKind::Type)
-                    {
-                        imports.insert(local_name, ModuleBindingKind::Type);
-                    }
-                }
-                ImportDeclarationSpecifier::ImportNamespaceSpecifier(_) => {}
-            }
-        }
-    }
-
-    fn collect_explicit_type_import(
-        &self,
-        specifier: &ImportDeclarationSpecifier<'_>,
-        needed_locals: &FxHashSet<String>,
-        imports: &mut FxHashMap<String, ModuleBindingKind>,
-    ) {
-        match specifier {
-            ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
-                let local_name = specifier.local.name.to_string();
-                if needed_locals.contains(&local_name) {
-                    imports.insert(local_name, ModuleBindingKind::Type);
-                }
-            }
-            ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
-                let local_name = specifier.local.name.to_string();
-                if needed_locals.contains(&local_name) {
-                    imports.insert(local_name, ModuleBindingKind::Type);
-                }
-            }
-            ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
-                let local_name = specifier.local.name.to_string();
-                if needed_locals.contains(&local_name) {
-                    imports.insert(local_name, ModuleBindingKind::Type);
-                }
-            }
-        }
-    }
-}
-
-struct ExportImportLocalCollector<'a> {
-    program: &'a Program<'a>,
-}
-
-impl<'a> ExportImportLocalCollector<'a> {
-    fn new(program: &'a Program<'a>) -> Self {
-        Self { program }
-    }
-
-    fn collect(&self) -> FxHashSet<String> {
-        let mut locals = FxHashSet::default();
-        for statement in &self.program.body {
-            let Statement::ExportNamedDeclaration(export) = statement else {
-                if let Statement::ExportDefaultDeclaration(export) = statement {
-                    self.collect_default_export(export, &mut locals);
-                }
-                continue;
-            };
-            for specifier in &export.specifiers {
-                locals.insert(ModuleExportNameText::new(&specifier.local).binding_name());
-            }
-        }
-        locals
-    }
-
-    fn collect_default_export(
-        &self,
-        export: &oxc_ast::ast::ExportDefaultDeclaration<'_>,
-        locals: &mut FxHashSet<String>,
-    ) {
-        if let ExportDefaultDeclarationKind::Identifier(identifier) = &export.declaration {
-            locals.insert(identifier.name.to_string());
-        }
-    }
-}
-
-struct ImportLocalNeed<'a, 'b> {
-    specifiers: &'a [ImportDeclarationSpecifier<'a>],
-    needed_locals: &'b FxHashSet<String>,
-}
-
-impl<'a, 'b> ImportLocalNeed<'a, 'b> {
-    fn new(
-        specifiers: &'a [ImportDeclarationSpecifier<'a>],
-        needed_locals: &'b FxHashSet<String>,
-    ) -> Self {
-        Self {
-            specifiers,
-            needed_locals,
-        }
-    }
-
-    fn has_needed_local(&self) -> bool {
-        self.specifiers
-            .iter()
-            .any(|specifier| self.needed_locals.contains(&self.local_name(specifier)))
-    }
-
-    fn local_name(&self, specifier: &ImportDeclarationSpecifier<'_>) -> String {
-        match specifier {
-            ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
-                specifier.local.name.to_string()
-            }
-            ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
-                specifier.local.name.to_string()
-            }
-            ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
-                specifier.local.name.to_string()
-            }
-        }
-    }
-}
-
-struct TopLevelBindingKindCollector<'a> {
+pub(crate) struct TopLevelBindingKindCollector<'a> {
     program: &'a Program<'a>,
 }
 
 impl<'a> TopLevelBindingKindCollector<'a> {
-    fn new(program: &'a Program<'a>) -> Self {
+    pub(crate) fn new(program: &'a Program<'a>) -> Self {
         Self { program }
     }
 
-    fn collect(&self) -> FxHashMap<String, ModuleBindingKind> {
+    pub(crate) fn collect(&self) -> FxHashMap<String, ModuleBindingKind> {
         let mut bindings = FxHashMap::default();
         for statement in &self.program.body {
             self.collect_statement(statement, &mut bindings);
@@ -1656,13 +1181,13 @@ impl<'a> TopLevelBindingKindCollector<'a> {
     }
 }
 
-struct ExportedDeclarationCollector<'a, 'b> {
+pub(crate) struct ExportedDeclarationCollector<'a, 'b> {
     declaration: &'a Declaration<'a>,
     exports: &'b mut FxHashMap<String, ModuleBindingKind>,
 }
 
 impl<'a, 'b> ExportedDeclarationCollector<'a, 'b> {
-    fn new(
+    pub(crate) fn new(
         declaration: &'a Declaration<'a>,
         exports: &'b mut FxHashMap<String, ModuleBindingKind>,
     ) -> Self {
@@ -1672,7 +1197,7 @@ impl<'a, 'b> ExportedDeclarationCollector<'a, 'b> {
         }
     }
 
-    fn collect(&mut self) {
+    pub(crate) fn collect(&mut self) {
         match self.declaration {
             Declaration::TSInterfaceDeclaration(declaration) => {
                 ModuleBindingKind::record(
@@ -1844,20 +1369,6 @@ mod tests {
         id: &str,
         sources: &TransformSourceSnapshot,
     ) -> Cow<'a, str> {
-        split_type_only_named_imports_with_analyzer(
-            source,
-            id,
-            sources,
-            ModuleAnalyzerKind::default(),
-        )
-    }
-
-    fn split_type_only_named_imports_with_analyzer<'a>(
-        source: &'a str,
-        id: &str,
-        sources: &TransformSourceSnapshot,
-        module_analyzer: ModuleAnalyzerKind,
-    ) -> Cow<'a, str> {
         let allocator = Allocator::default();
         let source_type =
             SourceType::from_path(id).unwrap_or_else(|_| SourceType::ts().with_module(true));
@@ -1870,8 +1381,12 @@ mod tests {
             return Cow::Borrowed(source);
         }
         let scoping = semantic_ret.semantic.into_scoping();
-        let changed = TypeOnlyNamedImportSplitter::new(id, sources)
-            .with_module_analyzer(module_analyzer)
+        let module_exports = ModuleExportIndex::build(
+            sources,
+            &[],
+            &crate::transform::component_meta::ComponentMetadata::default(),
+        );
+        let changed = TypeOnlyNamedImportSplitter::new(id, sources, &module_exports)
             .split_program_with_inlined_const_enum_imports(
                 &allocator,
                 &mut parsed.program,
@@ -1890,15 +1405,6 @@ mod tests {
         id: &str,
         sources: &TransformSourceSnapshot,
     ) -> Cow<'a, str> {
-        split_type_only_reexports_with_analyzer(source, id, sources, ModuleAnalyzerKind::default())
-    }
-
-    fn split_type_only_reexports_with_analyzer<'a>(
-        source: &'a str,
-        id: &str,
-        sources: &TransformSourceSnapshot,
-        module_analyzer: ModuleAnalyzerKind,
-    ) -> Cow<'a, str> {
         let allocator = Allocator::default();
         let source_type =
             SourceType::from_path(id).unwrap_or_else(|_| SourceType::ts().with_module(true));
@@ -1906,8 +1412,12 @@ mod tests {
         if !parsed.diagnostics.is_empty() {
             return Cow::Borrowed(source);
         }
-        let changed = TypeOnlyReexportSplitter::new(id, sources)
-            .with_module_analyzer(module_analyzer)
+        let module_exports = ModuleExportIndex::build(
+            sources,
+            &[],
+            &crate::transform::component_meta::ComponentMetadata::default(),
+        );
+        let changed = TypeOnlyReexportSplitter::new(id, sources, &module_exports)
             .split_program(&allocator, &mut parsed.program);
         if changed {
             Cow::Owned(codegen_source(&parsed.program))
@@ -1916,12 +1426,8 @@ mod tests {
         }
     }
 
-    fn available_module_analyzers() -> Vec<ModuleAnalyzerKind> {
-        vec![ModuleAnalyzerKind::Oxc]
-    }
-
     #[test]
-    fn module_binding_classifier_reuses_target_exports_within_pass() {
+    fn module_binding_index_classifies_target_exports_once() {
         let importer = PathBuf::from("/project/src/main.ets");
         let target = PathBuf::from("/project/src/bindings.ts");
         let mut files = FxHashMap::default();
@@ -1942,23 +1448,21 @@ export class RuntimeName {}"#,
             ),
         );
         let sources = TransformSourceSnapshot::new(files);
+        let module_exports = ModuleExportIndex::build(
+            &sources,
+            &[],
+            &crate::transform::component_meta::ComponentMetadata::default(),
+        );
 
-        for analyzer in available_module_analyzers() {
-            let mut classifier = ModuleBindingClassifier::new(&sources, analyzer);
-            assert_eq!(
-                classifier.classify_imported_binding(&importer, "./bindings", "TypeName"),
-                Some(ModuleBindingKind::Type)
-            );
-            assert_eq!(
-                classifier.classify_imported_binding(&importer, "./bindings", "RuntimeName"),
-                Some(ModuleBindingKind::Value)
-            );
-            assert_eq!(
-                classifier.exports.len(),
-                1,
-                "{analyzer:?} must reuse target export analysis within one split pass"
-            );
-        }
+        let mut classifier = ModuleBindingClassifier::new(&sources, &module_exports);
+        assert_eq!(
+            classifier.classify_imported_binding(&importer, "./bindings", "TypeName"),
+            Some(ModuleBindingKind::Type)
+        );
+        assert_eq!(
+            classifier.classify_imported_binding(&importer, "./bindings", "RuntimeName"),
+            Some(ModuleBindingKind::Value)
+        );
     }
 
     #[test]
@@ -2928,24 +2432,17 @@ export function uint8ArrayToStringWithDecoder(value: Uint8Array): string {
         let sources = TransformSourceSnapshot::new(files);
         let sign_id = sign_utils.to_str().unwrap();
 
-        for analyzer in available_module_analyzers() {
-            let split = split_type_only_named_imports_with_analyzer(
-                sign_source,
-                sign_id,
-                &sources,
-                analyzer,
-            );
-            assert!(
-                split.contains(
-                    "import { stringToUint8ArrayWithEncoder, uint8ArrayToStringWithDecoder }"
-                ),
-                "{analyzer:?} must keep declared runtime functions as value imports:\n{split}"
-            );
-            assert!(
-                !split.contains("import type { stringToUint8ArrayWithEncoder"),
-                "{analyzer:?} must not convert runtime functions to type-only imports:\n{split}"
-            );
-        }
+        let split = split_type_only_named_imports(sign_source, sign_id, &sources);
+        assert!(
+            split.contains(
+                "import { stringToUint8ArrayWithEncoder, uint8ArrayToStringWithDecoder }"
+            ),
+            "must keep declared runtime functions as value imports:\n{split}"
+        );
+        assert!(
+            !split.contains("import type { stringToUint8ArrayWithEncoder"),
+            "must not convert runtime functions to type-only imports:\n{split}"
+        );
     }
 
     #[test]
@@ -2983,22 +2480,15 @@ export declare function recordMSIMoniter(pointer: string): void;"#;
         );
         let index_id = index.to_str().unwrap();
 
-        for analyzer in available_module_analyzers() {
-            let split = split_type_only_named_imports_with_analyzer(
-                index_source,
-                index_id,
-                &sources,
-                analyzer,
-            );
-            assert!(
-                split.contains("import { ArkTSMSIModule as ArkTSMSIBridge, setMetadataInfo as msiSetMetadataInfo, recordMSIMoniter as msiRecordMSIMoniter } from \"libmsi.so\";"),
-                "{analyzer:?} must keep native runtime class/functions as value imports:\n{split}"
-            );
-            assert!(
-                split.contains("import type { Options } from \"libmsi.so\";"),
-                "{analyzer:?} must split native interface as type import:\n{split}"
-            );
-        }
+        let split = split_type_only_named_imports(index_source, index_id, &sources);
+        assert!(
+            split.contains("import { ArkTSMSIModule as ArkTSMSIBridge, setMetadataInfo as msiSetMetadataInfo, recordMSIMoniter as msiRecordMSIMoniter } from \"libmsi.so\";"),
+            "must keep native runtime class/functions as value imports:\n{split}"
+        );
+        assert!(
+            split.contains("import type { Options } from \"libmsi.so\";"),
+            "must split native interface as type import:\n{split}"
+        );
     }
 
     #[test]
@@ -3028,18 +2518,15 @@ export declare function nativeCall(): void;"#;
         );
         let index_id = index.to_str().unwrap();
 
-        for analyzer in available_module_analyzers() {
-            let split =
-                split_type_only_reexports_with_analyzer(index_source, index_id, &sources, analyzer);
-            assert!(
-                split.contains("export { NativeWidget, nativeCall } from \"libwidget.so\";"),
-                "{analyzer:?} must keep native runtime reexports live:\n{split}"
-            );
-            assert!(
-                split.contains("export type { EdgeType } from \"libwidget.so\";"),
-                "{analyzer:?} must keep const enum reexport type-only:\n{split}"
-            );
-        }
+        let split = split_type_only_reexports(index_source, index_id, &sources);
+        assert!(
+            split.contains("export { NativeWidget, nativeCall } from \"libwidget.so\";"),
+            "must keep native runtime reexports live:\n{split}"
+        );
+        assert!(
+            split.contains("export type { EdgeType } from \"libwidget.so\";"),
+            "must keep const enum reexport type-only:\n{split}"
+        );
     }
 
     #[test]

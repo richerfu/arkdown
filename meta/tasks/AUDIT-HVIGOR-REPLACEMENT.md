@@ -24,6 +24,7 @@ checker 或插件结论。
 | 依赖解析 | loader config、OH resolver、package graph | `arkdown-session`、`arkdown-resolver`、TSGO OH resolver | 已接入已物化依赖；构建不隐式安装 |
 | ArkTS 1.1 checker | OH TypeScript parser/binder/checker/linter；ets2bundle `ets_checker.ts` | packaged TSGO + `ProjectSemanticChecker` | 源码定义能力差异为 0；固定 `noEmit`，ESMODULE 使用 ES2020 module，Stage/FA 使用源码的 `moduleJson` 分界，normal/strict checker 共享 callback executor；TSGO 经双向 API 回调 JS CLI 进程内的 SDK plugin host，自身不启动 Node；SDK class callback 接收同一份完整 compile `projectConfig`，旧 Rust subset checker 已删除 |
 | checker-driven transform | `ohApi.ts`、component transforms、`checkCrossplatformValue`、`processImportModule` | TSGO batched facts + OXC consumers | annotation、builder、enum、SDK dependency 已接通；Builder 与 SDK component 的 named/default/namespace import 按 aliased declaration 解析；Program 路径经 SourceStore 映射回 Rolldown snapshot identity；Rust 不重做类型推断 |
+| 代码与 sourcemap | TypeScript printer/source-map hooks、Rollup transform map chain | OXC Codegen + Rust `string_wizard` + Rolldown map collapse | OXC 拥有代码和基础 map；MagicString 只表达源码 span edit 并产出 patch map；TSGO 固定 noEmit，不生成代码或 map |
 | compile-plugin | arkts-compose `getPlugins/doWrapper/getCompilePluginContext` | JS function ABI + N-API + Rolldown adapter | hook、顺序、share、cache、watch、TS/JS module loading 已接通 |
 | plugin `this.parse` | Rollup 4.23.0 `ParseAst` | OXC ESTree bridge | 已按源码只消费 `allowReturnOutsideFunction`；未知 Acorn 字段忽略；错误为 `RollupError/PARSE_ERROR` |
 | SDK/native tools | ets2bundle command builders、SDK binaries | typed Rust plans | restool/ABC/linker/signer/PandaGuard 等直接调用实际工具；不是 JS 兼容层 |
@@ -268,6 +269,23 @@ command/config 或 `contains` 片段。
   仍需 resolve/parse/scan。不得创建空 graph cache 或私有伪格式。
 - 模块 dependency wave 仍可增加并行度；提交前必须按 typed ID 排序，保证产物
   与诊断稳定。
+- 2026-09-11 同工程单轮 debug HAP 实测：Hvigor clean/热构建为 445.27/4.42 秒；
+  Arkdown 完整 checker 为 305.37/167.92 秒，`--skip-checker` 为 158.21/36.53 秒。
+  Arkdown clean 构建已分别快 31.42% 和 64.47%，但热构建仍慢 37.99 倍和 8.26 倍。
+  完整热构建由 130.510 秒 build diagnostics、5.881 秒 facts 和 18.334 秒
+  pack/sign 主导；skip 热构建由 6.139 秒 facts 和 17.910 秒 pack/sign 主导。
+  因而下一轮性能工作必须分别归属到 checker 跨构建复用、现有 typed cache 的整链路
+  短路，以及 package/sign 输入不变判定；不得用 Rolldown 私有 graph 格式概括或掩盖
+  checker 与打包的已量化成本。完整口径见 `ARKTS11-NATIVE-TYPESCRIPT.md`。
+- 本轮最终 release 在当前可用 DevEco 26 SDK 上重新完成 `--skip-checker` cold/hot：
+  71.40/38.73 秒，峰值 RSS 2.14/2.05 GiB。SDK 不同，不能把它与旧表述为严格同环境
+  benchmark；但 Arkdown 自身冷阶段已经定位并消除：Rolldown scan 从 53–61 秒降到
+  2.645 秒，
+  11841 个 transform cache object 的 commit 从 37–48 秒降到 3.042 秒，线程数从约
+  151 降到 38。冷路径剩余主要成本为 facts 6.649 秒、bundle 12.372 秒、ABC
+  12.120 秒与 pack/sign 17.557 秒；无变更热构建已跳过 Rolldown/ABC，仍由 facts
+  6.551 秒和 pack/sign 18.850 秒主导，下一优先级是
+  checker 跨构建事实复用和 package/sign 输入不变短路，而不是私有 graph 格式。
 
 ## 下一步顺序
 

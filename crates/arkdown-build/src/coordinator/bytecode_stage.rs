@@ -14,7 +14,6 @@ pub(super) struct CoordinatorBytecodeStageInput<'a> {
     pub(super) disable_abc_cache: bool,
     pub(super) cli_cache_file: &'a Option<PathBuf>,
     pub(super) abc_backend: AbcBackendChoice,
-    pub(super) module_analyzer: ModuleAnalyzerKind,
     pub(super) project_root: &'a Path,
     pub(super) progress: &'a mut Progress,
     pub(super) intermediate_writer: &'a IntermediateArtifactWriter,
@@ -50,7 +49,6 @@ impl BuildCoordinator {
             disable_abc_cache,
             cli_cache_file,
             abc_backend,
-            module_analyzer,
             project_root,
             progress,
             intermediate_writer,
@@ -643,7 +641,6 @@ impl BuildCoordinator {
             .build()?;
             let task_inputs =
                 TaskInputs::compute(module_config.as_ref(), loader_json, &task_input_snapshot)
-                    .with_module_analyzer(module_analyzer)
                     .with_arkts_language_version(self.session.arkts_language_version)
                     .with_effective_obfuscation(
                         module_obfuscation.config.as_ref(),

@@ -2,7 +2,6 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use arkdown_core::{ArkdownConfig, ArktsLanguageVersion, BuildMode, ObfuscationConfig};
-use arkdown_ets_transform::ModuleAnalyzerKind;
 use arkdown_path::{ArtifactPathSerializer, SourceFileName};
 use arkdown_profile::LoaderJson;
 use arkdown_session::BuildSession;
@@ -54,7 +53,6 @@ pub struct TaskInputs {
     pub obfuscation_hash: u64,
     pub sdk_version: String,
     pub compile_env: String,
-    pub module_analyzer: String,
     pub arkts_language_version: ArktsLanguageVersion,
     pub plugin_hash: u64,
     pub resource_hash: String,
@@ -70,7 +68,7 @@ pub struct TaskInputs {
 }
 
 const TASK_INPUTS_FILE: &str = ".task_inputs";
-const TASK_INPUTS_SCHEMA_VERSION: u32 = 6;
+const TASK_INPUTS_SCHEMA_VERSION: u32 = 7;
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
 
@@ -135,7 +133,6 @@ impl TaskInputs {
             obfuscation_hash,
             sdk_version,
             compile_env,
-            module_analyzer: ModuleAnalyzerKind::default().as_str().to_string(),
             arkts_language_version: ArktsLanguageVersion::default(),
             plugin_hash: 0,
             resource_hash: snapshot.resource_hash.clone(),
@@ -151,11 +148,6 @@ impl TaskInputs {
     /// Builder: set the plugin hash (FNV-1a of package plugin identities).
     pub fn with_plugin_hash(mut self, h: u64) -> Self {
         self.plugin_hash = h;
-        self
-    }
-
-    pub fn with_module_analyzer(mut self, module_analyzer: ModuleAnalyzerKind) -> Self {
-        self.module_analyzer = module_analyzer.as_str().to_string();
         self
     }
 
@@ -273,7 +265,6 @@ impl TaskInputs {
         for value in [
             self.sdk_version.as_str(),
             self.compile_env.as_str(),
-            self.module_analyzer.as_str(),
             self.resource_hash.as_str(),
             self.dependency_content_hash.as_str(),
             self.config_hash.as_str(),
@@ -314,7 +305,6 @@ impl TaskInputs {
             && stored.obfuscation_hash == self.obfuscation_hash
             && stored.sdk_version == self.sdk_version
             && stored.compile_env == self.compile_env
-            && stored.module_analyzer == self.module_analyzer
             && stored.arkts_language_version == self.arkts_language_version
             && stored.plugin_hash == self.plugin_hash
             && stored.resource_hash == self.resource_hash
@@ -335,7 +325,6 @@ impl TaskInputs {
             obfuscation_hash: self.obfuscation_hash,
             sdk_version: self.sdk_version.clone(),
             compile_env: self.compile_env.clone(),
-            module_analyzer: self.module_analyzer.clone(),
             arkts_language_version: self.arkts_language_version,
             plugin_hash: self.plugin_hash,
             resource_hash: self.resource_hash.clone(),
@@ -360,8 +349,6 @@ struct StoredTaskInputs {
     obfuscation_hash: u64,
     sdk_version: String,
     compile_env: String,
-    #[serde(default = "StoredTaskInputs::default_module_analyzer")]
-    module_analyzer: String,
     #[serde(default)]
     arkts_language_version: ArktsLanguageVersion,
     #[serde(default)]
@@ -380,12 +367,6 @@ struct StoredTaskInputs {
     custom_types_hash: u64,
     #[serde(default)]
     dependency_hash: u64,
-}
-
-impl StoredTaskInputs {
-    fn default_module_analyzer() -> String {
-        ModuleAnalyzerKind::Oxc.as_str().to_string()
-    }
 }
 
 impl TaskInputs {

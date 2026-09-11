@@ -17,6 +17,9 @@ use super::{
     ArktsFileTypeFacts, ArkuiDecorator, ArkuiDecoratorName, ArkuiDecoratorRules, BuilderAccessKind,
     ResolvedTypeIdentity, TransformOptions,
 };
+use crate::module_rewrite::{
+    ExportedDeclarationCollector, ModuleBindingKind, TopLevelBindingKindCollector,
+};
 use crate::source::{CompileArktsSourceType, TransformSourceFile};
 use crate::transform::build_fn::{
     CustomComponentGeneration, CustomComponentInfo, CustomComponentPropertyKind,
@@ -26,6 +29,7 @@ use crate::transform::component_meta::SdkComponentInfo;
 use crate::transform::decorator::ArkuiStateDecorator;
 use crate::transform::legacy_extend::ArktsExtendSource;
 use crate::transform::viewpu_emit::GeneratedViewpuName;
+use crate::ModuleExportNameText;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ExtendAttributeKind {
@@ -1605,6 +1609,13 @@ impl ModuleExportIndex {
         }
     }
 
+    pub(crate) fn binding_exports(
+        &self,
+        path: &Path,
+    ) -> Option<&FxHashMap<String, ModuleBindingKind>> {
+        self.entries.get(path).map(|entry| &entry.binding_kinds)
+    }
+
     fn builder_function_names(&self, path: &Path) -> FxHashSet<String> {
         self.entries
             .get(path)
@@ -1735,6 +1746,7 @@ impl ModuleExportIndex {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct ModuleExportEntry {
+    binding_kinds: FxHashMap<String, ModuleBindingKind>,
     builders: FxHashSet<String>,
     components: ExportedComponentNames,
     classes: ExportedClassObservations,
@@ -1839,12 +1851,216 @@ impl<'a> ModuleExportFactInventoryBuilder<'a> {
 #[derive(Clone, Debug, Default)]
 struct ModuleExportFacts {
     direct: ModuleExportEntry,
+    binding: ModuleBindingFacts,
     local_builders: FxHashSet<String>,
     local_components: CustomComponentUpdateProps,
     local_classes: FxHashMap<String, ClassObservation>,
     local_entities: FxHashMap<String, String>,
     imports: Vec<ModuleImportFact>,
     exports: Vec<ModuleExportFact>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ModuleBindingFacts {
+    local: FxHashMap<String, ModuleBindingKind>,
+    direct_exports: FxHashMap<String, ModuleBindingKind>,
+    imports: Vec<ModuleBindingImportFact>,
+    exports: Vec<ModuleBindingExportFact>,
+}
+
+#[derive(Clone, Debug)]
+struct ModuleBindingImportFact {
+    target: Option<PathBuf>,
+    bindings: Vec<ModuleBindingImportBinding>,
+}
+
+#[derive(Clone, Debug)]
+struct ModuleBindingImportBinding {
+    local: String,
+    imported: ModuleBindingImportedName,
+    explicit_type: bool,
+}
+
+#[derive(Clone, Debug)]
+enum ModuleBindingImportedName {
+    Named(String),
+    Default,
+    Namespace,
+}
+
+#[derive(Clone, Debug)]
+enum ModuleBindingExportFact {
+    NamedLocal {
+        local: String,
+        exported: String,
+        explicit_type: bool,
+    },
+    NamedFrom {
+        target: PathBuf,
+        local: String,
+        exported: String,
+        explicit_type: bool,
+    },
+    DefaultLocal {
+        local: String,
+    },
+    AllFrom {
+        target: PathBuf,
+        explicit_type: bool,
+    },
+}
+
+impl ModuleBindingFacts {
+    fn from_program(
+        path: &Path,
+        program: &Program<'_>,
+        sources: &crate::source::TransformSourceSnapshot,
+    ) -> Self {
+        let mut facts = Self {
+            local: TopLevelBindingKindCollector::new(program).collect(),
+            ..Self::default()
+        };
+        for statement in &program.body {
+            match statement {
+                Statement::ImportDeclaration(import) => {
+                    let Some(specifiers) = &import.specifiers else {
+                        continue;
+                    };
+                    let declaration_is_type = import.import_kind.is_type();
+                    let bindings = specifiers
+                        .iter()
+                        .map(|specifier| match specifier {
+                            ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
+                                ModuleBindingImportBinding {
+                                    local: specifier.local.name.to_string(),
+                                    imported: ModuleBindingImportedName::Named(
+                                        ModuleExportNameText::new(&specifier.imported)
+                                            .binding_name(),
+                                    ),
+                                    explicit_type: declaration_is_type
+                                        || specifier.import_kind.is_type(),
+                                }
+                            }
+                            ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
+                                ModuleBindingImportBinding {
+                                    local: specifier.local.name.to_string(),
+                                    imported: ModuleBindingImportedName::Default,
+                                    explicit_type: declaration_is_type,
+                                }
+                            }
+                            ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
+                                ModuleBindingImportBinding {
+                                    local: specifier.local.name.to_string(),
+                                    imported: ModuleBindingImportedName::Namespace,
+                                    explicit_type: declaration_is_type,
+                                }
+                            }
+                        })
+                        .collect();
+                    facts.imports.push(ModuleBindingImportFact {
+                        target: sources
+                            .resolve_static_with_declarations(path, import.source.value.as_str())
+                            .map(|source| source.path),
+                        bindings,
+                    });
+                }
+                Statement::ExportDeclaration(export) => {
+                    ExportedDeclarationCollector::new(
+                        &export.declaration,
+                        &mut facts.direct_exports,
+                    )
+                    .collect();
+                }
+                Statement::ExportNamedDeclaration(export) => {
+                    for specifier in &export.specifiers {
+                        facts.exports.push(ModuleBindingExportFact::NamedLocal {
+                            local: ModuleExportNameText::new(&specifier.local).binding_name(),
+                            exported: ModuleExportNameText::new(&specifier.exported).binding_name(),
+                            explicit_type: export.export_kind.is_type()
+                                || specifier.export_kind.is_type(),
+                        });
+                    }
+                }
+                Statement::ExportFromDeclaration(export) => {
+                    let Some(target) = sources
+                        .resolve_static_with_declarations(path, export.source.value.as_str())
+                    else {
+                        continue;
+                    };
+                    for specifier in &export.specifiers {
+                        facts.exports.push(ModuleBindingExportFact::NamedFrom {
+                            target: target.path.clone(),
+                            local: ModuleExportNameText::new(&specifier.local).binding_name(),
+                            exported: ModuleExportNameText::new(&specifier.exported).binding_name(),
+                            explicit_type: export.export_kind.is_type()
+                                || specifier.export_kind.is_type(),
+                        });
+                    }
+                }
+                Statement::ExportDefaultDeclaration(export) => match &export.declaration {
+                    ExportDefaultDeclarationKind::TSInterfaceDeclaration(_) => {
+                        ModuleBindingKind::record(
+                            &mut facts.direct_exports,
+                            "default",
+                            ModuleBindingKind::Type,
+                        );
+                    }
+                    ExportDefaultDeclarationKind::FunctionDeclaration(function)
+                        if !function.declare =>
+                    {
+                        ModuleBindingKind::record(
+                            &mut facts.direct_exports,
+                            "default",
+                            ModuleBindingKind::Value,
+                        );
+                    }
+                    ExportDefaultDeclarationKind::ClassDeclaration(class) if !class.declare => {
+                        ModuleBindingKind::record(
+                            &mut facts.direct_exports,
+                            "default",
+                            ModuleBindingKind::Value,
+                        );
+                    }
+                    ExportDefaultDeclarationKind::Identifier(identifier) => {
+                        facts.exports.push(ModuleBindingExportFact::DefaultLocal {
+                            local: identifier.name.to_string(),
+                        });
+                    }
+                    ExportDefaultDeclarationKind::FunctionDeclaration(_)
+                    | ExportDefaultDeclarationKind::ClassDeclaration(_) => {}
+                    _ => ModuleBindingKind::record(
+                        &mut facts.direct_exports,
+                        "default",
+                        ModuleBindingKind::Value,
+                    ),
+                },
+                Statement::ExportAllDeclaration(export) => {
+                    if let Some(exported) = &export.exported {
+                        ModuleBindingKind::record(
+                            &mut facts.direct_exports,
+                            ModuleExportNameText::new(exported).binding_name(),
+                            if export.export_kind.is_type() {
+                                ModuleBindingKind::Type
+                            } else {
+                                ModuleBindingKind::Value
+                            },
+                        );
+                        continue;
+                    }
+                    if let Some(target) =
+                        sources.resolve_static_with_declarations(path, export.source.value.as_str())
+                    {
+                        facts.exports.push(ModuleBindingExportFact::AllFrom {
+                            target: target.path,
+                            explicit_type: export.export_kind.is_type(),
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+        facts
+    }
 }
 
 impl ModuleExportFacts {
@@ -1872,7 +2088,10 @@ impl ModuleExportFacts {
         sources: &crate::source::TransformSourceSnapshot,
         module_roots: &[(String, PathBuf)],
     ) -> Self {
-        let mut facts = Self::default();
+        let mut facts = Self {
+            binding: ModuleBindingFacts::from_program(path, program, sources),
+            ..Self::default()
+        };
         for statement in &program.body {
             match statement {
                 Statement::ClassDeclaration(class) => {
@@ -2210,6 +2429,114 @@ impl<'a> ModuleExportClosureAnalyzer<'a> {
 
         let facts = self.facts.get(path).cloned().unwrap_or_default();
         let mut entry = facts.direct.clone();
+        let mut imported_binding_kinds = FxHashMap::default();
+        for import in &facts.binding.imports {
+            let target_entry = import
+                .target
+                .as_deref()
+                .map(|target| self.export_entry(target));
+            for binding in &import.bindings {
+                let kind = if binding.explicit_type {
+                    Some(ModuleBindingKind::Type)
+                } else {
+                    match &binding.imported {
+                        ModuleBindingImportedName::Named(name) => target_entry
+                            .as_ref()
+                            .and_then(|entry| entry.binding_kinds.get(name))
+                            .copied(),
+                        ModuleBindingImportedName::Default => target_entry
+                            .as_ref()
+                            .and_then(|entry| entry.binding_kinds.get("default"))
+                            .copied(),
+                        // A runtime namespace import is always a value. The
+                        // TypeScript transform only records namespace aliases
+                        // here when the declaration itself is `import type`.
+                        ModuleBindingImportedName::Namespace => None,
+                    }
+                };
+                if kind == Some(ModuleBindingKind::Type) {
+                    ModuleBindingKind::record(
+                        &mut imported_binding_kinds,
+                        binding.local.clone(),
+                        ModuleBindingKind::Type,
+                    );
+                }
+            }
+        }
+        entry.binding_kinds = facts.binding.direct_exports.clone();
+        for export in &facts.binding.exports {
+            match export {
+                ModuleBindingExportFact::NamedLocal {
+                    local,
+                    exported,
+                    explicit_type,
+                } => {
+                    let kind = if *explicit_type {
+                        ModuleBindingKind::Type
+                    } else {
+                        facts
+                            .binding
+                            .local
+                            .get(local)
+                            .or_else(|| entry.binding_kinds.get(local))
+                            .or_else(|| imported_binding_kinds.get(local))
+                            .copied()
+                            .unwrap_or(ModuleBindingKind::Value)
+                    };
+                    ModuleBindingKind::record(&mut entry.binding_kinds, exported.clone(), kind);
+                }
+                ModuleBindingExportFact::NamedFrom {
+                    target,
+                    local,
+                    exported,
+                    explicit_type,
+                } => {
+                    let target_entry = self.export_entry(target);
+                    let kind = if *explicit_type {
+                        ModuleBindingKind::Type
+                    } else {
+                        target_entry
+                            .binding_kinds
+                            .get(local)
+                            .or_else(|| entry.binding_kinds.get(local))
+                            .or_else(|| imported_binding_kinds.get(local))
+                            .copied()
+                            .unwrap_or(ModuleBindingKind::Value)
+                    };
+                    ModuleBindingKind::record(&mut entry.binding_kinds, exported.clone(), kind);
+                }
+                ModuleBindingExportFact::DefaultLocal { local } => {
+                    let kind = facts
+                        .binding
+                        .local
+                        .get(local)
+                        .or_else(|| imported_binding_kinds.get(local))
+                        .copied()
+                        .unwrap_or(ModuleBindingKind::Value);
+                    ModuleBindingKind::record(&mut entry.binding_kinds, "default", kind);
+                }
+                ModuleBindingExportFact::AllFrom {
+                    target,
+                    explicit_type,
+                } => {
+                    let target_entry = self.export_entry(target);
+                    for (name, target_kind) in target_entry.binding_kinds {
+                        if name == "default" {
+                            continue;
+                        }
+                        ModuleBindingKind::record(
+                            &mut entry.binding_kinds,
+                            name,
+                            if *explicit_type {
+                                ModuleBindingKind::Type
+                            } else {
+                                target_kind
+                            },
+                        );
+                    }
+                }
+            }
+        }
         let mut local_builders = facts.local_builders.clone();
         let mut local_components = facts.local_components.clone();
         let mut local_classes = facts.local_classes.clone();
