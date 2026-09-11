@@ -50,6 +50,11 @@ pub struct NativeCompilerOptions {
     // ets_checker.ts::setCompilerOptions sets noEmit. Keep this private:
     // callers may configure checking, but cannot delegate build output to TS.
     no_emit: bool,
+    // Corsa defaults to four compiler checkers. Arkdown's build workload can
+    // use the host's available parallelism, but caps independent type-cache
+    // populations at six: the real 13k-source ArkTS fixture improves through
+    // six and reaches its memory/performance knee before eight.
+    checkers: usize,
     pub incremental: bool,
     pub ts_build_info_file: PathBuf,
     pub skip_paths_in_key_for_compilation_settings: bool,
@@ -215,6 +220,9 @@ impl NativeCompilerOptions {
             paths_base_path: project_root.to_path_buf(),
             base_url: project_root.to_path_buf(),
             no_emit: true,
+            checkers: std::thread::available_parallelism()
+                .map_or(4, |count| count.get())
+                .min(6),
             incremental: true,
             ts_build_info_file: PathBuf::new(),
             skip_paths_in_key_for_compilation_settings: true,
@@ -952,6 +960,7 @@ impl NativeTypeSession {
         let id = self.next_id;
         let request_started = Instant::now();
         let mut sdk_plugin_callbacks = 0_u64;
+        let mut sdk_plugin_batches = 0_u64;
         let mut sdk_plugin_callback_time = Duration::ZERO;
         self.write(
             &json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }),
@@ -1006,6 +1015,7 @@ impl NativeTypeSession {
                             },
                         )?;
                         sdk_plugin_callbacks += callback_count;
+                        sdk_plugin_batches += 1;
                         sdk_plugin_callback_time += callback_started.elapsed();
                         response
                     }
@@ -1053,6 +1063,7 @@ impl NativeTypeSession {
                 request = method,
                 elapsed_ms = request_started.elapsed().as_millis(),
                 sdk_plugin_callbacks,
+                sdk_plugin_batches,
                 sdk_plugin_callback_ms = sdk_plugin_callback_time.as_millis(),
                 "native TypeScript request completed"
             );

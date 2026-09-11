@@ -58,6 +58,12 @@ fn compiler_options_preserve_oh_acronym_wire_names_and_checker_mode() {
     // ets2bundle/compiler/src/ets_checker.ts::setCompilerOptions fixes
     // `noEmit`; Arkdown must never turn TSGO into its code generator.
     assert_eq!(value["noEmit"], true);
+    assert_eq!(
+        value["checkers"],
+        std::thread::available_parallelism()
+            .map_or(4, |count| count.get())
+            .min(6)
+    );
     assert_eq!(value["module"], 1);
     assert_eq!(value["ohRuntimeOS"], "OpenHarmony");
     assert_eq!(value["skipArkTSStaticBlocksCheck"], true);
