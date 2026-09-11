@@ -110,7 +110,7 @@ files、共享状态和逐插件 cache 必须继续通过 typed bridge 持久化
 metadata 由 Rust/OXC/Rolldown 实现，按需消费类型查询结果。
 
 `arkdown-ets-checker` 已接入 TypeScript
-`0780074afa51745e9be859be1ad9400a7f61dbf6` 原生 API。Rust 管理
+`583e9e8b5450c6de49bbe985bd836d7941c7a961` 原生 API。Rust 管理
 工程输入、源码 snapshot、进程和 OXC consumer，Go 负责 parser/binder/type
 checker、OH resolver、SDK callback 选择和独立 ArkTS 1.1 linter；TSGO 不启动
 Node、不嵌入 JS，也不保留旧 isolated-declarations/Unknown checker 兜底。SDK
@@ -121,7 +121,9 @@ fallback 仍由 Go/Rust owner。
 调用；每个 TSGO 子进程必须映射到独立的 JS host scope，避免多模块并发复用进程本地
 session id。
 class callback 接收与 compile-plugin 完全相同的 Rust 构建 `projectConfig` 快照；
-ArkTS linter strict checker clone 与 normal checker 共享同一 SDK callback executor；
+ArkTS linter strict checker clone 保留同一 SDK callback executor，但普通模式按 OH
+`createTypeChecker` 禁用其 JSDoc callback；只有 `strictCheckerOnly` 才由 strict
+checker 执行；完整 diagnostics 后两个 checker 均按 `LinterRunner` reset；
 ESMODULE checker 的 TypeScript module kind 按源码设置为 ES2020；独立的 source
 model 在 Stage 工程使用源码定义的 `moduleJson` sentinel，在 FA 工程保留非空
 compile mode，不能混为同一个字段。
@@ -136,7 +138,7 @@ source graph、声明诊断和源码定义的诊断筛选已经贯通。三平�
 linter、type-facts 和 source-graph 刷新顺序。源码合同和验证说明见
 [`crates/arkdown-ets-checker/DESIGN.md`](../../crates/arkdown-ets-checker/DESIGN.md)。
 
-当前 clean TSGO revision `0780074afa51745e9be859be1ad9400a7f61dbf6`
+当前 clean TSGO revision `583e9e8b5450c6de49bbe985bd836d7941c7a961`
 已经生成 macOS arm64、Linux x64 GNU 和 Windows x64 MSVC 发行件并通过 archive
 hash；macOS 平台包 dry-run 验证 `tsc` 和元数据会实际进入 npm tarball，且 JS CLI
 在清除开发覆盖环境变量后能从本地平台包完成 `check`。Linux/Windows 只完成交叉

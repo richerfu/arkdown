@@ -22,7 +22,7 @@ checker 或插件结论。
 | 唯一入口 | Hvigor wrapper 的 argv/stdio/exit 生命周期 | `packages/arkdown/js/arkdown-cli.js` + typed N-API | 已对齐目标架构；Rust 无 CLI |
 | 项目/模块/target 计划 | OHOS task 组装 loader、resource、compile、package、sign DAG | `arkdown-build` 与领域 crate | Rust 直接拥有，不保留 task facade |
 | 依赖解析 | loader config、OH resolver、package graph | `arkdown-session`、`arkdown-resolver`、TSGO OH resolver | 已接入已物化依赖；构建不隐式安装 |
-| ArkTS 1.1 checker | OH TypeScript parser/binder/checker/linter；ets2bundle `ets_checker.ts` | packaged TSGO + `ProjectSemanticChecker` | 源码定义能力差异为 0；固定 `noEmit`，ESMODULE 使用 ES2020 module，Stage/FA 使用源码的 `moduleJson` 分界，normal/strict checker 共享 callback executor；TSGO 经双向 API 回调 JS CLI 进程内的 SDK plugin host，自身不启动 Node；SDK class callback 接收同一份完整 compile `projectConfig`，旧 Rust subset checker 已删除 |
+| ArkTS 1.1 checker | OH TypeScript parser/binder/checker/linter；ets2bundle `ets_checker.ts` | packaged TSGO + `ProjectSemanticChecker` | 源码定义能力差异为 0；固定 `noEmit`，ESMODULE 使用 ES2020 module，Stage/FA 使用源码的 `moduleJson` 分界；SDK JSDoc callback 普通模式只在 normal semantic 执行，strictCheckerOnly 才由 strict checker 执行；TSGO 经双向 API 回调 JS CLI 进程内的 SDK plugin host，自身不启动 Node；SDK class callback 接收同一份完整 compile `projectConfig`，旧 Rust subset checker 已删除 |
 | checker-driven transform | `ohApi.ts`、component transforms、`checkCrossplatformValue`、`processImportModule` | TSGO batched facts + OXC consumers | annotation、builder、enum、SDK dependency 已接通；Builder 与 SDK component 的 named/default/namespace import 按 aliased declaration 解析；Program 路径经 SourceStore 映射回 Rolldown snapshot identity；Rust 不重做类型推断 |
 | 代码与 sourcemap | TypeScript printer/source-map hooks、Rollup transform map chain | OXC Codegen + Rust `string_wizard` + Rolldown map collapse | OXC 拥有代码和基础 map；MagicString 只表达源码 span edit 并产出 patch map；TSGO 固定 noEmit，不生成代码或 map |
 | compile-plugin | arkts-compose `getPlugins/doWrapper/getCompilePluginContext` | JS function ABI + N-API + Rolldown adapter | hook、顺序、share、cache、watch、TS/JS module loading 已接通 |
@@ -54,17 +54,19 @@ platform package dry-run 同时包含原生绑定、`tsc`、clean revision 构�
 
 ### TSGO：源码定义能力差异为 0
 
-当前适配后的 TSGO 提交 `0780074afa51745e9be859be1ad9400a7f61dbf6` 已覆盖 OH parser、
+当前适配后的 TSGO 提交 `583e9e8b5450c6de49bbe985bd836d7941c7a961` 已覆盖 OH parser、
 binder、checker、ArkTS 1.1 linter、OH resolver、SDK function/class callback、
 诊断筛选、retention 与 Rust/OXC 所需类型消费者。OH linter 当前源码语料共
 1004 个 source case，1004/1004 执行且无跳过；两份只承载 JSON 数据、没有
 `.ets/.ts` 输入的目录按 OH runner 规则不属于 source case。
 
-本轮补齐了最后一个真实链路缺口：ArkTS linter 为 strict 模式 clone compiler
-options 时曾丢失私有 SDK callback executor，导致 HarmonyOS `5.0.5(17)` 被错误
-按整数比较并误报 API 11/12。TSGO 现在让 normal/strict checker 共享同一宿主
-executor；native boundary 与 JS/N-API 真实构建都只保留 SDK 插件判定的 API 20
-告警。
+ArkTS linter 的 compiler-options clone 保留宿主 callback executor，避免 HarmonyOS
+`5.0.5(17)` 退回整数比较；但 OH `checker.ts::createTypeChecker` 明确在
+`strictCheckerOnly=false` 时清除 strict checker 的 JSDoc callback，且
+`LinterRunner.ts` 在完整 normal/strict diagnostics 后 reset 两个 checker。当前
+TSGO 同时保留这两个条件：普通模式由 normal checker 执行 SDK JSDoc 插件，
+strictCheckerOnly 模式才由 strict checker 执行；retention/apiAvailable 等独立
+callback 不受 JSDoc reset 影响。
 
 TSGO 只负责类型检查、推断、诊断和只读 semantic facts，不负责 JS/声明生成或
 代码改写。watch 已按 `rollup-plugin-ets-checker.ts::etsChecker` 生命周期保留每个
@@ -293,9 +295,11 @@ command/config 或 `contains` 片段。
   `nativeLib.debugSymbol.strip=false` 的 debug HAP；旧 README API 23 数据没有产物
   尺寸与阶段记录，不能据此创造 Rolldown 回归规则或删除 native debug 符号。
   完整 `check` 的 4/6/8 路实测为 121.51/112.81/110.82 秒，8 路已进入收益拐点；
-  OpenHarmony checker 对每个源码检查点执行 SDK JS hook，禁止通过结果缓存省略调用。
-  最终 npm 平台包使用 clean TSGO `36890029ed`，清除开发覆盖后的真实工程 `check`
-  为 114.38 秒、最大 RSS 3.34 GiB，较优化前 193.77 秒减少 41.0%。
+  OpenHarmony checker 对 normal semantic 的每个源码检查点执行 SDK JS hook，禁止
+  通过结果缓存省略调用；普通模式的 strict checker 与完整诊断后的同一 Program
+  查询不得重复触发。最终 npm 平台包使用 clean TSGO `583e9e8b54`：真实工程 callback
+  由 1,300,919 降至 450,598 次（-65.36%），清除开发覆盖后的 `check` 由 114.38
+  秒降至 59.58 秒（-47.91%）。
 
 ## 下一步顺序
 
