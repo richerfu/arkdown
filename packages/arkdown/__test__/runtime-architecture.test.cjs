@@ -61,6 +61,10 @@ test('npm release packages the pinned TypeScript submodule before native platfor
   assert.ok(workflow.indexOf('Build pinned native TypeScript distribution') < workflow.indexOf('Download all bindings'))
   assert.match(workflow, /attach-typescript-dist\.mjs/)
   assert.match(workflow, /napi pre-publish --no-gh-release -t npm --skip-optional-publish/)
+  assert.doesNotMatch(workflow, /for child_directory in npm\//)
+  for (const platform of ['darwin-arm64', 'linux-x64-gnu', 'win32-x64-msvc']) {
+    assert.match(workflow, new RegExp(`\\./npm/${platform}`))
+  }
 })
 
 test('plugin adapter exposes the complete supported lifecycle through one typed dispatcher', () => {
