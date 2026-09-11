@@ -277,7 +277,7 @@ command/config 或 `contains` 片段。
   因而下一轮性能工作必须分别归属到 checker 跨构建复用、现有 typed cache 的整链路
   短路，以及 package/sign 输入不变判定；不得用 Rolldown 私有 graph 格式概括或掩盖
   checker 与打包的已量化成本。完整口径见 `ARKTS11-NATIVE-TYPESCRIPT.md`。
-- 本轮最终 release 在当前可用 DevEco 26 SDK 上重新完成 `--skip-checker` cold/hot：
+- 前一轮 release 在当前可用 DevEco 26 SDK 上重新完成 `--skip-checker` cold/hot：
   71.40/38.73 秒，峰值 RSS 2.14/2.05 GiB。SDK 不同，不能把它与旧表述为严格同环境
   benchmark；但 Arkdown 自身冷阶段已经定位并消除：Rolldown scan 从 53–61 秒降到
   2.645 秒，
@@ -286,6 +286,16 @@ command/config 或 `contains` 片段。
   12.120 秒与 pack/sign 17.557 秒；无变更热构建已跳过 Rolldown/ABC，仍由 facts
   6.551 秒和 pack/sign 18.850 秒主导，下一优先级是
   checker 跨构建事实复用和 package/sign 输入不变短路，而不是私有 graph 格式。
+- 普通 build diagnostics 与 transform facts 现复用同一依赖分区 checker 池，主机
+  并行度上限为 6；同 SDK 的 `--skip-checker` cold/hot 更新为 66.86/34.87 秒，
+  facts 由 6.649 秒降至 3.895 秒。当前冷构建的 bundle stage/ABC/pack+sign 为
+  15.869/9.010/22.552 秒。产物是约 1.5 GB 且产品配置
+  `nativeLib.debugSymbol.strip=false` 的 debug HAP；旧 README API 23 数据没有产物
+  尺寸与阶段记录，不能据此创造 Rolldown 回归规则或删除 native debug 符号。
+  完整 `check` 的 4/6/8 路实测为 121.51/112.81/110.82 秒，8 路已进入收益拐点；
+  OpenHarmony checker 对每个源码检查点执行 SDK JS hook，禁止通过结果缓存省略调用。
+  最终 npm 平台包使用 clean TSGO `36890029ed`，清除开发覆盖后的真实工程 `check`
+  为 114.38 秒、最大 RSS 3.34 GiB，较优化前 193.77 秒减少 41.0%。
 
 ## 下一步顺序
 

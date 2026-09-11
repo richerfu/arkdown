@@ -114,7 +114,8 @@ product/module/target，关闭 Hvigor daemon，并将“冷构建”定义为对
 | Hvigor | 445.27 s | 4.42 s | 4.23 GiB | 0.55 GiB |
 | Arkdown 完整 checker | 305.37 s | 167.92 s | 3.54 GiB | 3.40 GiB |
 | Arkdown `--skip-checker` | 158.21 s | 36.53 s | 2.45 GiB | 2.21 GiB |
-| Arkdown `--skip-checker`（本轮最终 release） | 71.40 s | 38.73 s | 2.14 GiB | 2.05 GiB |
+| Arkdown `--skip-checker`（消除 transform 热点） | 71.40 s | 38.73 s | 2.14 GiB | 2.05 GiB |
+| Arkdown `--skip-checker`（复用 checker 池、6 路上限） | 66.86 s | 34.87 s | 2.62 GiB | 2.29 GiB |
 
 完整 checker 的 clean 构建比 Hvigor 少 139.90 秒（31.42%，1.46 倍），显式
 `--skip-checker` 少 287.06 秒（64.47%，2.81 倍）。热构建则分别比 Hvigor 慢
@@ -143,3 +144,23 @@ content-addressed transform object 不再逐个执行 `sync_all`，只在 manife
 transport batch 合并，但仍按请求顺序逐次执行全部插件函数和 class `check`。Rust 为
 每个 TSGO 子进程分配独立 host scope，避免多模块并发时进程内 `sessionId` 重复污染
 JS source/projectConfig intern 表。
+
+在相同 DevEco 26 SDK 和工程上，普通 build checker 与 transform facts 现共用一个
+随 Program 保留的依赖分区 checker 池；facts 也按分区并行、按请求索引稳定合并。
+`--skip-checker` 冷构建进一步由 71.40 秒降至 66.86 秒，facts 由 6.649 秒降至
+3.895 秒；无变更热构建为 34.87 秒。该轮冷阶段为 bundle stage 15.869 秒
+（Rolldown bundler 11.436 秒）、ABC 9.010 秒、pack/sign 22.552 秒。pack/sign
+处理的是约 1.5 GB debug HAP：当前产品明确配置
+`nativeLib.debugSymbol.strip=false`，不能为了追回旧 benchmark 耗时而擅自剥离符号。
+旧 README 的 49.25 秒中位数使用 API 23，且未记录当时 HAP 尺寸或阶段耗时，不能把
+当前多出的 17.61 秒全部归因给 Rolldown 回归。
+
+完整 checker 的独立 `check` 在 4/6/8 个 checker 上分别为
+121.51/112.81/110.82 秒。8 路相对 6 路只再减少 1.99 秒，并把最大 RSS 提高到约
+3.92 GiB，因此 Arkdown 根据主机可用并行度设置 checker 数量、上限为 6。6 路将
+43,390 次 facts SDK hook 从约 25,800 批合并为 17,604 批；但 OpenHarmony
+`checker.ts` 在 identifier、property access 和 overload 的 JSDoc 检查点逐次调用
+SDK 插件，Arkdown 不缓存或删除这些调用。当前完整诊断仍有约 125.6 万次 hook、约
+50.2 秒 JS host 时间，这是下一轮 checker 优化必须保留语义处理的边界。最终清除
+`ARKDOWN_TYPESCRIPT_PATH`、从 npm 平台包发现 `36890029ed` 后，真实工程 `check`
+为 114.38 秒、最大 RSS 3.34 GiB；相比优化前 193.77 秒减少 79.39 秒（41.0%）。
