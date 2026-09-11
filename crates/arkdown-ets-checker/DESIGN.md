@@ -4,7 +4,7 @@
 
 ArkTS 1.1 的解析、绑定、类型推断、语义诊断、OH resolver、SDK JSDoc 回调和
 独立 linter 由适配后的原生 TSGO 提供。当前发行基线是 TypeScript 提交
-`0780074afa51745e9be859be1ad9400a7f61dbf6`。Arkdown 通过
+`583e9e8b5450c6de49bbe985bd836d7941c7a961`。Arkdown 通过
 `--api --async` JSON-RPC 启动它，不调用 tsgolint，也不解析 `tsc` 控制台文字。
 只有 SDK 明确配置 CommonJS `apiCheckPlugin`、`annotationCheckPlugin` 或
 `apiCheckPlugins` 时，TSGO 才通过同一双向 JSON-RPC session 发出类型检查回调。
@@ -68,6 +68,17 @@ TSGO 发出的 `ohSdkPluginBatch` 请求由 session 在等待原请求期间同�
 分配的进程唯一 host scope 复用 SDK TypeScript SourceFile、Node range 与同一配置
 对象，避免多个 TSGO 进程重复使用本地 session ID，对应 Hvigor 在同一个 Program
 中直接传递对象引用的行为。
+
+SDK JSDoc 插件的“一次”是一次 normal semantic 遍历，不是整个工程只调用一次
+插件函数。OH `checker.ts::createTypeChecker` 在普通模式为 strict linter checker
+清除 `getJsDocNodeCheckedConfig`，`LinterRunner.ts::runArkTSLinter` 在 normal、
+syntactic、strict 三个完整诊断阶段结束后又对两个 checker 调用
+`resetJsDocCheck`。因此普通模式只允许 normal checker 在每个源码定义的 identifier、
+property access 或 overload 检查点执行一次 SDK function/class callback；strict
+checker、后续 linter 收集和同一 Program 上的 type-fact 查询不得重复执行。只有
+`strictCheckerOnly=true` 时 callback 才由 strict checker 执行。callback executor
+仍随 compiler options 一起保留，因为 retention、apiAvailable 等 checker callback
+不属于这个 JSDoc reset surface。
 
 `ProjectSemanticChecker` 为 build/check 构造同一份工程 roots、SDK/loader
 声明、package resolution、SDK 配置和 compiler options。工程 roots 来自上游

@@ -3,7 +3,7 @@
 ## 结论与范围
 
 Arkdown 的 ArkTS 1.1 类型检查和推断已经统一到适配后的 TSGO；当前发行提交为
-`0780074afa51745e9be859be1ad9400a7f61dbf6`。TSGO 不生成 Arkdown 的 JS、
+`583e9e8b5450c6de49bbe985bd836d7941c7a961`。TSGO 不生成 Arkdown 的 JS、
 声明或 annotation runtime metadata，Program 固定 `noEmit`。ArkTS 1.2 不在
 本专项范围内。
 
@@ -36,7 +36,7 @@ OXC corpus 只验证 OH 已定义的输入，不用于发明 checker 规则。�
 | OH resolver | OH `moduleNameResolver.ts`、ets2bundle resolver | `oh_modules`/`node_modules`、oh-package exports、kit/SDK fallback、external API、`.js → .d.ets`、`.so`、TS↔ETS/Sendable 已在 compiler owner 实现 |
 | 工程 root/source graph | ets2bundle `loadEntryObj/getEntryObj/rootFileNamesCollect` | Rust 从 loader 的 `entryObj + ohExports` 收集入口，TSGO 返回其可达 source graph；build/check 均不递归扫描整个模块目录作为 compiler roots |
 | compiler/snapshot 文件身份 | ets2bundle `ets_checker.ts::getCanonicalFileName`、TSGO `tspath.GetCanonicalFileName` | checker 请求始终使用 Program 返回的路径；`SourceStore` 在启动时一次性把 symlink alias 和 TypeScript 大小写规范路径映射回 Rolldown 实际快照路径，查询区间取自快照源码，返回 facts 也只按快照身份发布；热路径不访问文件系统 |
-| SDK callbacks | OH checker + ets2bundle `api_check_utils.ts`、`collectExternalApiCheckPlugin/collectExternalApiChecker` | Available/SuppressWarnings/since/syscap/permission/form/crossplatform/atomic-service/FA/Stage/apiAvailable/throws 已实现；Rust options 提供 closure inputs 和完整 compile `projectConfig`；TSGO 保留选择、比较和诊断 owner并经双向 API 批量回调，Rust 只路由，JS CLI 进程执行 SDK CommonJS function/class ABI 与 build-scoped 实例缓存；每次源码调用均执行，不缓存插件结果；strict checker clone 保留同一 callback executor |
+| SDK callbacks | OH checker + ets2bundle `api_check_utils.ts`、`collectExternalApiCheckPlugin/collectExternalApiChecker` | Available/SuppressWarnings/since/syscap/permission/form/crossplatform/atomic-service/FA/Stage/apiAvailable/throws 已实现；Rust options 提供 closure inputs 和完整 compile `projectConfig`；TSGO 保留选择、比较和诊断 owner并经双向 API 批量回调，Rust 只路由，JS CLI 进程执行 SDK CommonJS function/class ABI 与 build-scoped 实例缓存；JSDoc 插件只在 normal semantic 的每个源码检查点执行，strict checker 在普通模式禁用并在完整诊断后 reset；`strictCheckerOnly` 才改由 strict checker 执行；不缓存插件结果 |
 | SDK dependency collection | `checkCrossplatformValue/getApiPathFromNode` | checker 在真实 declaration-use 回调记录 `(apiModule,function)`；Rust 按 SDK `depsModuleConfig` 合并 module/component，不再伪造类型推断 |
 | ArkTS linter | `ArkTSLinter_1_1/LinterRunner.ts` | 独立 strict checker、ETS/TS 规则、strictCheckerOnly、OH module/path、Sendable/mix-compile 与筛选已实现；OH runner 定义的 1004 个 source case 全部执行并精确比对，无跳过 |
 | 诊断合同 | OH `ArkTSLinter_1_1/TSDiagnostics.ts`、ets2bundle `processBuildHap`、TSGO `DiagnosticResponse` | build 专用请求按 normal semantic → syntactic → strict semantic 执行一次并返回 linter/syntactic/semantic 三通道，`processBuildHap` 复用 normal 结果；随后按源码规则处理 declaration，保留 category/code/UTF-16/chain/related info；Rust 应用 ignored-file/UI compatibility 筛选 |
@@ -87,7 +87,7 @@ OH_TYPESCRIPT_SOURCE=/tmp/arkdown-oh-typescript-source \
 node tools/scripts/package-arkts.mjs
 
 # Arkdown repo
-ARKDOWN_TYPESCRIPT_PATH=/path/to/0780074afa/arm_darwin/tsc \
+ARKDOWN_TYPESCRIPT_PATH=/path/to/583e9e8b54/arm_darwin/tsc \
   cargo test -p arkdown-ets-checker --test native -- --include-ignored
 cargo check --workspace --all-targets
 
@@ -158,9 +158,18 @@ JS source/projectConfig intern 表。
 完整 checker 的独立 `check` 在 4/6/8 个 checker 上分别为
 121.51/112.81/110.82 秒。8 路相对 6 路只再减少 1.99 秒，并把最大 RSS 提高到约
 3.92 GiB，因此 Arkdown 根据主机可用并行度设置 checker 数量、上限为 6。6 路将
-43,390 次 facts SDK hook 从约 25,800 批合并为 17,604 批；但 OpenHarmony
-`checker.ts` 在 identifier、property access 和 overload 的 JSDoc 检查点逐次调用
-SDK 插件，Arkdown 不缓存或删除这些调用。当前完整诊断仍有约 125.6 万次 hook、约
-50.2 秒 JS host 时间，这是下一轮 checker 优化必须保留语义处理的边界。最终清除
-`ARKDOWN_TYPESCRIPT_PATH`、从 npm 平台包发现 `36890029ed` 后，真实工程 `check`
-为 114.38 秒、最大 RSS 3.34 GiB；相比优化前 193.77 秒减少 79.39 秒（41.0%）。
+43,390 次 facts SDK hook 从约 25,800 批合并为 17,604 批。后续源码审计与真实
+Hvigor 6.26.4 冷计数确认，OH 普通模式的 SDK JSDoc hook 只属于 normal semantic：
+主模块在完整诊断边界触发 since 417,202、syscap 415,200、regex 208 次，widget
+分别为 2,425、2,649、0 次；strict semantic、`getTscDiagnostics` 和
+`processBuildHap` 均未增加。`serviceChecker` 在默认内存模式释放 type checker 后，
+旧 transform 链重新创建 checker，主模块另触发 7,868/7,753 次；这不是第二轮完整
+诊断。
+
+TSGO 先前错误地让 normal、strict 和后续 transform-fact 查询都执行 JSDoc hook，
+同工程累计触发 1,300,919 次。发行提交 `583e9e8b54` 按
+`createTypeChecker`/`LinterRunner` 源码关闭普通模式 strict callback 并在完整诊断后
+reset，降为 450,598 次，减少 850,321 次（65.36%）。SDK 插件仍在 normal semantic
+的每个 identifier/property/overload 源码检查点逐次执行，没有按入参缓存或省略。
+清除 `ARKDOWN_TYPESCRIPT_PATH`、从 npm 平台包发现该 clean revision 后，真实工程
+`check` 墙钟为 59.58 秒；对比修复前同 SDK 的 114.38 秒减少 54.80 秒（47.91%）。
