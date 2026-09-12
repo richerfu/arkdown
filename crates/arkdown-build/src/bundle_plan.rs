@@ -156,7 +156,9 @@ impl<'a> BundlePlanBuilder<'a> {
         Self::add_loader_ohm_package_versions(loader_json, &mut source_map);
         LoaderRuntimePackageContextCollector::new(loader_json, &package_snapshots)
             .extend(&mut runtime);
-        let entries = Self::ordered_compile_entries(loader_json);
+        let entries =
+            RolldownCompileEntryPlan::from_loader_json(loader_json, arkts_language_version)
+                .collect();
         let module_meta_info_files = BundleModuleMetaInfoFileCollector::new(
             loader_json,
             module_name,
@@ -550,20 +552,93 @@ impl BundlePlanBuilder<'_> {
                 .or_insert_with(|| context.version.clone());
         }
     }
+}
 
-    fn ordered_compile_entries(loader_json: &LoaderJson) -> Vec<String> {
+/// Selects the source entries submitted to Rolldown from the loader/profile
+/// handoff while retaining runtime-only ArkTS 1.2 class entries in the module
+/// profile.
+///
+/// `developtools_ace_ets2bundle/compiler/src/interop/main.js::setAbilityFile`
+/// resolves ability entries against `src/main` and, during mixed compilation,
+/// skips an entry that is not a source file because the static frontend owns
+/// it. The same string still belongs in `module.json`: ETSRuntime consumes it
+/// as an extensionless OHM/class path.
+pub(crate) struct RolldownCompileEntryPlan<'a> {
+    serialized_entries: &'a [String],
+    internal_entries: &'a [String],
+    runtime_entries: &'a [String],
+    source_root: &'a Path,
+    arkts_language_version: ArktsLanguageVersion,
+}
+
+impl<'a> RolldownCompileEntryPlan<'a> {
+    fn from_loader_json(
+        loader_json: &'a LoaderJson,
+        arkts_language_version: ArktsLanguageVersion,
+    ) -> Self {
+        Self::new(
+            &loader_json.hvigor_compile_entry,
+            &loader_json.compile_entry,
+            &loader_json.runtime_entry_sources,
+            Path::new(&loader_json.module_root_path),
+            arkts_language_version,
+        )
+    }
+
+    pub(crate) fn new(
+        serialized_entries: &'a [String],
+        internal_entries: &'a [String],
+        runtime_entries: &'a [String],
+        source_root: &'a Path,
+        arkts_language_version: ArktsLanguageVersion,
+    ) -> Self {
+        Self {
+            serialized_entries,
+            internal_entries,
+            runtime_entries,
+            source_root,
+            arkts_language_version,
+        }
+    }
+
+    pub(crate) fn collect(&self) -> Vec<String> {
         let mut entries = Vec::new();
         let mut seen = FxHashSet::default();
-        for entry in loader_json
-            .hvigor_compile_entry
+        let runtime_entries = self
+            .runtime_entries
             .iter()
-            .chain(loader_json.compile_entry.iter())
+            .map(String::as_str)
+            .collect::<FxHashSet<_>>();
+        for entry in self
+            .serialized_entries
+            .iter()
+            .chain(self.internal_entries.iter())
         {
+            if self.arkts_language_version.is_static()
+                && runtime_entries.contains(entry.as_str())
+                && !self.runtime_entry_is_source_file(entry)
+            {
+                continue;
+            }
             if seen.insert(entry.clone()) {
                 entries.push(entry.clone());
             }
         }
         entries
+    }
+
+    fn runtime_entry_is_source_file(&self, entry: &str) -> bool {
+        let specifier = entry
+            .split_once('?')
+            .map_or(entry, |(specifier, _)| specifier);
+        let path = Path::new(specifier);
+        let source_path = if path.has_root() {
+            path.to_path_buf()
+        } else {
+            self.source_root
+                .join(arkdown_path::strip_relative_prefix(specifier))
+        };
+        source_path.is_file()
     }
 }
 

@@ -8,6 +8,8 @@ pub mod app_coordinator;
 #[cfg(test)]
 mod application_tests;
 pub mod bundle_plan;
+#[cfg(test)]
+mod bundle_plan_tests;
 pub mod bytecode_har_declaration;
 pub mod check;
 pub mod clean;
