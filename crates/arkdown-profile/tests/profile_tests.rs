@@ -445,6 +445,90 @@ fn test_write_module_json_emits_virtual_machine_and_compile_mode() {
         "module.compileMode must be 'esmodule'; got: {}",
         module["compileMode"]
     );
+    assert!(
+        module.get("moduleArkTSMode").is_none(),
+        "ArkTS 1.1 must retain BundleManager's dynamic default"
+    );
+    assert!(
+        module["abilities"][0].get("arkTSMode").is_none(),
+        "ArkTS 1.1 abilities must retain BundleManager's dynamic default"
+    );
+    assert_eq!(
+        module["abilities"][0]["srcEntry"].as_str(),
+        Some("./ets/entryability/EntryAbility.ets"),
+        "ArkTS 1.1 must retain the source-file entry format"
+    );
+}
+
+#[test]
+fn test_write_module_json_marks_arkts12_runtime_entries_static() {
+    use arkdown_core::{
+        AbilityEntry, ArktsLanguageVersion, CompileMode, ExtensionAbilityEntry, HapManifest,
+        OhosModuleType,
+    };
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut config = (*default_config()).clone();
+    config.project_root = tmp.path().to_path_buf();
+    config.product.arkts_version = ArktsLanguageVersion::V1_2;
+    let processor = ProfileProcessor::new(Arc::new(config));
+    let manifest = HapManifest {
+        module_name: "entry".to_string(),
+        module_type: OhosModuleType::Entry,
+        device_types: vec!["phone".to_string()],
+        virtual_machine: "ark13.0.1.0".to_string(),
+        compile_mode: CompileMode::EsModule,
+        src_entry: None,
+        abilities: vec![AbilityEntry {
+            name: "EntryAbility".to_string(),
+            src_entry: "./ets/entryability/EntryAbility.ets".to_string(),
+            exported: true,
+            skills: vec![],
+            icon: None,
+            label: None,
+            description: None,
+            start_window_icon: None,
+            start_window_background: None,
+        }],
+        extension_abilities: vec![ExtensionAbilityEntry {
+            name: "StaticExtension".to_string(),
+            src_entry: "./ets/extension/Extension.ets:StaticExtension".to_string(),
+            extension_type: "service".to_string(),
+            label: None,
+            description: None,
+            metadata: vec![],
+        }],
+        dependencies: vec![],
+        router_map: None,
+        pages: None,
+        main_element: Some("EntryAbility".to_string()),
+        description: None,
+    };
+
+    let out_path = tmp.path().join("module.json");
+    processor
+        .write_module_json(&manifest, &out_path, None)
+        .expect("write static module.json");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(out_path).expect("read static module.json"))
+            .expect("valid static module.json");
+    let module = &parsed["module"];
+
+    assert_eq!(module["moduleArkTSMode"].as_str(), Some("static"));
+    assert_eq!(module["arkTSMode"].as_str(), Some("static"));
+    assert_eq!(module["abilities"][0]["arkTSMode"].as_str(), Some("static"));
+    assert_eq!(
+        module["abilities"][0]["srcEntry"].as_str(),
+        Some("entry/src/main/ets/entryability/EntryAbility")
+    );
+    assert_eq!(
+        module["extensionAbilities"][0]["arkTSMode"].as_str(),
+        Some("static")
+    );
+    assert_eq!(
+        module["extensionAbilities"][0]["srcEntry"].as_str(),
+        Some("entry/src/main/ets/extension/Extension:StaticExtension")
+    );
 }
 
 #[test]

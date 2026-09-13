@@ -50,6 +50,7 @@ struct ModuleManifestJsonContext<'a> {
     resource_ids: Option<&'a FxHashMap<String, u32>>,
     package_name: &'a str,
     bundle_type: &'a str,
+    is_static_arkts: bool,
     target_ability_overrides: &'a [TargetAbilityOverride],
     dependency_profile_merge: &'a DependencyProfileMerge,
     has_insight_intent: bool,
@@ -237,6 +238,7 @@ impl ModuleJsonWriter {
                 resource_ids,
                 package_name: &package_name,
                 bundle_type: &bundle_type,
+                is_static_arkts: config.product.arkts_version.is_static(),
                 target_ability_overrides: &target_ability_overrides,
                 dependency_profile_merge: &dependency_profile_merge,
                 has_insight_intent,
@@ -579,6 +581,37 @@ impl ModuleJsonWriter {
             .unwrap_or(false)
     }
 
+    /// Convert a source-form ArkTS 1.2 entry into the locator consumed by
+    /// Ability Runtime when it loads `ets/modules_static.abc`.
+    fn static_arkts_src_entry(module_name: &str, src_entry: &str) -> String {
+        if src_entry.starts_with('@')
+            || src_entry.ends_with(".so")
+            || src_entry.starts_with(&format!("{module_name}/src/main/"))
+        {
+            return src_entry.to_string();
+        }
+
+        let (source_path, explicit_class) = match src_entry.rsplit_once(':') {
+            Some((source_path, class_name))
+                if source_path.ends_with(".ets") || source_path.ends_with(".ts") =>
+            {
+                (source_path, Some(class_name))
+            }
+            _ => (src_entry, None),
+        };
+        let relative_path = source_path.strip_prefix("./").unwrap_or(source_path);
+        let source_stem = relative_path
+            .strip_suffix(".ets")
+            .or_else(|| relative_path.strip_suffix(".ts"))
+            .unwrap_or(relative_path);
+        let mut runtime_entry = format!("{module_name}/src/main/{source_stem}");
+        if let Some(class_name) = explicit_class {
+            runtime_entry.push(':');
+            runtime_entry.push_str(class_name);
+        }
+        runtime_entry
+    }
+
     /// Build the `module` JSON object from a processed [`HapManifest`].
     ///
     /// Field order matches hvigor's canonical output (verified against golden):
@@ -597,6 +630,7 @@ impl ModuleJsonWriter {
             resource_ids,
             package_name,
             bundle_type,
+            is_static_arkts,
             target_ability_overrides,
             dependency_profile_merge,
             has_insight_intent,
@@ -681,7 +715,12 @@ impl ModuleJsonWriter {
                 if let Some(v) = launch_type {
                     obj.insert("launchType".into(), v.into());
                 }
-                obj.insert("srcEntry".into(), a.src_entry.clone().into());
+                let src_entry = if is_static_arkts {
+                    Self::static_arkts_src_entry(&manifest.module_name, &a.src_entry)
+                } else {
+                    a.src_entry.clone()
+                };
+                obj.insert("srcEntry".into(), src_entry.into());
                 if let Some(id) = description_id {
                     obj.insert("descriptionId".into(), (id as u64).into());
                 }
@@ -690,6 +729,9 @@ impl ModuleJsonWriter {
                 }
                 if let Some(v) = &a.start_window_background {
                     obj.insert("startWindowBackground".into(), v.clone().into());
+                }
+                if is_static_arkts {
+                    obj.insert("arkTSMode".into(), "static".into());
                 }
                 obj.insert("name".into(), a.name.clone().into());
                 serde_json::Value::Object(obj)
@@ -745,7 +787,12 @@ impl ModuleJsonWriter {
                 // fields (permissions, readPermission, writePermission, forms, etc.).
                 let mut obj = find_raw_ext_ability(&a.name).unwrap_or_default();
                 obj.insert("name".into(), a.name.clone().into());
-                obj.insert("srcEntry".into(), a.src_entry.clone().into());
+                let src_entry = if is_static_arkts {
+                    Self::static_arkts_src_entry(&manifest.module_name, &a.src_entry)
+                } else {
+                    a.src_entry.clone()
+                };
+                obj.insert("srcEntry".into(), src_entry.into());
                 if let Some(label) = &a.label {
                     obj.insert("label".into(), label.clone().into());
                 }
@@ -761,6 +808,9 @@ impl ModuleJsonWriter {
                 }
                 if let Some(id) = description_id {
                     obj.insert("descriptionId".into(), (id as u64).into());
+                }
+                if is_static_arkts {
+                    obj.insert("arkTSMode".into(), "static".into());
                 }
                 serde_json::Value::Object(obj)
             })
@@ -815,6 +865,25 @@ impl ModuleJsonWriter {
             "compileMode".into(),
             manifest.compile_mode.to_string().into(),
         );
+        // OpenHarmony's BundleManager defaults all three profile values to
+        // `dynamic` when absent. Ability Runtime selects the ETS runtime from
+        // moduleArkTSMode and the module/ability runtime from arkTSMode, so a
+        // product compiled as ArkTS 1.2 must carry the static values alongside
+        // modules_static.abc.
+        if is_static_arkts {
+            obj.insert("moduleArkTSMode".into(), "static".into());
+            obj.insert("arkTSMode".into(), "static".into());
+            if let Some(src_entry) = manifest.src_entry.as_deref().or_else(|| {
+                raw_module5
+                    .and_then(|module| module.get("srcEntry"))
+                    .and_then(serde_json::Value::as_str)
+            }) {
+                obj.insert(
+                    "srcEntry".into(),
+                    Self::static_arkts_src_entry(&manifest.module_name, src_entry).into(),
+                );
+            }
+        }
         obj.insert("type".into(), manifest.module_type.to_string().into());
         // dependencies: serialise from manifest (populated for HSP modules).
         let deps: Vec<serde_json::Value> = manifest
