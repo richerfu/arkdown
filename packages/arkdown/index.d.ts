@@ -8,7 +8,11 @@
  * preserves Rolldown's `getFileName` ownership and diagnostics verbatim.
  */
 export declare class ArkdownRolldownPluginContext {
-  resolve(specifier: string, importer?: string | undefined | null, options?: JsPluginContextResolveOptions | undefined | null): Promise<JsResolveIdOutput | null>
+  resolve(
+    specifier: string,
+    importer?: string | undefined | null,
+    options?: JsPluginContextResolveOptions | undefined | null,
+  ): Promise<JsResolveIdOutput | null>
   load(options: JsPluginContextLoadOptions): Promise<HvigorModuleInfo | null>
   emitFile(file: JsEmittedFile): string
   addWatchFile(id: string): void
@@ -37,42 +41,298 @@ export declare class ArkdownRolldownPluginContext {
 export interface ArkdownPlugin {
   name?: string
   order?: 'first' | 'last' | ((nameToIndex: Record<string, number>) => number)
-beforeBuild?: ((this: HvigorPluginContext) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext) => void | Promise<void> }
-buildStart?: ((this: HvigorPluginContext, options?: JsBuildStartOptions) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, options?: JsBuildStartOptions) => void | Promise<void> }
-afterBuildStart?: ((this: HvigorPluginContext) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext) => void | Promise<void> }
-resolveId?: ((id: string, importer?: string | null, options?: JsResolveIdOptions) => string | JsResolveIdOutput | false | null | undefined | Promise<string | JsResolveIdOutput | false | null | undefined>) | { order?: 'pre' | 'post'; handler: (id: string, importer?: string | null, options?: JsResolveIdOptions) => string | JsResolveIdOutput | false | null | undefined | Promise<string | JsResolveIdOutput | false | null | undefined> }
-load?: ((id: string) => string | JsLoadOutput | null | undefined | Promise<string | JsLoadOutput | null | undefined>) | { order?: 'pre' | 'post'; handler: (id: string) => string | JsLoadOutput | null | undefined | Promise<string | JsLoadOutput | null | undefined> }
-transform?: ((this: HvigorPluginContext, code: string, id: string, options: JsTransformHookExtraArgs) => string | JsTransformOutput | null | undefined | Promise<string | JsTransformOutput | null | undefined>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, code: string, id: string, options: JsTransformHookExtraArgs) => string | JsTransformOutput | null | undefined | Promise<string | JsTransformOutput | null | undefined> }
-moduleParsed?: ((moduleInfo: HvigorModuleInfo) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (moduleInfo: HvigorModuleInfo) => void | Promise<void> }
-resolveDynamicImport?: ((id: string, importer?: string | null, options?: JsResolveIdOptions) => string | JsResolveIdOutput | false | null | undefined | Promise<string | JsResolveIdOutput | false | null | undefined>) | { order?: 'pre' | 'post'; handler: (id: string, importer?: string | null, options?: JsResolveIdOptions) => string | JsResolveIdOutput | false | null | undefined | Promise<string | JsResolveIdOutput | false | null | undefined> }
-watchChange?: ((this: HvigorPluginContext, id: string, change: { event: 'create' | 'update' | 'delete' }) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, id: string, change: { event: 'create' | 'update' | 'delete' }) => void | Promise<void> }
-beforeBuildEnd?: ((this: HvigorPluginContext, input?: unknown) => unknown) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, input?: unknown) => unknown }
-buildEnd?: ((this: HvigorPluginContext, error?: Error) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, error?: Error) => void | Promise<void> }
-afterBuildEnd?: ((this: HvigorPluginContext) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext) => void | Promise<void> }
-bundleEnd?: ((this: HvigorPluginContext) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext) => void | Promise<void> }
-cleanUp?: ((this: HvigorPluginContext) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext) => void | Promise<void> }
-shouldInvalidCache?: ((request: PluginCacheRequest) => boolean | Promise<boolean>) | { order?: 'pre' | 'post'; handler: (request: PluginCacheRequest) => boolean | Promise<boolean> }
-/**
- * Accepted for Rollup plugin source compatibility. Stage/ESMODULE ArkTS
- * builds stop after module-graph collection, so output hooks remain dormant
- * just as they do when ets2bundle enables `generateModuleGraphOnly` and
- * `disableGenerateBundle`.
- */
-renderStart?: ((this: HvigorPluginContext, options: Record<string, unknown>) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, options: Record<string, unknown>) => void | Promise<void> }
-banner?: ((this: HvigorPluginContext, chunk: Record<string, unknown>) => string | null | undefined | Promise<string | null | undefined>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, chunk: Record<string, unknown>) => string | null | undefined | Promise<string | null | undefined> }
-footer?: ((this: HvigorPluginContext, chunk: Record<string, unknown>) => string | null | undefined | Promise<string | null | undefined>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, chunk: Record<string, unknown>) => string | null | undefined | Promise<string | null | undefined> }
-intro?: ((this: HvigorPluginContext, chunk: Record<string, unknown>) => string | null | undefined | Promise<string | null | undefined>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, chunk: Record<string, unknown>) => string | null | undefined | Promise<string | null | undefined> }
-outro?: ((this: HvigorPluginContext, chunk: Record<string, unknown>) => string | null | undefined | Promise<string | null | undefined>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, chunk: Record<string, unknown>) => string | null | undefined | Promise<string | null | undefined> }
-renderDynamicImport?: ((this: HvigorPluginContext, options: Record<string, unknown>) => unknown | Promise<unknown>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, options: Record<string, unknown>) => unknown | Promise<unknown> }
-resolveFileUrl?: ((this: HvigorPluginContext, options: Record<string, unknown>) => string | null | undefined | Promise<string | null | undefined>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, options: Record<string, unknown>) => string | null | undefined | Promise<string | null | undefined> }
-resolveImportMeta?: ((this: HvigorPluginContext, property: string | null, options: Record<string, unknown>) => string | null | undefined | Promise<string | null | undefined>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, property: string | null, options: Record<string, unknown>) => string | null | undefined | Promise<string | null | undefined> }
-renderChunk?: ((this: HvigorPluginContext, code: string, chunk: Record<string, unknown>, options: Record<string, unknown>) => string | { code: string; map?: unknown } | null | undefined | Promise<string | { code: string; map?: unknown } | null | undefined>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, code: string, chunk: Record<string, unknown>, options: Record<string, unknown>) => string | { code: string; map?: unknown } | null | undefined | Promise<string | { code: string; map?: unknown } | null | undefined> }
-augmentChunkHash?: ((this: HvigorPluginContext, chunk: Record<string, unknown>) => string | null | undefined | Promise<string | null | undefined>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, chunk: Record<string, unknown>) => string | null | undefined | Promise<string | null | undefined> }
-renderError?: ((this: HvigorPluginContext, error: Error) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, error: Error) => void | Promise<void> }
-generateBundle?: ((this: HvigorPluginContext, options: Record<string, unknown>, bundle: Record<string, unknown>, isWrite: boolean) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, options: Record<string, unknown>, bundle: Record<string, unknown>, isWrite: boolean) => void | Promise<void> }
-writeBundle?: ((this: HvigorPluginContext, options: Record<string, unknown>, bundle: Record<string, unknown>) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, options: Record<string, unknown>, bundle: Record<string, unknown>) => void | Promise<void> }
-closeBundle?: ((this: HvigorPluginContext) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext) => void | Promise<void> }
-closeWatcher?: ((this: HvigorPluginContext) => void | Promise<void>) | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext) => void | Promise<void> }
+  beforeBuild?:
+    | ((this: HvigorPluginContext) => void | Promise<void>)
+    | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext) => void | Promise<void> }
+  buildStart?:
+    | ((this: HvigorPluginContext, options?: JsBuildStartOptions) => void | Promise<void>)
+    | {
+        order?: 'pre' | 'post'
+        handler: (this: HvigorPluginContext, options?: JsBuildStartOptions) => void | Promise<void>
+      }
+  afterBuildStart?:
+    | ((this: HvigorPluginContext) => void | Promise<void>)
+    | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext) => void | Promise<void> }
+  resolveId?:
+    | ((
+        id: string,
+        importer?: string | null,
+        options?: JsResolveIdOptions,
+      ) =>
+        | string
+        | JsResolveIdOutput
+        | false
+        | null
+        | undefined
+        | Promise<string | JsResolveIdOutput | false | null | undefined>)
+    | {
+        order?: 'pre' | 'post'
+        handler: (
+          id: string,
+          importer?: string | null,
+          options?: JsResolveIdOptions,
+        ) =>
+          | string
+          | JsResolveIdOutput
+          | false
+          | null
+          | undefined
+          | Promise<string | JsResolveIdOutput | false | null | undefined>
+      }
+  load?:
+    | ((id: string) => string | JsLoadOutput | null | undefined | Promise<string | JsLoadOutput | null | undefined>)
+    | {
+        order?: 'pre' | 'post'
+        handler: (
+          id: string,
+        ) => string | JsLoadOutput | null | undefined | Promise<string | JsLoadOutput | null | undefined>
+      }
+  transform?:
+    | ((
+        this: HvigorPluginContext,
+        code: string,
+        id: string,
+        options: JsTransformHookExtraArgs,
+      ) => string | JsTransformOutput | null | undefined | Promise<string | JsTransformOutput | null | undefined>)
+    | {
+        order?: 'pre' | 'post'
+        handler: (
+          this: HvigorPluginContext,
+          code: string,
+          id: string,
+          options: JsTransformHookExtraArgs,
+        ) => string | JsTransformOutput | null | undefined | Promise<string | JsTransformOutput | null | undefined>
+      }
+  moduleParsed?:
+    | ((moduleInfo: HvigorModuleInfo) => void | Promise<void>)
+    | { order?: 'pre' | 'post'; handler: (moduleInfo: HvigorModuleInfo) => void | Promise<void> }
+  resolveDynamicImport?:
+    | ((
+        id: string,
+        importer?: string | null,
+        options?: JsResolveIdOptions,
+      ) =>
+        | string
+        | JsResolveIdOutput
+        | false
+        | null
+        | undefined
+        | Promise<string | JsResolveIdOutput | false | null | undefined>)
+    | {
+        order?: 'pre' | 'post'
+        handler: (
+          id: string,
+          importer?: string | null,
+          options?: JsResolveIdOptions,
+        ) =>
+          | string
+          | JsResolveIdOutput
+          | false
+          | null
+          | undefined
+          | Promise<string | JsResolveIdOutput | false | null | undefined>
+      }
+  watchChange?:
+    | ((
+        this: HvigorPluginContext,
+        id: string,
+        change: { event: 'create' | 'update' | 'delete' },
+      ) => void | Promise<void>)
+    | {
+        order?: 'pre' | 'post'
+        handler: (
+          this: HvigorPluginContext,
+          id: string,
+          change: { event: 'create' | 'update' | 'delete' },
+        ) => void | Promise<void>
+      }
+  beforeBuildEnd?:
+    | ((this: HvigorPluginContext, input?: unknown) => unknown)
+    | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, input?: unknown) => unknown }
+  buildEnd?:
+    | ((this: HvigorPluginContext, error?: Error) => void | Promise<void>)
+    | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, error?: Error) => void | Promise<void> }
+  afterBuildEnd?:
+    | ((this: HvigorPluginContext) => void | Promise<void>)
+    | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext) => void | Promise<void> }
+  bundleEnd?:
+    | ((this: HvigorPluginContext) => void | Promise<void>)
+    | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext) => void | Promise<void> }
+  cleanUp?:
+    | ((this: HvigorPluginContext) => void | Promise<void>)
+    | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext) => void | Promise<void> }
+  shouldInvalidCache?:
+    | ((request: PluginCacheRequest) => boolean | Promise<boolean>)
+    | { order?: 'pre' | 'post'; handler: (request: PluginCacheRequest) => boolean | Promise<boolean> }
+  /**
+   * Accepted for Rollup plugin source compatibility. Stage/ESMODULE ArkTS
+   * builds stop after module-graph collection, so output hooks remain dormant
+   * just as they do when ets2bundle enables `generateModuleGraphOnly` and
+   * `disableGenerateBundle`.
+   */
+  renderStart?:
+    | ((this: HvigorPluginContext, options: Record<string, unknown>) => void | Promise<void>)
+    | {
+        order?: 'pre' | 'post'
+        handler: (this: HvigorPluginContext, options: Record<string, unknown>) => void | Promise<void>
+      }
+  banner?:
+    | ((
+        this: HvigorPluginContext,
+        chunk: Record<string, unknown>,
+      ) => string | null | undefined | Promise<string | null | undefined>)
+    | {
+        order?: 'pre' | 'post'
+        handler: (
+          this: HvigorPluginContext,
+          chunk: Record<string, unknown>,
+        ) => string | null | undefined | Promise<string | null | undefined>
+      }
+  footer?:
+    | ((
+        this: HvigorPluginContext,
+        chunk: Record<string, unknown>,
+      ) => string | null | undefined | Promise<string | null | undefined>)
+    | {
+        order?: 'pre' | 'post'
+        handler: (
+          this: HvigorPluginContext,
+          chunk: Record<string, unknown>,
+        ) => string | null | undefined | Promise<string | null | undefined>
+      }
+  intro?:
+    | ((
+        this: HvigorPluginContext,
+        chunk: Record<string, unknown>,
+      ) => string | null | undefined | Promise<string | null | undefined>)
+    | {
+        order?: 'pre' | 'post'
+        handler: (
+          this: HvigorPluginContext,
+          chunk: Record<string, unknown>,
+        ) => string | null | undefined | Promise<string | null | undefined>
+      }
+  outro?:
+    | ((
+        this: HvigorPluginContext,
+        chunk: Record<string, unknown>,
+      ) => string | null | undefined | Promise<string | null | undefined>)
+    | {
+        order?: 'pre' | 'post'
+        handler: (
+          this: HvigorPluginContext,
+          chunk: Record<string, unknown>,
+        ) => string | null | undefined | Promise<string | null | undefined>
+      }
+  renderDynamicImport?:
+    | ((this: HvigorPluginContext, options: Record<string, unknown>) => unknown | Promise<unknown>)
+    | {
+        order?: 'pre' | 'post'
+        handler: (this: HvigorPluginContext, options: Record<string, unknown>) => unknown | Promise<unknown>
+      }
+  resolveFileUrl?:
+    | ((
+        this: HvigorPluginContext,
+        options: Record<string, unknown>,
+      ) => string | null | undefined | Promise<string | null | undefined>)
+    | {
+        order?: 'pre' | 'post'
+        handler: (
+          this: HvigorPluginContext,
+          options: Record<string, unknown>,
+        ) => string | null | undefined | Promise<string | null | undefined>
+      }
+  resolveImportMeta?:
+    | ((
+        this: HvigorPluginContext,
+        property: string | null,
+        options: Record<string, unknown>,
+      ) => string | null | undefined | Promise<string | null | undefined>)
+    | {
+        order?: 'pre' | 'post'
+        handler: (
+          this: HvigorPluginContext,
+          property: string | null,
+          options: Record<string, unknown>,
+        ) => string | null | undefined | Promise<string | null | undefined>
+      }
+  renderChunk?:
+    | ((
+        this: HvigorPluginContext,
+        code: string,
+        chunk: Record<string, unknown>,
+        options: Record<string, unknown>,
+      ) =>
+        | string
+        | { code: string; map?: unknown }
+        | null
+        | undefined
+        | Promise<string | { code: string; map?: unknown } | null | undefined>)
+    | {
+        order?: 'pre' | 'post'
+        handler: (
+          this: HvigorPluginContext,
+          code: string,
+          chunk: Record<string, unknown>,
+          options: Record<string, unknown>,
+        ) =>
+          | string
+          | { code: string; map?: unknown }
+          | null
+          | undefined
+          | Promise<string | { code: string; map?: unknown } | null | undefined>
+      }
+  augmentChunkHash?:
+    | ((
+        this: HvigorPluginContext,
+        chunk: Record<string, unknown>,
+      ) => string | null | undefined | Promise<string | null | undefined>)
+    | {
+        order?: 'pre' | 'post'
+        handler: (
+          this: HvigorPluginContext,
+          chunk: Record<string, unknown>,
+        ) => string | null | undefined | Promise<string | null | undefined>
+      }
+  renderError?:
+    | ((this: HvigorPluginContext, error: Error) => void | Promise<void>)
+    | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext, error: Error) => void | Promise<void> }
+  generateBundle?:
+    | ((
+        this: HvigorPluginContext,
+        options: Record<string, unknown>,
+        bundle: Record<string, unknown>,
+        isWrite: boolean,
+      ) => void | Promise<void>)
+    | {
+        order?: 'pre' | 'post'
+        handler: (
+          this: HvigorPluginContext,
+          options: Record<string, unknown>,
+          bundle: Record<string, unknown>,
+          isWrite: boolean,
+        ) => void | Promise<void>
+      }
+  writeBundle?:
+    | ((
+        this: HvigorPluginContext,
+        options: Record<string, unknown>,
+        bundle: Record<string, unknown>,
+      ) => void | Promise<void>)
+    | {
+        order?: 'pre' | 'post'
+        handler: (
+          this: HvigorPluginContext,
+          options: Record<string, unknown>,
+          bundle: Record<string, unknown>,
+        ) => void | Promise<void>
+      }
+  closeBundle?:
+    | ((this: HvigorPluginContext) => void | Promise<void>)
+    | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext) => void | Promise<void> }
+  closeWatcher?:
+    | ((this: HvigorPluginContext) => void | Promise<void>)
+    | { order?: 'pre' | 'post'; handler: (this: HvigorPluginContext) => void | Promise<void> }
 }
 
 export interface BuildConfig {
@@ -80,7 +340,16 @@ export interface BuildConfig {
   target?: string
   mode?: string
   /** Product action. Omitted performs a complete assemble. */
-  action?: 'assemble' | 'hot-reload-compile' | 'hot-reload-build' | 'cold-reload' | 'prepare-quickfix' | 'package-quickfix' | 'sign-quickfix' | 'assemble-quickfix' | 'device-test'
+  action?:
+    | 'assemble'
+    | 'hot-reload-compile'
+    | 'hot-reload-build'
+    | 'cold-reload'
+    | 'prepare-quickfix'
+    | 'package-quickfix'
+    | 'sign-quickfix'
+    | 'assemble-quickfix'
+    | 'device-test'
   /**
    * Hvigor-compatible performance analysis mode. Hook event factories are
    * active only for verbose and trace.
@@ -244,23 +513,27 @@ export interface HvigorModuleInfo {
 export interface HvigorPluginContext {
   share?: HvigorShareContext
   cache?: Map<string, unknown>
-meta?: { rollupVersion: string; rolldownVersion: string; watchMode: boolean }
-resolve?: (source: string, importer?: string, options?: JsPluginContextResolveOptions) => Promise<JsResolveIdOutput | null>
-load?: (options: JsPluginContextLoadOptions) => Promise<HvigorModuleInfo | null>
-emitFile?: (file: JsEmittedFile) => string
-addWatchFile?: (id: string) => void
-getModuleIds?: () => IterableIterator<string>
-getModuleInfo?: (id: string) => HvigorModuleInfo | null
-getCombinedSourcemap?: () => Record<string, unknown>
-parse?: (source: string, options?: unknown) => unknown
-getFileName?: (moduleRef: string) => string
-info?: (value: unknown) => void
-warn?: (value: unknown) => void
-debug?: (value: unknown) => void
-error?: (value: unknown) => never
-async?: (operation: (...args: any[]) => unknown, ...args: any[]) => unknown
-signal?: () => void
-block?: () => Promise<void>
+  meta?: { rollupVersion: string; rolldownVersion: string; watchMode: boolean }
+  resolve?: (
+    source: string,
+    importer?: string,
+    options?: JsPluginContextResolveOptions,
+  ) => Promise<JsResolveIdOutput | null>
+  load?: (options: JsPluginContextLoadOptions) => Promise<HvigorModuleInfo | null>
+  emitFile?: (file: JsEmittedFile) => string
+  addWatchFile?: (id: string) => void
+  getModuleIds?: () => IterableIterator<string>
+  getModuleInfo?: (id: string) => HvigorModuleInfo | null
+  getCombinedSourcemap?: () => Record<string, unknown>
+  parse?: (source: string, options?: unknown) => unknown
+  getFileName?: (moduleRef: string) => string
+  info?: (value: unknown) => void
+  warn?: (value: unknown) => void
+  debug?: (value: unknown) => void
+  error?: (value: unknown) => never
+  async?: (operation: (...args: any[]) => unknown, ...args: any[]) => unknown
+  signal?: () => void
+  block?: () => Promise<void>
 }
 
 /**
@@ -319,12 +592,12 @@ export interface HvigorProjectConfig {
   ignoreWarning?: boolean
   deviceTypes?: Array<string>
   resolveModulePaths?: Array<string>
-permission?: { requestPermissions: unknown[]; definePermissions: unknown[] }
-modulePathMap?: Record<string, string>
-byteCodeHarInfo?: Record<string, unknown>
-hspNameOhmMap?: Record<string, string>
-harNameOhmMap?: Record<string, string>
-otherCompileFiles?: Array<string>
+  permission?: { requestPermissions: unknown[]; definePermissions: unknown[] }
+  modulePathMap?: Record<string, string>
+  byteCodeHarInfo?: Record<string, unknown>
+  hspNameOhmMap?: Record<string, string>
+  harNameOhmMap?: Record<string, string>
+  otherCompileFiles?: Array<string>
 }
 
 /**
@@ -338,20 +611,24 @@ otherCompileFiles?: Array<string>
 export interface HvigorShareContext {
   projectConfig: HvigorProjectConfig & Record<string, unknown>
   symlinkMap: Record<string, string[]>
-depInfo: { enableIncre: boolean; changedDeps: string[] }
-cache?: Map<string, unknown>
-commonCache?: Map<string, unknown>
-cacheStoreManager?: { keys(): IterableIterator<string>; unmount(key: string): void; mount(key: string): { getCache(cacheKey: string): unknown; setCache(cacheKey: string, value: unknown): void } }
-getHashByFilePath?: (path: string) => string
-setHashValueByFilePath?: (path: string, hash: string) => void
-getCachedFileInfo?: (path: string) => HvigorCachedFileInfo | undefined
-getSourceFiles?: () => string[]
-importResolver?: (request: string) => HvigorImportResolution | undefined
-getLogger?: (prefix: string) => unknown
-getHvigorConsoleLogger?: (prefix: string) => unknown
-getHookEventFactory?: (pluginName: string, hookName: string) => HvigorHookEventFactory | undefined
-throwArkTsCompilerError?: (error: unknown) => never
-recordErrorFileId?: (id: string) => void
+  depInfo: { enableIncre: boolean; changedDeps: string[] }
+  cache?: Map<string, unknown>
+  commonCache?: Map<string, unknown>
+  cacheStoreManager?: {
+    keys(): IterableIterator<string>
+    unmount(key: string): void
+    mount(key: string): { getCache(cacheKey: string): unknown; setCache(cacheKey: string, value: unknown): void }
+  }
+  getHashByFilePath?: (path: string) => string
+  setHashValueByFilePath?: (path: string, hash: string) => void
+  getCachedFileInfo?: (path: string) => HvigorCachedFileInfo | undefined
+  getSourceFiles?: () => string[]
+  importResolver?: (request: string) => HvigorImportResolution | undefined
+  getLogger?: (prefix: string) => unknown
+  getHvigorConsoleLogger?: (prefix: string) => unknown
+  getHookEventFactory?: (pluginName: string, hookName: string) => HvigorHookEventFactory | undefined
+  throwArkTsCompilerError?: (error: unknown) => never
+  recordErrorFileId?: (id: string) => void
 }
 
 export interface JsBuildEndContext {
@@ -377,8 +654,7 @@ export interface JsEmittedFile {
   preserveSignature?: 'strict' | 'allow-extension' | 'exports-only' | false
 }
 
-export type JsHookSideEffects =
-  boolean | string
+export type JsHookSideEffects = boolean | string
 
 export interface JsHvigorCompilePluginPlanConfig {
   compileMode?: string
@@ -460,8 +736,7 @@ export interface JsPluginHookMetaInput {
   order: string
 }
 
-export type JsResolvedExternal =
-  boolean | string
+export type JsResolvedExternal = boolean | string
 
 export interface JsResolveIdOptions {
   attributes: Record<string, string>
@@ -480,8 +755,7 @@ export interface JsResolveIdOutput {
   description?: string
 }
 
-export type JsSourceMap =
-  string | JsJsonSourceMap
+export type JsSourceMap = string | JsJsonSourceMap
 
 export interface JsTransformHookExtraArgs {
   moduleType: string
