@@ -2076,8 +2076,20 @@ impl ModuleExportFacts {
             CompileArktsSourceType::from_path_with_version(&source.path, arkts_language_version);
         let parser_source = ArktsExtendSource::new(&source.source, arkts_language_version);
         let parsed = component_metadata.parse_ets(&allocator, parser_source.as_str(), source_type);
-        if !parsed.diagnostics.is_empty() {
+        if parsed.panicked {
             return Self::default();
+        }
+        if !parsed.diagnostics.is_empty() {
+            // `getTypeExportImportAndConstEnumTransformer` asks TypeScript's
+            // EmitResolver about aliases after the parser and binder have
+            // recovered from declaration diagnostics. Preserve the same
+            // module-binding facts from OXC's recovered AST, but do not infer
+            // component or decorator facts from a diagnostically invalid
+            // source file.
+            return Self {
+                binding: ModuleBindingFacts::from_program(&source.path, &parsed.program, sources),
+                ..Self::default()
+            };
         }
         Self::from_program(&source.path, &parsed.program, sources, module_roots)
     }

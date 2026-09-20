@@ -1162,7 +1162,11 @@ impl<'a> TopLevelBindingKindCollector<'a> {
                     ModuleBindingKind::Value,
                 );
             }
-            Statement::TSNamespaceDeclaration(declaration) if !declaration.declare => {
+            Statement::TSNamespaceDeclaration(declaration) => {
+                // TypeScript's `isAliasResolvedToValue` treats both regular
+                // and ambient namespaces as ValueModule symbols. The
+                // `declare` modifier suppresses local emit, but a declaration
+                // file namespace still describes a runtime module export.
                 ModuleBindingKind::record(
                     bindings,
                     declaration.id.name.to_string(),
@@ -1251,13 +1255,11 @@ impl<'a, 'b> ExportedDeclarationCollector<'a, 'b> {
                 }
             }
             Declaration::TSNamespaceDeclaration(declaration) => {
-                if !declaration.declare {
-                    ModuleBindingKind::record(
-                        self.exports,
-                        declaration.id.name.to_string(),
-                        ModuleBindingKind::Value,
-                    );
-                }
+                ModuleBindingKind::record(
+                    self.exports,
+                    declaration.id.name.to_string(),
+                    ModuleBindingKind::Value,
+                );
             }
             Declaration::TSExternalModuleDeclaration(_)
             | Declaration::TSGlobalDeclaration(_)
@@ -1463,6 +1465,39 @@ export class RuntimeName {}"#,
             classifier.classify_imported_binding(&importer, "./bindings", "RuntimeName"),
             Some(ModuleBindingKind::Value)
         );
+    }
+
+    #[test]
+    fn recoverable_sdk_declaration_diagnostics_keep_runtime_namespace_imports() {
+        let importer = PathBuf::from("project/src/main.ets");
+        let declaration = PathBuf::from("sdk/ets/api/@ohos.promptAction.d.ts");
+        let importer_source = r#"import promptAction, { directApi } from "@ohos.promptAction";
+
+promptAction.showToast({ message: "x" });
+directApi.invoke();"#;
+        let declaration_source = r#"export declare namespace directApi {
+    function invoke(): void;
+}
+
+declare namespace promptAction {
+    declare type Message = string;
+    function showToast(options: { message: Message }): void;
+}
+
+export default promptAction;"#;
+        let mut files = FxHashMap::default();
+        files.insert(importer.clone(), Arc::<str>::from(importer_source));
+        files.insert(declaration, Arc::<str>::from(declaration_source));
+        let sources = TransformSourceSnapshot::new(files)
+            .with_sdk_declaration_roots(vec![PathBuf::from("sdk/ets/api")]);
+
+        let split = split_type_only_named_imports(
+            importer_source,
+            importer.to_str().expect("UTF-8 fixture path"),
+            &sources,
+        );
+
+        assert_eq!(split, importer_source);
     }
 
     #[test]
