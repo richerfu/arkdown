@@ -208,7 +208,10 @@ fn module_source_writer_rewrites_unresolved_native_so_static_import() {
         .iter()
         .find(|file| file.module_id == entry_id)
         .expect("entry module source after second write");
-    assert!(!stale_file.exists(), "stale module source must be removed");
+    assert!(
+        stale_file.exists(),
+        "module source written by another target must be preserved"
+    );
     assert_eq!(
         fs_err::read_to_string(&source_maps_cache).unwrap(),
         r#"{ "Index.ts": {} }"#,
