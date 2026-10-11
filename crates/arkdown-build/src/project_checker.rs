@@ -219,7 +219,7 @@ pub struct ProjectSemanticChecker<'a> {
     sdk_root: Option<PathBuf>,
     cache_path: Option<PathBuf>,
     check_declarations: bool,
-    typescript_executable: Option<PathBuf>,
+    tsrs_executable: Option<PathBuf>,
     sdk_plugin_host: Option<Arc<dyn NativeOhSdkPluginHost>>,
     crossplatform_dependencies: FxHashMap<(String, String), CrossplatformSourceCollection>,
 }
@@ -301,14 +301,14 @@ impl<'a> ProjectSemanticChecker<'a> {
             sdk_root: None,
             cache_path: None,
             check_declarations: false,
-            typescript_executable: None,
+            tsrs_executable: None,
             sdk_plugin_host: None,
             crossplatform_dependencies: FxHashMap::default(),
         }
     }
 
-    pub fn with_typescript_executable(mut self, executable: Option<&Path>) -> Self {
-        self.typescript_executable = executable.map(Path::to_path_buf);
+    pub fn with_tsrs_executable(mut self, executable: Option<&Path>) -> Self {
+        self.tsrs_executable = executable.map(Path::to_path_buf);
         self
     }
 
@@ -700,8 +700,7 @@ impl<'a> ProjectSemanticChecker<'a> {
             sources,
             semantic_inventories,
         };
-        let executable =
-            NativeTypeSession::resolve_executable(self.typescript_executable.as_deref())?;
+        let executable = NativeTypeSession::resolve_executable(self.tsrs_executable.as_deref())?;
         if let Some(runtime) = runtime {
             let key = ProjectSemanticRuntimeKey {
                 project_root: self.project_root.to_path_buf(),
@@ -1167,8 +1166,8 @@ impl<'a> ProjectSemanticChecker<'a> {
     /// Build the exact checker query set selected by the OXC syntax pass.
     ///
     /// Source owners are documented on `ArktsSourceSemanticCollector`. Keeping
-    /// this selection out of TSGO avoids a second full-project AST traversal;
-    /// TSGO remains responsible for every returned type identity.
+    /// this selection out of tsrs avoids a second full-project AST traversal;
+    /// tsrs remains responsible for every returned type identity.
     fn native_transform_type_queries(
         &self,
         files: &[SemanticSourceIdentity],

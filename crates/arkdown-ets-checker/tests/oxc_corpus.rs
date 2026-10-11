@@ -7,13 +7,13 @@ use arkdown_ets_checker::{NativeCompilerOptions, NativeTypeSession};
 /// Static ETS has separate, explicitly selected parser fixtures and is outside
 /// this gate. Keep original corpus text, including declaration-file extensions.
 #[test]
-#[ignore = "requires ARKDOWN_TYPESCRIPT_PATH and ARKDOWN_OXC_SOURCE"]
+#[ignore = "requires ARKDOWN_TSRS_PATH and ARKDOWN_OXC_SOURCE"]
 fn native_accepts_oxc_arkts11_positive_syntax_corpus() {
     check_corpus("pass");
 }
 
 #[test]
-#[ignore = "requires ARKDOWN_TYPESCRIPT_PATH and ARKDOWN_OXC_SOURCE"]
+#[ignore = "requires ARKDOWN_TSRS_PATH and ARKDOWN_OXC_SOURCE"]
 fn native_rejects_oxc_arkts11_negative_corpus() {
     check_corpus("fail");
 }
@@ -61,7 +61,9 @@ fn check_corpus(kind: &str) {
             None,
         )
         .unwrap();
-        let program = session.create_program(&[file], &options).unwrap();
+        let program = session
+            .create_program(&[file], &options)
+            .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
         // OH checkAnnotationDeclaration owns 28024. Unlike OXC, OH accepts
         // this syntax before rejecting the non-top-level declaration. Do not
         // accept an unrelated missing-SDK diagnostic as proof of rejection.

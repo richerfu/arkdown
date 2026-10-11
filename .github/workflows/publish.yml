@@ -122,6 +122,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       - name: Enable long paths on Windows
         if: runner.os == 'Windows'
@@ -171,6 +173,28 @@ jobs:
       - name: Build binding
         run: ${{ matrix.settings.build }}
         shell: bash
+
+      - name: Build pinned native tsrs distribution
+        id: tsrs
+        shell: bash
+        run: |
+          distribution="$(node scripts/build-tsrs-dist.mjs --target ${{ matrix.settings.target }})"
+          echo "distribution=${distribution}" >> "$GITHUB_OUTPUT"
+
+      - name: Test native tsrs snapshot service
+        shell: bash
+        run: |
+          executable=tsrs
+          if [ "${{ runner.os }}" = "Windows" ]; then executable=tsrs.exe; fi
+          export ARKDOWN_TSRS_PATH="${{ steps.tsrs.outputs.distribution }}/${{ matrix.settings.target }}/$executable"
+          cargo test --locked -p arkdown-ets-checker --test native -- --include-ignored
+
+      - name: Upload tsrs
+        uses: actions/upload-artifact@v6
+        with:
+          name: tsrs-${{ matrix.settings.target }}
+          path: ${{ steps.tsrs.outputs.distribution }}/${{ matrix.settings.target }}/*
+          if-no-files-found: error
 
       - name: Upload binding
         uses: actions/upload-artifact@v6
@@ -301,12 +325,6 @@ jobs:
           cache: pnpm
           cache-dependency-path: packages/arkdown/pnpm-lock.yaml
 
-      - name: Setup Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: third_party/typescript/tsc/go.mod
-          cache-dependency-path: third_party/typescript/tsc/go.sum
-
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
@@ -316,18 +334,25 @@ jobs:
           npm --version
           pnpm --version
           pnpm exec napi --version
-          go version
-
-      - name: Build pinned native TypeScript distribution
-        id: typescript
-        run: |
-          distribution="$(node scripts/build-typescript-dist.mjs)"
-          echo "distribution=${distribution}" >> "$GITHUB_OUTPUT"
 
       - name: Download all bindings
         uses: actions/download-artifact@v7
         with:
+          pattern: bindings-*
           path: packages/arkdown/artifacts
+
+      - name: Download tsrs distributions
+        uses: actions/download-artifact@v7
+        with:
+          pattern: tsrs-*
+          path: packages/arkdown/tsrs-artifacts
+
+      - name: Arrange tsrs target directories
+        shell: bash
+        run: |
+          for target in aarch64-apple-darwin x86_64-unknown-linux-gnu x86_64-pc-windows-msvc; do
+            mv "tsrs-artifacts/tsrs-$target" "tsrs-artifacts/$target"
+          done
 
       - name: Assemble platform packages
         run: |
@@ -344,8 +369,8 @@ jobs:
       - name: Prepare and validate npm packages
         run: |
           pnpm exec napi pre-publish --no-gh-release -t npm --skip-optional-publish
-          node scripts/attach-typescript-dist.mjs \
-            "${{ steps.typescript.outputs.distribution }}" \
+          node scripts/attach-tsrs-dist.mjs \
+            tsrs-artifacts \
             npm
           for child_directory in ./npm/darwin-arm64 ./npm/linux-x64-gnu ./npm/win32-x64-msvc; do
             npm pack "$child_directory" --dry-run --ignore-scripts --json >/dev/null

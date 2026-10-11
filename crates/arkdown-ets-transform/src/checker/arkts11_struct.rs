@@ -1451,7 +1451,7 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
             // process_custom_component.ts::checkFromParentToChild accepts a
             // local identifier for @ObjectLink before applying the ordinary
             // non-decorator assignment matrix. Resolved type validity is
-            // checked separately from TSGO facts on the child declaration.
+            // checked separately from tsrs facts on the child declaration.
             let accepted_local_object_link = child_kind == CustomComponentPropertyKind::ObjectLink
                 && matches!(initializer, Expression::Identifier(identifier) if !identifier.name.starts_with('$'));
             if !accepted_local_object_link {

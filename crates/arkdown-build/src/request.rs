@@ -355,10 +355,10 @@ pub struct BuildRequest {
     /// binding. The JavaScript entry does not discover or execute this binary;
     /// the N-API service resolves its own package layout and Rust owns the
     /// compiler process lifecycle.
-    pub typescript_executable: Option<PathBuf>,
+    pub tsrs_executable: Option<PathBuf>,
 
     /// Same-process JavaScript host for source-owned SDK CommonJS checkers.
-    /// Rust and TSGO retain all build and type-check orchestration.
+    /// Rust and tsrs retain all build and type-check orchestration.
     pub sdk_plugin_host: Option<Arc<dyn NativeOhSdkPluginHost>>,
 
     /// Project-scoped Hvigor cache directory resolved by `PathUtil` in the JS

@@ -163,11 +163,13 @@ pnpm build
 pnpm test
 ```
 
-The adapted TypeScript/TSGO source is pinned at `third_party/typescript` as a
-git submodule. `pnpm build:typescript` builds its clean macOS arm64, Linux x64
-GNU, and Windows x64 MSVC distributions. `pnpm publish:local --dry-run` always
-prepares that pinned TSGO distribution before assembling the three N-API
-platform packages; release packaging does not accept an external TypeScript
-distribution path.
+The ArkTS checker is tsrs, pinned at `third_party/tsrs` as a git submodule.
+`pnpm build:tsrs` builds its clean macOS arm64, Linux x64 GNU, and Windows x64
+MSVC distributions with Rust (cross builds use cargo-zigbuild and cargo-xwin).
+`pnpm publish:local --dry-run` prepares that pinned distribution before
+assembling the three N-API platform packages. CI builds tsrs on each target's
+runner. Installed packages contain `tsrs` / `tsrs.exe`; local development can
+set `ARKDOWN_TSRS_PATH`. Arkdown uses native snapshots and keeps programs in
+`noEmit` mode. The previous Go checker is removed.
 
 The package is distributed as `UNLICENSED`.

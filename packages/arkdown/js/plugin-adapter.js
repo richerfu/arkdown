@@ -90,7 +90,7 @@ function requireDefaultExport(value, file) {
   })
 }
 
-// main.js::collectExternalApiCheckPlugin/collectExternalApiChecker: TSGO owns
+// main.js::collectExternalApiCheckPlugin/collectExternalApiChecker: tsrs owns
 // diagnostic decisions; this build-scoped host preserves only the CommonJS ABI.
 class SdkPluginHost {
   constructor() {

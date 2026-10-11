@@ -31,9 +31,9 @@ impl NapiPackageLayout {
   /// Returns only an executable present in a supported package layout.
   /// `None` is intentional: it lets `NativeTypeSession` apply the explicit
   /// development override before returning its typed missing-service error.
-  pub(crate) fn packaged_typescript_executable(&self) -> napi::Result<Option<PathBuf>> {
+  pub(crate) fn packaged_tsrs_executable(&self) -> napi::Result<Option<PathBuf>> {
     let package_directory = self.package_directory()?;
-    let executable_name = arkdown_path::HostPlatform::CURRENT.executable_name("tsc");
+    let executable_name = arkdown_path::HostPlatform::CURRENT.executable_name("tsrs");
     let direct = package_directory.join(&executable_name);
     if direct.is_file() {
       return Ok(Some(direct));

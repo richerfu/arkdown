@@ -33,7 +33,7 @@ pub struct CheckRequest {
     /// Downgrade cross-platform API diagnostics to warnings.
     pub ignore_crossplatform_check: bool,
     /// Native ArkTS TypeScript service resolved from the loaded N-API package.
-    pub typescript_executable: Option<PathBuf>,
+    pub tsrs_executable: Option<PathBuf>,
     /// Same-process JavaScript host for SDK CommonJS checker plugins.
     pub sdk_plugin_host: Option<Arc<dyn NativeOhSdkPluginHost>>,
 }
@@ -96,7 +96,7 @@ impl CheckApplication {
                 module_context: &module_context,
                 is_crossplatform: self.args.is_crossplatform,
                 ignore_crossplatform_check: self.args.ignore_crossplatform_check,
-                typescript_executable: self.args.typescript_executable.as_deref(),
+                tsrs_executable: self.args.tsrs_executable.as_deref(),
                 sdk_plugin_host: self.args.sdk_plugin_host.as_ref(),
             }
             .run()?;
@@ -135,7 +135,7 @@ struct CheckModuleRunner<'a> {
     module_context: &'a ModuleCompileContext,
     is_crossplatform: bool,
     ignore_crossplatform_check: bool,
-    typescript_executable: Option<&'a Path>,
+    tsrs_executable: Option<&'a Path>,
     sdk_plugin_host: Option<&'a Arc<dyn NativeOhSdkPluginHost>>,
 }
 
@@ -200,7 +200,7 @@ impl<'a> CheckModuleRunner<'a> {
             &package_resolution,
             component_metadata.as_ref(),
         )
-        .with_typescript_executable(self.typescript_executable)
+        .with_tsrs_executable(self.tsrs_executable)
         .with_sdk_plugin_host(self.sdk_plugin_host.cloned())
         .with_compile_mode(compile_mode)
         .with_sdk_options(&self.session.sdk)?

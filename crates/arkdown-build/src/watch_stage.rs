@@ -72,7 +72,7 @@ pub(super) struct WatchStageInput {
     pub(super) cache: bool,
     pub(super) package_plugins: Vec<PackagePlugin>,
     pub(super) node_executable: Option<PathBuf>,
-    pub(super) typescript_executable: Option<PathBuf>,
+    pub(super) tsrs_executable: Option<PathBuf>,
     pub(super) sdk_plugin_host: Option<Arc<dyn arkdown_ets_checker::NativeOhSdkPluginHost>>,
     pub(super) pack_compress_level: Option<u32>,
     pub(super) align_device_types: Vec<String>,
@@ -155,7 +155,7 @@ impl WatchStageInput {
             cache: args.cache,
             package_plugins,
             node_executable: args.node_executable.clone(),
-            typescript_executable: args.typescript_executable.clone(),
+            tsrs_executable: args.tsrs_executable.clone(),
             sdk_plugin_host: args.sdk_plugin_host.clone(),
             pack_compress_level: args.pack_compress_level,
             align_device_types: args.align_device_types.clone(),
@@ -217,7 +217,7 @@ impl WatchStage {
         let cache = input.cache;
         let package_plugins = input.package_plugins;
         let node_executable = input.node_executable;
-        let typescript_executable = input.typescript_executable;
+        let tsrs_executable = input.tsrs_executable;
         let sdk_plugin_host = input.sdk_plugin_host;
         let pack_compress_level = input.pack_compress_level;
         let align_device_types = input.align_device_types;
@@ -393,7 +393,7 @@ impl WatchStage {
                     hvigor_properties: hvigor_properties.clone(),
                     parameter_file_override: parameter_file_override.clone(),
                     node_executable: node_executable.clone(),
-                    typescript_executable: typescript_executable.clone(),
+                    tsrs_executable: tsrs_executable.clone(),
                     sdk_plugin_host: sdk_plugin_host.clone(),
                     hvigor_cache_dir: hvigor_cache_dir.clone(),
                 };

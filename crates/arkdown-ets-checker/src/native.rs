@@ -1,5 +1,5 @@
-//! Native TypeScript API client. Protocol owner: the packaged ArkTS TSGO,
-//! tsc/internal/api/{proto,session}.go and ipc/protocol_jsonrpc.go.
+//! Native tsrs API client. Protocol owner: the packaged tsrs binary,
+//! tsrs_api snapshot/checker requests and tsrs_api_transport JSON-RPC.
 //! This is an internal compiler service, never an arkdown command-line entry.
 
 use std::{
@@ -31,7 +31,7 @@ pub enum NativeCheckError {
     Json(#[from] serde_json::Error),
 }
 
-/// Actual Go API compiler options (enum numbers, not tsconfig strings).
+/// Native tsrs compiler options (enum numbers, not tsconfig strings).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeCompilerOptions {
@@ -50,10 +50,7 @@ pub struct NativeCompilerOptions {
     // ets_checker.ts::setCompilerOptions sets noEmit. Keep this private:
     // callers may configure checking, but cannot delegate build output to TS.
     no_emit: bool,
-    // Corsa defaults to four compiler checkers. Arkdown's build workload can
-    // use the host's available parallelism, but caps independent type-cache
-    // populations at six: the real 13k-source ArkTS fixture improves through
-    // six and reaches its memory/performance knee before eight.
+    // Explicit session checker count, independent of the compiler default.
     checkers: usize,
     pub incremental: bool,
     pub ts_build_info_file: PathBuf,
@@ -182,7 +179,7 @@ pub struct NativeOhSdkPluginResponse {
     pub check_message: String,
 }
 
-/// JavaScript owns only the source-observed SDK CommonJS plugin ABI. TSGO
+/// JavaScript owns only the source-observed SDK CommonJS plugin ABI. tsrs
 /// decides when callbacks participate in type diagnostics; Rust routes the
 /// typed request without loading or interpreting plugin code.
 pub trait NativeOhSdkPluginHost: Send + Sync + std::fmt::Debug {
@@ -299,7 +296,7 @@ impl NativeCompilerOptions {
 pub struct NativeDiagnostic {
     #[serde(default)]
     pub file_name: Option<PathBuf>,
-    /// TSGO `DiagnosticResponse` uses Go `int`, and diagnostics without a
+    /// tsrs `DiagnosticResponse` uses signed source offsets, and diagnostics without a
     /// source file may retain the compiler's negative sentinel range.
     pub pos: i64,
     pub end: i64,
@@ -395,7 +392,7 @@ pub struct NativeProgram {
 /// Filesystem invalidation passed to an incremental native program update.
 ///
 /// `rollup-plugin-watch-change.ts::watchChange` preserves update separately
-/// from create/delete. The Go API exposes the same three-way distinction, so
+/// from create/delete. The tsrs API exposes the same three-way distinction, so
 /// the Rust watch owner must not collapse it to a bare changed-path list.
 #[derive(Debug, Clone, Default)]
 pub struct NativeProgramFileChanges {
@@ -412,7 +409,6 @@ pub struct NativeType {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct NativeSymbol {
-    pub id: u64,
     pub name: String,
 }
 
@@ -482,7 +478,7 @@ pub struct NativeArktsTransformTypeFacts {
 }
 
 /// UTF-16 source range used by the JSON protocol. Rust/OXC selects the
-/// transform-owned syntax; TSGO resolves only the requested type identities.
+/// transform-owned syntax; tsrs resolves only the requested type identities.
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct NativeTypeQueryRange {
     pub pos: usize,
@@ -557,17 +553,18 @@ pub struct NativeProgramSourceGraphFile {
 }
 
 #[derive(Deserialize)]
-struct CreatedProgram {
+struct CreatedSnapshot {
     snapshot: u64,
-    project: Project,
+    operation: SnapshotOperation,
 }
 
-#[derive(Deserialize)]
-struct Project {
-    id: String,
+#[derive(Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct SnapshotOperation {
+    created_programs: Vec<String>,
 }
 
-/// Owns the child and every request. Go retains AST/checker memory; Rust
+/// Owns the child and every request. tsrs retains AST/checker memory; Rust
 /// retains source snapshots and owned results. No shared-write hook collector.
 pub struct NativeTypeSession {
     child: Child,
@@ -590,7 +587,7 @@ impl NativeTypeSession {
     pub fn resolve_executable(
         packaged_executable: Option<&Path>,
     ) -> Result<PathBuf, NativeCheckError> {
-        let configured = std::env::var_os("ARKDOWN_TYPESCRIPT_PATH")
+        let configured = std::env::var_os("ARKDOWN_TSRS_PATH")
             .filter(|value| !value.is_empty())
             .map(PathBuf::from);
         let path = configured
@@ -598,12 +595,12 @@ impl NativeTypeSession {
             .or(packaged_executable)
             .ok_or_else(|| {
                 NativeCheckError::Protocol(
-                    "native ArkTS TypeScript service is missing from the platform package; ARKDOWN_TYPESCRIPT_PATH may be used only as a development override".into(),
+                    "native ArkTS tsrs service is missing from the platform package; ARKDOWN_TSRS_PATH may be used only as a development override".into(),
                 )
             })?;
         if !path.is_file() {
             return Err(NativeCheckError::Protocol(format!(
-                "native ArkTS TypeScript service is not a file: {}",
+                "native ArkTS tsrs service is not a file: {}",
                 path.display()
             )));
         }
@@ -668,7 +665,7 @@ impl NativeTypeSession {
             sources,
             deleted: BTreeSet::new(),
             sdk_plugin_host,
-            // The Go API session counter is process-local, while one JS plugin
+            // The tsrs API session counter is process-local, while one JS plugin
             // host is shared by every module in a build. Give each child
             // process a host-global scope so interned source/config IDs cannot
             // collide when modules are checked concurrently.
@@ -683,21 +680,29 @@ impl NativeTypeSession {
         roots: &[PathBuf],
         options: &NativeCompilerOptions,
     ) -> Result<NativeProgram, NativeCheckError> {
-        let created: CreatedProgram = self.request(
-            "createProgram",
+        let created: CreatedSnapshot = self.request(
+            "createSnapshot",
             json!({
-                "rootFiles": roots,
-                "createProgramOptions": { "compilerOptions": options }
+                "createPrograms": [{ "rootFiles": roots, "compilerOptions": options }]
             }),
         )?;
+        let mut projects = created.operation.created_programs.into_iter();
+        let project = projects.next().ok_or_else(|| {
+            NativeCheckError::Protocol("createSnapshot returned no created program".into())
+        })?;
+        if projects.next().is_some() {
+            return Err(NativeCheckError::Protocol(
+                "createSnapshot returned multiple programs for one request".into(),
+            ));
+        }
         Ok(NativeProgram {
             snapshot: created.snapshot,
-            project: created.project.id,
+            project,
         })
     }
 
-    /// api/session.go::handleCreateProgram explicitly accepts oldProgram and
-    /// fileChanges. Preserve the previous snapshot until the new one exists.
+    /// Reconfigure the synthetic project in a new snapshot. Preserve the
+    /// previous snapshot until its replacement has been created successfully.
     pub fn update_program(
         &mut self,
         previous: NativeProgram,
@@ -779,23 +784,21 @@ impl NativeTypeSession {
         }
         self.sources = sources;
 
-        let created_program: CreatedProgram = self.request(
-            "createProgram",
+        let created: CreatedSnapshot = self.request(
+            "updateSnapshot",
             json!({
-                "rootFiles": roots,
-                "createProgramOptions": { "compilerOptions": options },
-                "oldProgram": previous,
-                "fileChanges": {
-                    "changed": changed,
-                    "created": created,
-                    "deleted": deleted,
+                "snapshot": previous.snapshot,
+                "changes": {
+                    "reconfigurePrograms": [{ "id": previous.project, "rootFiles": roots, "compilerOptions": options }],
+                    "fileNotifications": { "changed": changed, "created": created, "deleted": deleted },
                 }
             }),
         )?;
+        let project = previous.project.clone();
         self.release(previous)?;
         Ok(NativeProgram {
-            snapshot: created_program.snapshot,
-            project: created_program.project.id,
+            snapshot: created.snapshot,
+            project,
         })
     }
 
@@ -880,7 +883,7 @@ impl NativeTypeSession {
         )
     }
 
-    /// Immutable type identities used by ArkTS 1.1 OXC transforms. The Go
+    /// Immutable type identities used by ArkTS 1.1 OXC transforms. The tsrs
     /// service performs all queries in one checker lease and returns no handles.
     pub fn arkts_transform_type_facts(
         &mut self,
@@ -1026,15 +1029,19 @@ impl NativeTypeSession {
                             .map(Path::new);
                         let source = path.and_then(|path| self.sources.get(path));
                         let deleted = path.is_some_and(|path| self.deleted.contains(path));
-                        // callbackfs.go: null delegates to the compiler's bundled/disk FS;
-                        // {content: null} instead means a definitive missing file.
+                        // Tagged callback responses distinguish bundled/disk
+                        // fallback from a definitively missing overlay file.
                         match method {
-                            "readFile" if deleted => json!({"content": null}),
-                            "fileExists" if deleted => Value::Bool(false),
-                            "readFile" => {
-                                source.map_or(Value::Null, |text| json!({"content": &**text}))
-                            }
-                            "fileExists" => source.map_or(Value::Null, |_| Value::Bool(true)),
+                            "readFile" if deleted => json!({"kind": "missing"}),
+                            "fileExists" if deleted => json!({"kind": "value", "value": false}),
+                            "readFile" => source.map_or_else(
+                                || json!({"kind": "useOS"}),
+                                |text| json!({"kind": "value", "value": &**text}),
+                            ),
+                            "fileExists" => source.map_or_else(
+                                || json!({"kind": "useOS"}),
+                                |_| json!({"kind": "value", "value": true}),
+                            ),
                             _ => unreachable!(),
                         }
                     }
@@ -1065,7 +1072,7 @@ impl NativeTypeSession {
                 sdk_plugin_callbacks,
                 sdk_plugin_batches,
                 sdk_plugin_callback_ms = sdk_plugin_callback_time.as_millis(),
-                "native TypeScript request completed"
+                "native tsrs request completed"
             );
             return serde_json::from_value(result.clone()).map_err(|error| {
                 NativeCheckError::Protocol(format!(

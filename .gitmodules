@@ -1,4 +1,4 @@
-[submodule "third_party/typescript"]
-	path = third_party/typescript
-	url = https://github.com/ohos-rs/TypeScript.git
+[submodule "third_party/tsrs"]
+	path = third_party/tsrs
+	url = https://github.com/ohos-rs/tsrs.git
 	branch = ohos

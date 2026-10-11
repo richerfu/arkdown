@@ -17,7 +17,7 @@ fn native_typescript_uses_packaged_service_without_mandatory_environment_configu
     let packaged = package.path().join("tsc");
     std::fs::write(&packaged, b"native compiler fixture").unwrap();
     let resolved = NativeTypeSession::resolve_executable(Some(&packaged)).unwrap();
-    let expected = std::env::var_os("ARKDOWN_TYPESCRIPT_PATH")
+    let expected = std::env::var_os("ARKDOWN_TSRS_PATH")
         .filter(|value| !value.is_empty())
         .map(std::path::PathBuf::from)
         .unwrap_or(packaged)
@@ -56,7 +56,7 @@ fn compiler_options_preserve_oh_acronym_wire_names_and_checker_mode() {
     ]));
     let value = serde_json::to_value(options).unwrap();
     // ets2bundle/compiler/src/ets_checker.ts::setCompilerOptions fixes
-    // `noEmit`; Arkdown must never turn TSGO into its code generator.
+    // `noEmit`; Arkdown must never turn tsrs into its code generator.
     assert_eq!(value["noEmit"], true);
     assert_eq!(
         value["checkers"],
@@ -126,7 +126,7 @@ fn native_diagnostic_preserves_source_less_signed_ranges() {
 }
 
 #[test]
-#[ignore = "requires ARKDOWN_TYPESCRIPT_PATH native compiler"]
+#[ignore = "requires ARKDOWN_TSRS_PATH native compiler"]
 fn native_api_applies_openharmony_parse_and_inference_semantics() {
     let project = tempfile::tempdir().unwrap();
     let source_path = project.path().join("entry.ets");
@@ -172,7 +172,7 @@ const methods: Map<string, CanvasMethod<any>> = new Map([
 }
 
 #[test]
-#[ignore = "requires ARKDOWN_TYPESCRIPT_PATH native compiler"]
+#[ignore = "requires ARKDOWN_TSRS_PATH native compiler"]
 fn native_build_diagnostics_preserve_linter_and_typescript_channels() {
     let project = tempfile::tempdir().unwrap();
     let source_path = project.path().join("entry.ets");
@@ -231,10 +231,10 @@ impl NativeOhSdkPluginHost for SincePluginHost {
 }
 
 /// `main.js::collectExternalApiCheckPlugin` loads the SDK-owned synchronous
-/// JavaScript callback. TSGO owns selection and diagnostics but must delegate
+/// JavaScript callback. tsrs owns selection and diagnostics but must delegate
 /// that JavaScript ABI through its API client.
 #[test]
-#[ignore = "requires ARKDOWN_TYPESCRIPT_PATH native compiler"]
+#[ignore = "requires ARKDOWN_TSRS_PATH native compiler"]
 fn native_delegates_sdk_since_callback_to_the_api_host() {
     let project = tempfile::tempdir().unwrap();
     let sdk_path = project.path().join("@ohos.sample.d.ts");
@@ -313,11 +313,11 @@ impl NativeOhSdkPluginHost for SessionRecordingPluginHost {
     }
 }
 
-/// Separate TSGO children restart their process-local session counters. The
+/// Separate tsrs children restart their process-local session counters. The
 /// Rust service boundary must still keep their JS source/config intern tables
 /// disjoint when a build-scoped plugin host is shared by multiple modules.
 #[test]
-#[ignore = "requires ARKDOWN_TYPESCRIPT_PATH native compiler"]
+#[ignore = "requires ARKDOWN_TSRS_PATH native compiler"]
 fn native_scopes_sdk_plugin_sessions_across_compiler_processes() {
     let project = tempfile::tempdir().unwrap();
     let sdk_path = project.path().join("@ohos.sample.d.ts");
@@ -379,10 +379,10 @@ fn native_scopes_sdk_plugin_sessions_across_compiler_processes() {
 
 /// `apiAvailable_validate_utils.ts::validateApiAvailableArgument` is a
 /// declaration-identity/type-checker contract. OXC lowers the runtime call,
-/// while TSGO must publish the source-owned 11706013 diagnostic through the
+/// while tsrs must publish the source-owned 11706013 diagnostic through the
 /// TS28007 SDK diagnostic carrier.
 #[test]
-#[ignore = "requires ARKDOWN_TYPESCRIPT_PATH native compiler"]
+#[ignore = "requires ARKDOWN_TSRS_PATH native compiler"]
 fn native_validates_api_available_against_the_resolved_sdk_declaration() {
     let project = tempfile::tempdir().unwrap();
     let sdk_path = project.path().join("@ohos.deviceInfo.d.ts");
@@ -433,10 +433,10 @@ fn native_validates_api_available_against_the_resolved_sdk_declaration() {
 
 /// `api_check_utils.ts::isSourceRetentionAnnotationContentValid` and
 /// `checkFormatResult` resolve the SDK `Available` annotation before checking
-/// OpenHarmony version format and runtime OS. This remains a TSGO diagnostic
+/// OpenHarmony version format and runtime OS. This remains a tsrs diagnostic
 /// contract rather than an OXC transform-time rule.
 #[test]
-#[ignore = "requires ARKDOWN_TYPESCRIPT_PATH native compiler"]
+#[ignore = "requires ARKDOWN_TSRS_PATH native compiler"]
 fn native_validates_available_annotation_format_and_runtime_os() {
     let project = tempfile::tempdir().unwrap();
     let sdk_path = project.path().join("@ohos.annotation.d.ets");
@@ -486,7 +486,7 @@ fn native_validates_available_annotation_format_and_runtime_os() {
 /// OH parser/binder/checker annotation declarations and resolveAnnotation:
 /// keep real type checking after accepting @interface, rather than erasing it.
 #[test]
-#[ignore = "requires ARKDOWN_TYPESCRIPT_PATH native compiler"]
+#[ignore = "requires ARKDOWN_TSRS_PATH native compiler"]
 fn native_checks_annotations_without_erasing_their_type_rules() {
     let project = tempfile::tempdir().unwrap();
     let source_path = project.path().join("entry.ets");
@@ -524,7 +524,7 @@ const wrongValue = Options;
 }
 
 #[test]
-#[ignore = "requires ARKDOWN_TYPESCRIPT_PATH native compiler"]
+#[ignore = "requires ARKDOWN_TSRS_PATH native compiler"]
 fn native_batches_annotation_and_transform_type_facts() {
     let project = tempfile::tempdir().unwrap();
     let source_path = project.path().join("facts.ets");
@@ -650,7 +650,7 @@ class Facts {
 /// the declaration identities after TypeScript has resolved namespace,
 /// factory-return, and member declarations.
 #[test]
-#[ignore = "requires ARKDOWN_TYPESCRIPT_PATH native compiler"]
+#[ignore = "requires ARKDOWN_TSRS_PATH native compiler"]
 fn native_collects_resolved_sdk_dependency_uses() {
     let project = tempfile::tempdir().unwrap();
     let source_path = project.path().join("entry.ets");
@@ -695,7 +695,7 @@ fn native_collects_resolved_sdk_dependency_uses() {
 /// TypeScript API: api/session_createprogram_test.go and
 /// api/callbackfs.go. Real compiler test, with no fabricated diagnostics.
 #[test]
-#[ignore = "requires ARKDOWN_TYPESCRIPT_PATH native compiler"]
+#[ignore = "requires ARKDOWN_TSRS_PATH native compiler"]
 fn native_checks_complex_types_and_snapshot_sources() {
     let project = tempfile::tempdir().unwrap();
     let source_path = project.path().join("entry.ets");
@@ -747,7 +747,7 @@ const unicode = "中文😀"; const wrong: number = "bad";
 }
 
 #[test]
-#[ignore = "requires ARKDOWN_TYPESCRIPT_PATH native compiler"]
+#[ignore = "requires ARKDOWN_TSRS_PATH native compiler"]
 fn native_checks_struct_members_and_exact_sdk_aliases() {
     let project = tempfile::tempdir().unwrap();
     let file = project.path().join("Index.ets");
@@ -772,7 +772,7 @@ fn native_checks_struct_members_and_exact_sdk_aliases() {
 }
 
 #[test]
-#[ignore = "requires ARKDOWN_TYPESCRIPT_PATH native compiler"]
+#[ignore = "requires ARKDOWN_TSRS_PATH native compiler"]
 fn native_updates_program_and_resolves_aliased_factory_types() {
     let project = tempfile::tempdir().unwrap();
     let file = project.path().join("builder.ts");
@@ -818,7 +818,7 @@ fn native_updates_program_and_resolves_aliased_factory_types() {
 }
 
 #[test]
-#[ignore = "requires ARKDOWN_TYPESCRIPT_PATH native compiler"]
+#[ignore = "requires ARKDOWN_TSRS_PATH native compiler"]
 fn native_incremental_program_tracks_created_and_deleted_modules() {
     let project = tempfile::tempdir().unwrap();
     let entry = project.path().join("index.ts");

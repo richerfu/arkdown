@@ -19,7 +19,7 @@ if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
   exit 1
 fi
 
-for command_name in cargo cargo-zigbuild cargo-xwin file git go node npm pnpm rustup tar zip; do
+for command_name in cargo cargo-zigbuild cargo-xwin file git node npm pnpm rustup tar zip; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
     echo "Required command is missing: $command_name" >&2
     exit 1
@@ -80,9 +80,9 @@ if [[ $DRY_RUN -eq 0 ]]; then
   npm whoami --registry "$REGISTRY" >/dev/null
 fi
 
-echo "Building the pinned native TypeScript distribution..."
-TYPESCRIPT_DIST="$(node "$PACKAGE_DIR/scripts/build-typescript-dist.mjs")"
-echo "Using native TypeScript distribution: $TYPESCRIPT_DIST"
+echo "Building the pinned native tsrs distribution..."
+TSRS_DIST="$(node "$PACKAGE_DIR/scripts/build-tsrs-dist.mjs")"
+echo "Using native tsrs distribution: $TSRS_DIST"
 
 export XWIN_CACHE_DIR="${XWIN_CACHE_DIR:-$PACKAGE_DIR/.cache/cargo-xwin}"
 mkdir -p "$XWIN_CACHE_DIR"
@@ -170,8 +170,8 @@ fi
 
 cd "$PACKAGE_DIR"
 pnpm exec napi pre-publish --no-gh-release -t npm --skip-optional-publish
-node "$PACKAGE_DIR/scripts/attach-typescript-dist.mjs" \
-  "$TYPESCRIPT_DIST" \
+node "$PACKAGE_DIR/scripts/attach-tsrs-dist.mjs" \
+  "$TSRS_DIST" \
   "$PACKAGE_DIR/npm"
 
 VERSION="$(node -p "require('./package.json').version")"

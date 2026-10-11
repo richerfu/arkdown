@@ -1,3 +1,29 @@
+# ArkTS 1.1 原生 tsrs 集成
+
+## 当前迁移（2026-10-11）
+
+- 运行入口是固定子模块 `third_party/tsrs` 构建的 `tsrs/tsrs.exe`。
+- 原生 API 使用 `createSnapshot` / `updateSnapshot` / `releaseSnapshot`，不保留旧 `createProgram` 接口。
+- 内存文件回调使用 `value` / `missing` / `useOS`；SDK 插件继续由宿主执行 CommonJS ABI。
+- 开发覆盖为 `ARKDOWN_TSRS_PATH`；旧 TypeScript 子模块、Go 构建及分发脚本已删除。
+- checker 固定 `noEmit`。动态 ArkTS 的 parser/binder/checker/linter/SDK policies/Kit imports 与类型事实由 tsrs 负责。
+  ArkTS static 语法不在范围内；普通 class static block 仍在范围内。
+- tsrs 对照原 OH 编译器：1003/1003 linter 和 243/243 compiler programs 完整诊断一致；
+  Arkdown 原生服务 18/18 用例通过；OXC 动态语法正例 5/5、反例 7/7 通过；三平台分发内容与删除旧编译器的回归通过。
+- tsrs Kit 配置修改、删除、重建必须更新快照类型结果，旧快照必须保持原值；已加入回归。
+- 非法成员位置 `@interface` 的 parser panic 已按 OH `scanClassMemberStart` 修复，诊断代码和区间与参考一致。
+- macOS arm64 的干净子模块发布构建已通过，发布二进制再次通过全部 18 项原生服务测试和 12 个 OXC
+  正反例；Rust 格式、独立 checker clippy 和 30 项 JavaScript 测试通过。
+- CI 在每个平台构建后使用实际 tsrs 二进制执行原生 snapshot 服务测试，再上传分发产物。
+- 当前整工作区 `cargo check --locked -p arkdown-build -p arkdown-napi --all-targets` 被固定 Rolldown
+  依赖的 `test262` 子模块下载阻塞（GitHub 443 连接超时）。独立 checker 测试与 clippy 已通过；
+  不能把它等同于完整 N-API 构建、真实工程或三平台发布验收。Linux/Windows 的真实二进制构建仍需 CI 验证。
+- tsrs 新提交只在本地；远端 CI 获取新 gitlink 前需要先推送 tsrs 分支。
+
+## 迁移前记录（仅供行为与性能历史参考）
+
+以下内容记录旧 OH TypeScript 实现；其中发布路径、Go 命令和性能数字不适用于 tsrs。
+
 # ArkTS 1.1 原生 TypeScript 对齐合同
 
 ## 结论与范围
