@@ -27,7 +27,7 @@ env:
   MACOSX_DEPLOYMENT_TARGET: "10.13"
   PNPM_VERSION: "10.12.1"
   RUST_BACKTRACE: "1"
-  RUST_TOOLCHAIN: "1.95.0"
+  RUST_TOOLCHAIN: "1.99.0"
 
 defaults:
   run:
@@ -41,6 +41,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       - name: Install Linux build dependencies
         run: |
@@ -90,7 +92,7 @@ jobs:
           pnpm --version
 
       - name: Check Rust formatting
-        run: cargo fmt --all -- --check
+        run: cargo fmt --manifest-path ../../Cargo.toml --check
 
       - name: Check NAPI package
         run: cargo check --locked -p arkdown-napi --all-targets
@@ -170,31 +172,16 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Verify pinned compiler crates
+        run: node scripts/compiler-source.mjs --verify
+
       - name: Build binding
         run: ${{ matrix.settings.build }}
         shell: bash
 
-      - name: Build pinned native tsrs distribution
-        id: tsrs
+      - name: Test embedded compiler snapshots
         shell: bash
-        run: |
-          distribution="$(node scripts/build-tsrs-dist.mjs --target ${{ matrix.settings.target }})"
-          echo "distribution=${distribution}" >> "$GITHUB_OUTPUT"
-
-      - name: Test native tsrs snapshot service
-        shell: bash
-        run: |
-          executable=tsrs
-          if [ "${{ runner.os }}" = "Windows" ]; then executable=tsrs.exe; fi
-          export ARKDOWN_TSRS_PATH="${{ steps.tsrs.outputs.distribution }}/${{ matrix.settings.target }}/$executable"
-          cargo test --locked -p arkdown-ets-checker --test native -- --include-ignored
-
-      - name: Upload tsrs
-        uses: actions/upload-artifact@v6
-        with:
-          name: tsrs-${{ matrix.settings.target }}
-          path: ${{ steps.tsrs.outputs.distribution }}/${{ matrix.settings.target }}/*
-          if-no-files-found: error
+        run: cargo test --locked -p arkdown-ets-checker --test native
 
       - name: Upload binding
         uses: actions/upload-artifact@v6
@@ -224,6 +211,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       - name: Enable long paths on Windows
         if: runner.os == 'Windows'
@@ -270,6 +259,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          submodules: recursive
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -341,19 +332,6 @@ jobs:
           pattern: bindings-*
           path: packages/arkdown/artifacts
 
-      - name: Download tsrs distributions
-        uses: actions/download-artifact@v7
-        with:
-          pattern: tsrs-*
-          path: packages/arkdown/tsrs-artifacts
-
-      - name: Arrange tsrs target directories
-        shell: bash
-        run: |
-          for target in aarch64-apple-darwin x86_64-unknown-linux-gnu x86_64-pc-windows-msvc; do
-            mv "tsrs-artifacts/tsrs-$target" "tsrs-artifacts/$target"
-          done
-
       - name: Assemble platform packages
         run: |
           pnpm exec napi create-npm-dirs
@@ -369,9 +347,7 @@ jobs:
       - name: Prepare and validate npm packages
         run: |
           pnpm exec napi pre-publish --no-gh-release -t npm --skip-optional-publish
-          node scripts/attach-tsrs-dist.mjs \
-            tsrs-artifacts \
-            npm
+          node scripts/compiler-source.mjs --package npm
           for child_directory in ./npm/darwin-arm64 ./npm/linux-x64-gnu ./npm/win32-x64-msvc; do
             npm pack "$child_directory" --dry-run --ignore-scripts --json >/dev/null
           done

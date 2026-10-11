@@ -40,35 +40,37 @@ test('public JavaScript is limited to entry, CLI, and plugin compatibility', () 
   }
 })
 
-test('npm release packages the pinned tsrs submodule before native platform packages', () => {
-  const workspaceRoot = path.resolve(__dirname, '../../..')
+test('compiler crates are embedded and executable integration stays deleted', () => {
+  const root = path.resolve(__dirname, '../../..')
   const packageRoot = path.resolve(__dirname, '..')
-  const gitmodules = fs.readFileSync(path.join(workspaceRoot, '.gitmodules'), 'utf8')
   const manifest = JSON.parse(fs.readFileSync(path.join(packageRoot, 'package.json'), 'utf8'))
-  const builder = fs.readFileSync(path.join(packageRoot, 'scripts/build-tsrs-dist.mjs'), 'utf8')
-  const localPublish = fs.readFileSync(path.join(packageRoot, 'scripts/publish-local.sh'), 'utf8')
-  const workflow = fs.readFileSync(path.join(workspaceRoot, '.github/workflows/publish.yml'), 'utf8')
-
-  assert.match(gitmodules, /path = third_party\/tsrs/)
-  assert.doesNotMatch(gitmodules, /third_party\/typescript|TypeScript\.git/)
-  assert.equal(fs.existsSync(path.join(packageRoot, 'scripts/build-typescript-dist.mjs')), false)
-  assert.equal(fs.existsSync(path.join(packageRoot, 'scripts/attach-typescript-dist.mjs')), false)
-  assert.match(gitmodules, /url = https:\/\/github\.com\/ohos-rs\/tsrs\.git/)
-  assert.equal(manifest.scripts['build:tsrs'], 'node scripts/build-tsrs-dist.mjs')
-  assert.match(builder, /gitlink/)
-  assert.match(builder, /tsrs_cli/)
-  assert.match(builder, /--locked/)
-  assert.doesNotMatch(localPublish, /ARKDOWN_TSRS_DIST/)
-  assert.ok(localPublish.indexOf('build-tsrs-dist.mjs') < localPublish.indexOf('cargo clean'))
-  assert.match(workflow, /submodules: recursive/)
-  assert.doesNotMatch(workflow, /setup-go|go-version-file/)
-  assert.ok(workflow.indexOf('Build pinned native tsrs distribution') < workflow.indexOf('Download all bindings'))
-  assert.match(workflow, /attach-tsrs-dist\.mjs/)
-  assert.match(workflow, /napi pre-publish --no-gh-release -t npm --skip-optional-publish/)
-  assert.doesNotMatch(workflow, /for child_directory in npm\//)
-  for (const platform of ['darwin-arm64', 'linux-x64-gnu', 'win32-x64-msvc']) {
-    assert.match(workflow, new RegExp(`\\./npm/${platform}`))
+  const workspace = fs.readFileSync(path.join(root, 'Cargo.toml'), 'utf8')
+  const checker = fs.readFileSync(path.join(root, 'crates/arkdown-ets-checker/src/native.rs'), 'utf8')
+  const workflow = fs.readFileSync(path.join(root, '.github/workflows/publish.yml'), 'utf8')
+  assert.match(workspace, /tsrs_api = \{ path = "third_party\/tsrs\/crates\/tsrs_api" \}/)
+  assert.match(checker, /tsrs_api::embedded::Compiler/)
+  assert.doesNotMatch(
+    checker,
+    /Command::new|ChildStdin|Content-Length|handle_request|serde_json::from_value|ARKDOWN_TSRS_PATH/,
+  )
+  assert.equal(manifest.scripts['build:tsrs'], undefined)
+  for (const script of [
+    'build-tsrs-dist.mjs',
+    'attach-tsrs-dist.mjs',
+    'build-typescript-dist.mjs',
+    'attach-typescript-dist.mjs',
+  ]) {
+    assert.equal(fs.existsSync(path.join(packageRoot, 'scripts', script)), false)
   }
+  assert.equal(fs.existsSync(path.join(packageRoot, 'src/package_layout.rs')), false)
+  assert.match(workflow, /submodules: recursive/)
+  assert.match(workflow, /compiler-source.mjs --verify/)
+  assert.match(workflow, /compiler-source.mjs --package npm/)
+  assert.match(workflow, /cargo test --locked -p arkdown-ets-checker --test native/)
+  assert.doesNotMatch(
+    workflow,
+    /setup-go|go-version-file|build-tsrs-dist|attach-tsrs-dist|ARKDOWN_TSRS_PATH|tsrs-artifacts/,
+  )
 })
 
 test('plugin adapter exposes the complete supported lifecycle through one typed dispatcher', () => {

@@ -2,23 +2,32 @@
 
 ## 当前迁移（2026-10-11）
 
-- 运行入口是固定子模块 `third_party/tsrs` 构建的 `tsrs/tsrs.exe`。
-- 原生 API 使用 `createSnapshot` / `updateSnapshot` / `releaseSnapshot`，不保留旧 `createProgram` 接口。
-- 内存文件回调使用 `value` / `missing` / `useOS`；SDK 插件继续由宿主执行 CommonJS ABI。
-- 开发覆盖为 `ARKDOWN_TSRS_PATH`；旧 TypeScript 子模块、Go 构建及分发脚本已删除。
-- checker 固定 `noEmit`。动态 ArkTS 的 parser/binder/checker/linter/SDK policies/Kit imports 与类型事实由 tsrs 负责。
+- `third_party/tsrs` gitlink 固定 Rust crate，Cargo 直接链接进 N-API binding。
+- `tsrs_api::embedded::Compiler` 提供 typed create/update/query；Program/type lease 通过 RAII 回收。
+- 每份源码快照包含不可变 overlay 和删除 tombstones；增量成功才提交 inventory。SDK CommonJS ABI 保持由 JS host 执行。
+- 删除编译器子进程、JSON-RPC、可执行文件定位、`ARKDOWN_TSRS_PATH` 和独立编译器分发脚本。
+- checker 固定 `noEmit`。动态 ArkTS parser/binder/checker/linter/SDK policies/Kit imports 与类型事实由 tsrs 负责。
   ArkTS static 语法不在范围内；普通 class static block 仍在范围内。
-- tsrs 对照原 OH 编译器：1003/1003 linter 和 243/243 compiler programs 完整诊断一致；
-  Arkdown 原生服务 18/18 用例通过；OXC 动态语法正例 5/5、反例 7/7 通过；三平台分发内容与删除旧编译器的回归通过。
-- tsrs Kit 配置修改、删除、重建必须更新快照类型结果，旧快照必须保持原值；已加入回归。
-- 非法成员位置 `@interface` 的 parser panic 已按 OH `scanClassMemberStart` 修复，诊断代码和区间与参考一致。
-- macOS arm64 的干净子模块发布构建已通过，发布二进制再次通过全部 18 项原生服务测试和 12 个 OXC
-  正反例；Rust 格式、独立 checker clippy 和 30 项 JavaScript 测试通过。
-- CI 在每个平台构建后使用实际 tsrs 二进制执行原生 snapshot 服务测试，再上传分发产物。
-- 当前整工作区 `cargo check --locked -p arkdown-build -p arkdown-napi --all-targets` 被固定 Rolldown
-  依赖的 `test262` 子模块下载阻塞（GitHub 443 连接超时）。独立 checker 测试与 clippy 已通过；
-  不能把它等同于完整 N-API 构建、真实工程或三平台发布验收。Linux/Windows 的真实二进制构建仍需 CI 验证。
-- tsrs 新提交只在本地；远端 CI 获取新 gitlink 前需要先推送 tsrs 分支。
+- 上次语言移植验证：1003/1003 linter、243/243 compiler programs 与固定 OH 编译器完整诊断一致。
+- 发布校验 clean gitlink；三平台包只附带 binding、编译器 license/notice/source metadata，标准库已嵌入。
+- Rust 工具链与 tsrs 一致，固定 1.99.0；先推送 tsrs 分支，再推送 Arkdown gitlink，远端才能取到源码。
+
+## 本次 crate 接入验证
+
+- tsrs 固定版本：`7308ab7f29516b3330d9d0dad4945b571b54772c`（`ohos`）。
+- checker：17 项集成测试 + 1 项文件系统回归通过；OXC 语法语料正例 5/5、反例 7/7 通过。
+- 真实 SDK `check_semantic` 4/4、build crate 单元测试 106/106、JavaScript 单元测试 30/30 通过。
+- macOS arm64 N-API release 构建、Node checker 端到端、JS CLI check/smoke 通过。
+  Node checker 回归验证正常源码、错误源码、修复后再次检查，以及释放 SDK 宿主后进程自然退出。
+- 完整 HAP build/plugin 端到端 3/3 通过，覆盖跨进程持久化插件缓存、实际 SDK 版本回调与错误收尾。
+  旧用例把 `fontWeight` 误当作 API 20；当前 SDK 声明是 since 7，已换成明确 since 20 的 `enableAutoSpacing`。
+- workspace/all-targets check、相关 crates 的 clippy `-D warnings`、Rust/JS 格式检查通过。
+  Rust 1.99 新增 lint 要求 watcher 的定长分块改用 `as_chunks`，现有 SHA-1 回归通过。
+- tsrs 的 86 项 API 测试、7 项嵌入/内存填毒回归、243/243 OH 完整诊断对照和 15,197 个 conformance
+  变体通过相应门禁；无新增失败、崩溃、超时。完整记录在 tsrs `notes/arkts-port.md`。
+- 打包脚本的三平台结构、旧可执行文件清理和 dirty/mismatched gitlink 拒绝测试通过。
+  使用本次实际 macOS binding 的 npm pack dry-run 包含编译器 license/notice/source metadata，不包含独立编译器。
+- Linux/Windows 的实际 binding 构建和执行交由三平台 CI；本机没有把历史异平台产物计为本次验收。
 
 ## 迁移前记录（仅供行为与性能历史参考）
 

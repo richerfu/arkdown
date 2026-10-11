@@ -7,13 +7,13 @@ use arkdown_ets_checker::{NativeCompilerOptions, NativeTypeSession};
 /// Static ETS has separate, explicitly selected parser fixtures and is outside
 /// this gate. Keep original corpus text, including declaration-file extensions.
 #[test]
-#[ignore = "requires ARKDOWN_TSRS_PATH and ARKDOWN_OXC_SOURCE"]
+#[ignore = "requires ARKDOWN_OXC_SOURCE"]
 fn native_accepts_oxc_arkts11_positive_syntax_corpus() {
     check_corpus("pass");
 }
 
 #[test]
-#[ignore = "requires ARKDOWN_TSRS_PATH and ARKDOWN_OXC_SOURCE"]
+#[ignore = "requires ARKDOWN_OXC_SOURCE"]
 fn native_rejects_oxc_arkts11_negative_corpus() {
     check_corpus("fail");
 }
@@ -37,7 +37,7 @@ fn check_corpus(kind: &str) {
     assert!(!paths.is_empty(), "OXC legacy ArkTS corpus was not found");
 
     let project = tempfile::tempdir().unwrap();
-    let executable = NativeTypeSession::executable().unwrap();
+
     let mut options = NativeCompilerOptions::arkts11(project.path());
     // Unmodified compilerOptions.ets from ets2bundle compiler/tsconfig.json
     // (70818d757b52). Grammar tables, not fabricated SDK declarations.
@@ -55,7 +55,6 @@ fn check_corpus(kind: &str) {
         // Isolate programs: corpus files can deliberately redeclare the same
         // names and do not form one SDK project.
         let mut session = NativeTypeSession::start(
-            &executable,
             project.path(),
             BTreeMap::from([(file.clone(), source)]),
             None,
@@ -73,7 +72,7 @@ fn check_corpus(kind: &str) {
         } else {
             session.syntactic_diagnostics(&program).unwrap()
         };
-        session.release(program).unwrap();
+        drop(program);
         let matches_contract = if kind == "pass" {
             diagnostics.is_empty()
         } else if nested_annotation {

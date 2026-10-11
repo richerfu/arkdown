@@ -164,12 +164,13 @@ pnpm test
 ```
 
 The ArkTS checker is tsrs, pinned at `third_party/tsrs` as a git submodule.
-`pnpm build:tsrs` builds its clean macOS arm64, Linux x64 GNU, and Windows x64
-MSVC distributions with Rust (cross builds use cargo-zigbuild and cargo-xwin).
-`pnpm publish:local --dry-run` prepares that pinned distribution before
-assembling the three N-API platform packages. CI builds tsrs on each target's
-runner. Installed packages contain `tsrs` / `tsrs.exe`; local development can
-set `ARKDOWN_TSRS_PATH`. Arkdown uses native snapshots and keeps programs in
-`noEmit` mode. The previous Go checker is removed.
+Run `git submodule update --init --recursive` before building. Cargo links
+`tsrs_api`, `tsrs_core` and `tsrs_vfs` directly into the N-API binding with the
+pinned Rust toolchain. Typed snapshots, diagnostics and type facts stay in
+process; SDK CommonJS callbacks use the existing JavaScript host. Compiler
+programs use `noEmit`. The previous Go checker and executable transport are removed.
+`pnpm publish:local --dry-run` and CI verify the clean gitlink and include the
+compiler license and source revision in all three platform packages. The N-API
+binding embeds the standard libraries; no separate compiler executable is shipped.
 
 The package is distributed as `UNLICENSED`.

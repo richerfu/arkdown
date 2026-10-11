@@ -134,7 +134,7 @@ dependencies = [
  "async-trait",
  "fs-err",
  "indexmap",
- "json5",
+ "json5 0.4.1",
  "memory-stats",
  "oxc_allocator",
  "oxc_ast",
@@ -204,7 +204,7 @@ dependencies = [
  "fs-err",
  "globset",
  "indexmap",
- "json5",
+ "json5 0.4.1",
  "jsonschema",
  "junction",
  "oxc_span",
@@ -245,7 +245,7 @@ dependencies = [
  "arkdown-core",
  "arkdown-path",
  "fs-err",
- "json5",
+ "json5 0.4.1",
  "rustc-hash 2.1.3",
  "serde",
  "serde_json",
@@ -274,11 +274,15 @@ name = "arkdown-ets-checker"
 version = "0.1.0"
 dependencies = [
  "arkdown-ohos-schema",
+ "arkdown-path",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
  "tracing",
+ "tsrs_api",
+ "tsrs_core",
+ "tsrs_vfs",
 ]
 
 [[package]]
@@ -289,7 +293,7 @@ dependencies = [
  "arkdown-core",
  "arkdown-path",
  "fs-err",
- "json5",
+ "json5 0.4.1",
  "junction",
  "oxc_allocator",
  "oxc_ast",
@@ -335,7 +339,7 @@ dependencies = [
  "flate2",
  "hapsigner",
  "hex",
- "json5",
+ "json5 0.4.1",
  "mimalloc-safe",
  "napi",
  "napi-build",
@@ -428,7 +432,7 @@ dependencies = [
  "fs-err",
  "globset",
  "indexmap",
- "json5",
+ "json5 0.4.1",
  "rawzip",
  "rayon",
  "semver",
@@ -464,7 +468,7 @@ dependencies = [
  "arkdown-session",
  "fs-err",
  "indexmap",
- "json5",
+ "json5 0.4.1",
  "jsonschema",
  "junction",
  "oxc_allocator",
@@ -487,7 +491,7 @@ dependencies = [
  "arkdown-core",
  "arkdown-path",
  "fs-err",
- "json5",
+ "json5 0.4.1",
  "junction",
  "oxc_resolver",
  "rustc-hash 2.1.3",
@@ -503,7 +507,7 @@ version = "0.1.0"
 dependencies = [
  "arkdown-path",
  "fs-err",
- "json5",
+ "json5 0.4.1",
  "rustc-hash 2.1.3",
  "serde",
  "serde_json",
@@ -521,7 +525,7 @@ dependencies = [
  "arkdown-path",
  "compact_str 0.8.2",
  "indexmap",
- "json5",
+ "json5 0.4.1",
  "oxc_index",
  "rayon",
  "rustc-hash 2.1.3",
@@ -2250,6 +2254,16 @@ dependencies = [
  "pest",
  "pest_derive",
  "serde",
+]
+
+[[package]]
+name = "json5"
+version = "1.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "733a844dbd6fef128e98cb4487b887cb55454d92cd9994b1bafe004fabbe670c"
+dependencies = [
+ "serde",
+ "ucd-trie",
 ]
 
 [[package]]
@@ -5335,6 +5349,393 @@ dependencies = [
  "quote",
  "syn 2.0.119",
  "termcolor",
+]
+
+[[package]]
+name = "tsrs_api"
+version = "0.11.0"
+dependencies = [
+ "rustc-hash 2.1.3",
+ "serde",
+ "serde_json",
+ "tsrs_api_codec",
+ "tsrs_api_transport",
+ "tsrs_ast",
+ "tsrs_astnav",
+ "tsrs_checker",
+ "tsrs_compiler",
+ "tsrs_core",
+ "tsrs_diagnostics",
+ "tsrs_ls",
+ "tsrs_lsproto",
+ "tsrs_module",
+ "tsrs_printer",
+ "tsrs_project",
+ "tsrs_scanner",
+ "tsrs_tsoptions",
+ "tsrs_vfs",
+]
+
+[[package]]
+name = "tsrs_api_codec"
+version = "0.11.0"
+dependencies = [
+ "rustc-hash 2.1.3",
+ "serde",
+ "serde_json",
+ "tsrs_ast",
+ "tsrs_core",
+]
+
+[[package]]
+name = "tsrs_api_transport"
+version = "0.11.0"
+dependencies = [
+ "rustc-hash 2.1.3",
+ "serde",
+ "serde_json",
+ "tsrs_vfs",
+]
+
+[[package]]
+name = "tsrs_ast"
+version = "0.11.0"
+dependencies = [
+ "bitflags 2.13.1",
+ "hashbrown 0.17.1",
+ "memchr",
+ "rustc-hash 2.1.3",
+ "tsrs_core",
+ "tsrs_diagnostics",
+ "tsrs_spanmap",
+]
+
+[[package]]
+name = "tsrs_astnav"
+version = "0.11.0"
+dependencies = [
+ "tsrs_ast",
+ "tsrs_core",
+ "tsrs_scanner",
+]
+
+[[package]]
+name = "tsrs_binder"
+version = "0.11.0"
+dependencies = [
+ "bitflags 2.13.1",
+ "rustc-hash 2.1.3",
+ "tsrs_ast",
+ "tsrs_core",
+ "tsrs_diagnostics",
+ "tsrs_scanner",
+]
+
+[[package]]
+name = "tsrs_checker"
+version = "0.11.0"
+dependencies = [
+ "bitflags 2.13.1",
+ "hashbrown 0.17.1",
+ "regex",
+ "regress",
+ "rustc-hash 2.1.3",
+ "serde",
+ "serde_json",
+ "tsrs_ast",
+ "tsrs_astnav",
+ "tsrs_binder",
+ "tsrs_core",
+ "tsrs_diagnostics",
+ "tsrs_module",
+ "tsrs_modulespecifiers",
+ "tsrs_parser",
+ "tsrs_printer",
+ "tsrs_pseudochecker",
+ "tsrs_scanner",
+ "tsrs_tsoptions",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "tsrs_compiler"
+version = "0.11.0"
+dependencies = [
+ "rayon",
+ "rustc-hash 2.1.3",
+ "serde",
+ "serde_json",
+ "tsrs_ast",
+ "tsrs_binder",
+ "tsrs_checker",
+ "tsrs_contentmapper",
+ "tsrs_core",
+ "tsrs_declarations",
+ "tsrs_diagnostics",
+ "tsrs_module",
+ "tsrs_modulespecifiers",
+ "tsrs_parser",
+ "tsrs_printer",
+ "tsrs_scanner",
+ "tsrs_sourcemap",
+ "tsrs_spanmap",
+ "tsrs_transformers",
+ "tsrs_tsoptions",
+ "tsrs_vfs",
+]
+
+[[package]]
+name = "tsrs_contentmapper"
+version = "0.11.0"
+dependencies = [
+ "rustc-hash 2.1.3",
+ "tsrs_ast",
+ "tsrs_core",
+ "tsrs_diagnostics",
+ "tsrs_ipc",
+ "tsrs_parser",
+ "tsrs_spanmap",
+ "tsrs_tsoptions",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "tsrs_core"
+version = "0.11.0"
+dependencies = [
+ "hashbrown 0.17.1",
+ "indexmap",
+ "libc",
+ "memchr",
+ "rustc-hash 2.1.3",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "tsrs_declarations"
+version = "0.11.0"
+dependencies = [
+ "rustc-hash 2.1.3",
+ "tsrs_ast",
+ "tsrs_checker",
+ "tsrs_core",
+ "tsrs_diagnostics",
+ "tsrs_modulespecifiers",
+ "tsrs_printer",
+ "tsrs_scanner",
+ "tsrs_transformers",
+ "tsrs_tsoptions",
+]
+
+[[package]]
+name = "tsrs_diagnostics"
+version = "0.11.0"
+dependencies = [
+ "rustc-hash 2.1.3",
+]
+
+[[package]]
+name = "tsrs_ipc"
+version = "0.11.0"
+dependencies = [
+ "rustc-hash 2.1.3",
+ "tsrs_core",
+]
+
+[[package]]
+name = "tsrs_ls"
+version = "0.11.0"
+dependencies = [
+ "bitflags 2.13.1",
+ "indexmap",
+ "rustc-hash 2.1.3",
+ "tsrs_ast",
+ "tsrs_astnav",
+ "tsrs_binder",
+ "tsrs_checker",
+ "tsrs_compiler",
+ "tsrs_core",
+ "tsrs_diagnostics",
+ "tsrs_lsproto",
+ "tsrs_module",
+ "tsrs_modulespecifiers",
+ "tsrs_parser",
+ "tsrs_printer",
+ "tsrs_projectutil",
+ "tsrs_scanner",
+ "tsrs_sourcemap",
+ "tsrs_spanmap",
+ "tsrs_tsoptions",
+ "tsrs_vfs",
+]
+
+[[package]]
+name = "tsrs_lsproto"
+version = "0.11.0"
+dependencies = [
+ "rustc-hash 2.1.3",
+ "tsrs_core",
+ "tsrs_vfs",
+]
+
+[[package]]
+name = "tsrs_module"
+version = "0.11.0"
+dependencies = [
+ "bitflags 2.13.1",
+ "json5 1.3.1",
+ "rustc-hash 2.1.3",
+ "serde",
+ "tsrs_ast",
+ "tsrs_core",
+ "tsrs_diagnostics",
+ "tsrs_vfs",
+]
+
+[[package]]
+name = "tsrs_modulespecifiers"
+version = "0.11.0"
+dependencies = [
+ "regex",
+ "rustc-hash 2.1.3",
+ "tsrs_ast",
+ "tsrs_core",
+ "tsrs_module",
+ "tsrs_tsoptions",
+]
+
+[[package]]
+name = "tsrs_parser"
+version = "0.11.0"
+dependencies = [
+ "bitflags 2.13.1",
+ "rustc-hash 2.1.3",
+ "tsrs_ast",
+ "tsrs_core",
+ "tsrs_diagnostics",
+ "tsrs_scanner",
+]
+
+[[package]]
+name = "tsrs_printer"
+version = "0.11.0"
+dependencies = [
+ "bitflags 2.13.1",
+ "rustc-hash 2.1.3",
+ "tsrs_ast",
+ "tsrs_core",
+ "tsrs_scanner",
+ "tsrs_sourcemap",
+]
+
+[[package]]
+name = "tsrs_project"
+version = "0.11.0"
+dependencies = [
+ "rustc-hash 2.1.3",
+ "tsrs_ast",
+ "tsrs_binder",
+ "tsrs_checker",
+ "tsrs_compiler",
+ "tsrs_contentmapper",
+ "tsrs_core",
+ "tsrs_diagnostics",
+ "tsrs_ls",
+ "tsrs_lsproto",
+ "tsrs_module",
+ "tsrs_parser",
+ "tsrs_projectutil",
+ "tsrs_tsoptions",
+ "tsrs_vfs",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "tsrs_projectutil"
+version = "0.11.0"
+dependencies = [
+ "rustc-hash 2.1.3",
+ "tsrs_core",
+]
+
+[[package]]
+name = "tsrs_pseudochecker"
+version = "0.11.0"
+dependencies = [
+ "tsrs_ast",
+ "tsrs_core",
+]
+
+[[package]]
+name = "tsrs_scanner"
+version = "0.11.0"
+dependencies = [
+ "bitflags 2.13.1",
+ "memchr",
+ "rustc-hash 2.1.3",
+ "tsrs_ast",
+ "tsrs_core",
+ "tsrs_diagnostics",
+]
+
+[[package]]
+name = "tsrs_sourcemap"
+version = "0.11.0"
+dependencies = [
+ "rustc-hash 2.1.3",
+ "tsrs_ast",
+ "tsrs_core",
+ "tsrs_scanner",
+]
+
+[[package]]
+name = "tsrs_spanmap"
+version = "0.11.0"
+dependencies = [
+ "bitflags 2.13.1",
+ "tsrs_core",
+]
+
+[[package]]
+name = "tsrs_transformers"
+version = "0.11.0"
+dependencies = [
+ "bitflags 2.13.1",
+ "rustc-hash 2.1.3",
+ "tsrs_ast",
+ "tsrs_binder",
+ "tsrs_checker",
+ "tsrs_core",
+ "tsrs_printer",
+ "tsrs_scanner",
+ "tsrs_tsoptions",
+]
+
+[[package]]
+name = "tsrs_tsoptions"
+version = "0.11.0"
+dependencies = [
+ "rustc-hash 2.1.3",
+ "serde_json",
+ "tsrs_ast",
+ "tsrs_core",
+ "tsrs_diagnostics",
+ "tsrs_module",
+ "tsrs_parser",
+ "tsrs_scanner",
+ "tsrs_vfs",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "tsrs_vfs"
+version = "0.11.0"
+dependencies = [
+ "bitflags 2.13.1",
+ "rayon",
+ "rustc-hash 2.1.3",
+ "tsrs_core",
 ]
 
 [[package]]

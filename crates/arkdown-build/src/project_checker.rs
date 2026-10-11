@@ -81,7 +81,6 @@ struct ProjectSemanticRuntimeKey {
 }
 
 struct ProjectSemanticRuntimeEntry {
-    executable: PathBuf,
     sdk_plugin_callbacks: bool,
     session: NativeTypeSession,
     program: NativeProgram,
@@ -121,7 +120,6 @@ impl ProjectSemanticRuntime {
     fn program<'a>(
         &'a mut self,
         key: ProjectSemanticRuntimeKey,
-        executable: &Path,
         project_root: &Path,
         prepared: &PreparedSemanticCheck,
         changes: &NativeProgramFileChanges,
@@ -129,10 +127,7 @@ impl ProjectSemanticRuntime {
         let sdk_plugin_callbacks = prepared.sdk_plugin_host.is_some();
         let entry = self.sessions.remove(&key);
         let entry = match entry {
-            Some(mut entry)
-                if entry.executable == executable
-                    && entry.sdk_plugin_callbacks == sdk_plugin_callbacks =>
-            {
+            Some(mut entry) if entry.sdk_plugin_callbacks == sdk_plugin_callbacks => {
                 let program = entry.session.update_program_snapshot(
                     entry.program,
                     &prepared.roots,
@@ -144,14 +139,12 @@ impl ProjectSemanticRuntime {
             }
             _ => {
                 let mut session = NativeTypeSession::start(
-                    executable,
                     project_root,
                     prepared.sources.clone(),
                     prepared.sdk_plugin_host.clone(),
                 )?;
                 let program = session.create_program(&prepared.roots, &prepared.options)?;
                 ProjectSemanticRuntimeEntry {
-                    executable: executable.to_path_buf(),
                     sdk_plugin_callbacks,
                     session,
                     program,
@@ -166,21 +159,8 @@ impl ProjectSemanticRuntime {
         Ok((&mut entry.session, entry.program.clone()))
     }
 
-    pub(crate) fn close(&mut self) -> Result<()> {
-        let mut entries = std::mem::take(&mut self.sessions)
-            .into_iter()
-            .collect::<Vec<_>>();
-        entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
-        let mut first_error = None;
-        for (_, mut entry) in entries {
-            if let Err(error) = entry.session.release(entry.program) {
-                first_error.get_or_insert(error);
-            }
-        }
-        if let Some(error) = first_error {
-            return Err(error.into());
-        }
-        Ok(())
+    pub(crate) fn close(&mut self) {
+        self.sessions.clear();
     }
 }
 
@@ -219,7 +199,6 @@ pub struct ProjectSemanticChecker<'a> {
     sdk_root: Option<PathBuf>,
     cache_path: Option<PathBuf>,
     check_declarations: bool,
-    tsrs_executable: Option<PathBuf>,
     sdk_plugin_host: Option<Arc<dyn NativeOhSdkPluginHost>>,
     crossplatform_dependencies: FxHashMap<(String, String), CrossplatformSourceCollection>,
 }
@@ -301,15 +280,9 @@ impl<'a> ProjectSemanticChecker<'a> {
             sdk_root: None,
             cache_path: None,
             check_declarations: false,
-            tsrs_executable: None,
             sdk_plugin_host: None,
             crossplatform_dependencies: FxHashMap::default(),
         }
-    }
-
-    pub fn with_tsrs_executable(mut self, executable: Option<&Path>) -> Self {
-        self.tsrs_executable = executable.map(Path::to_path_buf);
-        self
     }
 
     pub fn with_sdk_plugin_host(mut self, host: Option<Arc<dyn NativeOhSdkPluginHost>>) -> Self {
@@ -700,7 +673,6 @@ impl<'a> ProjectSemanticChecker<'a> {
             sources,
             semantic_inventories,
         };
-        let executable = NativeTypeSession::resolve_executable(self.tsrs_executable.as_deref())?;
         if let Some(runtime) = runtime {
             let key = ProjectSemanticRuntimeKey {
                 project_root: self.project_root.to_path_buf(),
@@ -709,18 +681,17 @@ impl<'a> ProjectSemanticChecker<'a> {
             };
             let changes = ProjectSemanticRuntime::file_changes(invalidation);
             let (session, program) =
-                runtime.program(key, &executable, self.project_root, &prepared, &changes)?;
+                runtime.program(key, self.project_root, &prepared, &changes)?;
             return self.check_program(session, &program, &prepared, mode);
         }
         let mut session = NativeTypeSession::start(
-            &executable,
             self.project_root,
             prepared.sources.clone(),
             prepared.sdk_plugin_host.clone(),
         )?;
         let program = session.create_program(&prepared.roots, &prepared.options)?;
         let report = self.check_program(&mut session, &program, &prepared, mode)?;
-        session.release(program)?;
+        drop(program);
         Ok(report)
     }
 

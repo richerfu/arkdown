@@ -1,30 +1,43 @@
-//! Native tsrs API client. Protocol owner: the packaged tsrs binary,
-//! tsrs_api snapshot/checker requests and tsrs_api_transport JSON-RPC.
-//! This is an internal compiler service, never an arkdown command-line entry.
+//! In-process ArkTS compiler. tsrs owns snapshots, checking and immutable facts.
+mod filesystem;
+mod options;
+mod plugins;
 
+use filesystem::SourceSnapshot;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
-    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-        mpsc,
-    },
-    thread::JoinHandle,
-    time::{Duration, Instant},
+    sync::Arc,
 };
+use tsrs_api::embedded::Compiler;
+use tsrs_vfs::{FS, bundled, osvfs};
 
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use serde_json::{Value, json};
-
-static SDK_PLUGIN_SESSION_SCOPE: AtomicU64 = AtomicU64::new(1);
+pub use tsrs_api::embedded::{
+    AnnotationConstant as NativeAnnotationConstant, AnnotationInfo as NativeAnnotationInfo,
+    AnnotationProperty as NativeAnnotationProperty,
+    AnnotationTransformImport as NativeAnnotationTransformImport,
+    AnnotationTransformInfo as NativeAnnotationTransformInfo,
+    AnnotationTransformNode as NativeAnnotationTransformNode,
+    ArktsBuilderReceiverTypeFacts as NativeArktsBuilderReceiverTypeFacts,
+    ArktsPropertyTypeFacts as NativeArktsPropertyTypeFacts,
+    ArktsTransformTypeFacts as NativeArktsTransformTypeFacts,
+    ArktsTransformTypeQuery as NativeArktsTransformTypeQuery, ProgramSnapshot as NativeProgram,
+    ProgramSourceGraph as NativeProgramSourceGraph,
+    ProgramSourceGraphFile as NativeProgramSourceGraphFile,
+    ResolvedTypeIdentity as NativeResolvedTypeIdentity, Symbol as NativeSymbol,
+    TypeHandle as NativeType, TypeQueryRange as NativeTypeQueryRange,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum NativeCheckError {
     #[error("ARKDOWN_TYPE_SERVICE: {0}")]
-    Protocol(String),
+    Compiler(String),
+    #[error("ARKDOWN_TYPE_SERVICE: {0}")]
+    Api(#[from] tsrs_api::ApiError),
+    #[error("ARKDOWN_TYPE_SERVICE_PATH: {0}")]
+    Path(#[from] arkdown_path::serializer::SerializerError),
     #[error("ARKDOWN_TYPE_SERVICE_IO: {0}")]
     Io(#[from] std::io::Error),
     #[error("ARKDOWN_TYPE_SERVICE_JSON: {0}")]
@@ -383,12 +396,6 @@ pub struct NativeArktsBuildDiagnostics {
     pub semantic_diagnostics: Vec<NativeDiagnostic>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct NativeProgram {
-    snapshot: u64,
-    project: String,
-}
-
 /// Filesystem invalidation passed to an incremental native program update.
 ///
 /// `rollup-plugin-watch-change.ts::watchChange` preserves update separately
@@ -401,278 +408,41 @@ pub struct NativeProgramFileChanges {
     pub deleted: Vec<PathBuf>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct NativeType {
-    pub id: u32,
-    pub flags: u32,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct NativeSymbol {
-    pub name: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NativeAnnotationTransformInfo {
-    pub file_name: PathBuf,
-    pub declarations: Vec<NativeAnnotationTransformNode>,
-    pub uses: Vec<NativeAnnotationTransformNode>,
-    pub imports: Vec<NativeAnnotationTransformImport>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct NativeAnnotationTransformNode {
-    pub pos: usize,
-    pub end: usize,
-    #[serde(default, rename = "runtimeRetained")]
-    pub runtime_retained: bool,
-    pub info: NativeAnnotationInfo,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NativeAnnotationTransformImport {
-    pub pos: usize,
-    pub end: usize,
-    pub disposition: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NativeAnnotationInfo {
-    pub source_retention: bool,
-    pub properties: Vec<NativeAnnotationProperty>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NativeAnnotationProperty {
-    pub name: String,
-    pub name_text: String,
-    pub initializer: Option<NativeAnnotationConstant>,
-    pub argument: Option<NativeAnnotationConstant>,
-    pub array_depth: usize,
-    pub enum_first_value: Option<NativeAnnotationConstant>,
-    pub type_text: String,
-    pub element_type_text: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct NativeAnnotationConstant {
-    pub kind: String,
-    #[serde(default)]
-    pub value: String,
-    #[serde(default)]
-    pub items: Vec<NativeAnnotationConstant>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NativeArktsTransformTypeFacts {
-    pub file_name: PathBuf,
-    pub properties: Vec<NativeArktsPropertyTypeFacts>,
-    pub builder_accesses: Vec<NativeArktsBuilderReceiverTypeFacts>,
-    pub member_accesses: Vec<NativeArktsExpressionTypeFacts>,
-    pub sdk_api_uses: Vec<NativeSdkApiUse>,
-}
-
-/// UTF-16 source range used by the JSON protocol. Rust/OXC selects the
-/// transform-owned syntax; tsrs resolves only the requested type identities.
-#[derive(Debug, Clone, Copy, Serialize)]
-pub struct NativeTypeQueryRange {
-    pub pos: usize,
-    pub end: usize,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NativeArktsTransformTypeQuery {
-    pub file: PathBuf,
-    pub properties: Vec<NativeTypeQueryRange>,
-    pub builder_accesses: Vec<NativeTypeQueryRange>,
-    pub member_accesses: Vec<NativeTypeQueryRange>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NativeSdkApiUse {
-    pub api_module: String,
-    pub function: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NativeArktsPropertyTypeFacts {
-    pub name_pos: usize,
-    pub name_end: usize,
-    pub r#type: Option<NativeResolvedTypeIdentity>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NativeArktsBuilderReceiverTypeFacts {
-    pub pos: usize,
-    pub end: usize,
-    pub receiver_type: NativeResolvedTypeIdentity,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NativeArktsExpressionTypeFacts {
-    pub pos: usize,
-    pub end: usize,
-    pub r#type: NativeResolvedTypeIdentity,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NativeResolvedTypeIdentity {
-    pub is_nullable: bool,
-    pub is_union: bool,
-    pub is_enum: bool,
-    pub is_basic: bool,
-    pub is_observed_v2: bool,
-    pub is_function: bool,
-    pub symbol_name: String,
-    pub types: Vec<NativeResolvedTypeIdentity>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NativeProgramSourceGraph {
-    pub files: Vec<NativeProgramSourceGraphFile>,
-    pub type_reference_files: Vec<PathBuf>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NativeProgramSourceGraphFile {
-    pub file_name: PathBuf,
-    pub dependencies: Vec<PathBuf>,
-}
-
-#[derive(Deserialize)]
-struct CreatedSnapshot {
-    snapshot: u64,
-    operation: SnapshotOperation,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-struct SnapshotOperation {
-    created_programs: Vec<String>,
-}
-
-/// Owns the child and every request. tsrs retains AST/checker memory; Rust
-/// retains source snapshots and owned results. No shared-write hook collector.
+/// Owns the compiler and the current immutable input inventory. Program/type
+/// leases own their snapshots independently and may safely outlive this session.
 pub struct NativeTypeSession {
-    child: Child,
-    input: Option<ChildStdin>,
-    messages: mpsc::Receiver<Result<Value, NativeCheckError>>,
-    reader: Option<JoinHandle<()>>,
-    stderr: Option<JoinHandle<Vec<u8>>>,
-    next_id: u64,
+    compiler: Compiler,
+    base: Arc<dyn FS>,
     sources: BTreeMap<PathBuf, Arc<str>>,
     deleted: BTreeSet<PathBuf>,
-    sdk_plugin_host: Option<Arc<dyn NativeOhSdkPluginHost>>,
-    sdk_plugin_session_scope: u64,
+    sdk_plugin_executor: Option<Arc<dyn tsrs_core::OhSdkPluginExecutor>>,
 }
 
 impl NativeTypeSession {
-    pub fn executable() -> Result<PathBuf, NativeCheckError> {
-        Self::resolve_executable(None)
-    }
-
-    pub fn resolve_executable(
-        packaged_executable: Option<&Path>,
-    ) -> Result<PathBuf, NativeCheckError> {
-        let configured = std::env::var_os("ARKDOWN_TSRS_PATH")
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from);
-        let path = configured
-            .as_deref()
-            .or(packaged_executable)
-            .ok_or_else(|| {
-                NativeCheckError::Protocol(
-                    "native ArkTS tsrs service is missing from the platform package; ARKDOWN_TSRS_PATH may be used only as a development override".into(),
-                )
-            })?;
-        if !path.is_file() {
-            return Err(NativeCheckError::Protocol(format!(
-                "native ArkTS tsrs service is not a file: {}",
-                path.display()
-            )));
-        }
-        Ok(path.canonicalize()?)
-    }
-
     pub fn start(
-        executable: &Path,
         project_root: &Path,
         sources: BTreeMap<PathBuf, Arc<str>>,
         sdk_plugin_host: Option<Arc<dyn NativeOhSdkPluginHost>>,
     ) -> Result<Self, NativeCheckError> {
-        let mut command = Command::new(executable);
-        command
-            .args(["--api", "--async", "--cwd"])
-            .arg(project_root)
-            .args(["--callbacks", "readFile,fileExists"]);
-        if sdk_plugin_host.is_some() {
-            command.arg("--sdkPluginCallbacks");
-        }
-        let mut child = command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        let input = child.stdin.take();
-        let mut wire = NativeMessageReader {
-            output: BufReader::new(child.stdout.take().expect("piped stdout")),
-        };
-        let (sender, messages) = mpsc::channel();
-        let reader = std::thread::spawn(move || {
-            loop {
-                let message = wire.read();
-                let failed = message.is_err();
-                if sender.send(message).is_err() || failed {
-                    break;
-                }
-            }
+        let base: Arc<dyn FS> = Arc::new(bundled::wrap_fs(osvfs::fs()));
+        let compiler = Compiler::new(tsrs_api::SessionOptions::new(
+            options::CompilerPaths::one(project_root)?,
+            bundled::lib_path(),
+            Arc::clone(&base),
+            false,
+        ))?;
+        let sdk_plugin_executor = sdk_plugin_host.map(|host| {
+            Arc::new(tsrs_api::embedded::SdkPluginExecutor::new(Arc::new(
+                plugins::PluginHost(host),
+            ))) as Arc<dyn tsrs_core::OhSdkPluginExecutor>
         });
-        let mut errors = child.stderr.take().expect("piped stderr");
-        let stderr = std::thread::spawn(move || {
-            let mut tail = Vec::new();
-            let mut buffer = [0; 4096];
-            while let Ok(count) = errors.read(&mut buffer) {
-                if count == 0 {
-                    break;
-                }
-                tail.extend_from_slice(&buffer[..count]);
-                if tail.len() > 16384 {
-                    tail.drain(..tail.len() - 16384);
-                }
-            }
-            tail
-        });
-        let mut session = Self {
-            child,
-            input,
-            messages,
-            reader: Some(reader),
-            stderr: Some(stderr),
-            next_id: 0,
+        Ok(Self {
+            compiler,
+            base,
             sources,
             deleted: BTreeSet::new(),
-            sdk_plugin_host,
-            // The tsrs API session counter is process-local, while one JS plugin
-            // host is shared by every module in a build. Give each child
-            // process a host-global scope so interned source/config IDs cannot
-            // collide when modules are checked concurrently.
-            sdk_plugin_session_scope: SDK_PLUGIN_SESSION_SCOPE.fetch_add(1, Ordering::Relaxed),
-        };
-        let _: Value = session.request("initialize", json!({}))?;
-        Ok(session)
+            sdk_plugin_executor,
+        })
     }
 
     pub fn create_program(
@@ -680,27 +450,17 @@ impl NativeTypeSession {
         roots: &[PathBuf],
         options: &NativeCompilerOptions,
     ) -> Result<NativeProgram, NativeCheckError> {
-        let created: CreatedSnapshot = self.request(
-            "createSnapshot",
-            json!({
-                "createPrograms": [{ "rootFiles": roots, "compilerOptions": options }]
-            }),
-        )?;
-        let mut projects = created.operation.created_programs.into_iter();
-        let project = projects.next().ok_or_else(|| {
-            NativeCheckError::Protocol("createSnapshot returned no created program".into())
-        })?;
-        if projects.next().is_some() {
-            return Err(NativeCheckError::Protocol(
-                "createSnapshot returned multiple programs for one request".into(),
-            ));
-        }
-        Ok(NativeProgram {
-            snapshot: created.snapshot,
-            project,
-        })
+        let fs = Arc::new(SourceSnapshot::new(
+            Arc::clone(&self.base),
+            &self.sources,
+            &self.deleted,
+        )?);
+        Ok(self.compiler.create_program(
+            &options::CompilerPaths::many(roots)?,
+            options.to_tsrs(self.sdk_plugin_executor.clone())?,
+            fs,
+        )?)
     }
-
     /// Reconfigure the synthetic project in a new snapshot. Preserve the
     /// previous snapshot until its replacement has been created successfully.
     pub fn update_program(
@@ -776,30 +536,31 @@ impl NativeTypeSession {
             changed.remove(path);
         }
 
+        let mut tombstones = self.deleted.clone();
         for path in changed.iter().chain(created.iter()) {
-            self.deleted.remove(path);
+            tombstones.remove(path);
         }
-        for path in &deleted {
-            self.deleted.insert(path.clone());
-        }
-        self.sources = sources;
-
-        let created: CreatedSnapshot = self.request(
-            "updateSnapshot",
-            json!({
-                "snapshot": previous.snapshot,
-                "changes": {
-                    "reconfigurePrograms": [{ "id": previous.project, "rootFiles": roots, "compilerOptions": options }],
-                    "fileNotifications": { "changed": changed, "created": created, "deleted": deleted },
-                }
-            }),
+        tombstones.extend(deleted.iter().cloned());
+        let fs = Arc::new(SourceSnapshot::new(
+            Arc::clone(&self.base),
+            &sources,
+            &tombstones,
+        )?);
+        let notifications = tsrs_api::embedded::FileChanges {
+            changed: options::CompilerPaths::many(&changed.into_iter().collect::<Vec<_>>())?,
+            created: options::CompilerPaths::many(&created.into_iter().collect::<Vec<_>>())?,
+            deleted: options::CompilerPaths::many(&deleted.into_iter().collect::<Vec<_>>())?,
+        };
+        let next = self.compiler.update_program(
+            &previous,
+            &options::CompilerPaths::many(roots)?,
+            options.to_tsrs(self.sdk_plugin_executor.clone())?,
+            fs,
+            &notifications,
         )?;
-        let project = previous.project.clone();
-        self.release(previous)?;
-        Ok(NativeProgram {
-            snapshot: created.snapshot,
-            project,
-        })
+        self.sources = sources;
+        self.deleted = tombstones;
+        Ok(next)
     }
 
     pub fn non_nullable_type(
@@ -807,349 +568,134 @@ impl NativeTypeSession {
         program: &NativeProgram,
         ty: &NativeType,
     ) -> Result<NativeType, NativeCheckError> {
-        self.request(
-            "getNonNullableType",
-            json!({
-                "snapshot": program.snapshot, "project": program.project, "objectId": ty.id
-            }),
-        )
+        Ok(program.non_nullable_type(ty)?)
     }
-
     pub fn type_symbol(
         &mut self,
         program: &NativeProgram,
         ty: &NativeType,
     ) -> Result<Option<NativeSymbol>, NativeCheckError> {
-        self.request(
-            "getSymbolOfType",
-            json!({
-                "snapshot": program.snapshot, "project": program.project, "objectId": ty.id
-            }),
-        )
+        Ok(program.type_symbol(ty)?)
     }
-
-    /// Mirrors ArkTSLinter_1_1/TSDiagnostics.ts::doAllGetDiagnostics followed
-    /// by ets_checker.ts::processBuildHap. The backend owns reuse of the normal
-    /// checker result across both source-defined phases.
     pub fn arkts_build_diagnostics(
         &mut self,
         program: &NativeProgram,
     ) -> Result<NativeArktsBuildDiagnostics, NativeCheckError> {
-        self.request("getArkTSBuildDiagnostics", serde_json::to_value(program)?)
+        let d = program.arkts_build_diagnostics()?;
+        Ok(NativeArktsBuildDiagnostics {
+            linter_diagnostics: d.linter_diagnostics.into_iter().map(Into::into).collect(),
+            syntactic_diagnostics: d
+                .syntactic_diagnostics
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            semantic_diagnostics: d.semantic_diagnostics.into_iter().map(Into::into).collect(),
+        })
     }
-
-    /// General checker API used outside the ets2bundle build lifecycle.
     pub fn diagnostics(
         &mut self,
         program: &NativeProgram,
     ) -> Result<Vec<NativeDiagnostic>, NativeCheckError> {
         let mut diagnostics = self.syntactic_diagnostics(program)?;
-        let result: Option<Vec<NativeDiagnostic>> =
-            self.request("getSemanticDiagnostics", serde_json::to_value(program)?)?;
-        diagnostics.extend(result.unwrap_or_default());
+        diagnostics.extend(
+            program
+                .semantic_diagnostics()?
+                .into_iter()
+                .map(NativeDiagnostic::from),
+        );
         Ok(diagnostics)
     }
-
     pub fn arkts_linter_diagnostics(
         &mut self,
         program: &NativeProgram,
     ) -> Result<Vec<NativeDiagnostic>, NativeCheckError> {
-        let result: Option<Vec<NativeDiagnostic>> =
-            self.request("getArkTSLinterDiagnostics", serde_json::to_value(program)?)?;
-        Ok(result.unwrap_or_default())
+        Ok(program
+            .arkts_linter_diagnostics()?
+            .into_iter()
+            .map(Into::into)
+            .collect())
     }
-
+    pub fn syntactic_diagnostics(
+        &mut self,
+        program: &NativeProgram,
+    ) -> Result<Vec<NativeDiagnostic>, NativeCheckError> {
+        Ok(program
+            .syntactic_diagnostics()?
+            .into_iter()
+            .map(Into::into)
+            .collect())
+    }
+    pub fn declaration_diagnostics(
+        &mut self,
+        program: &NativeProgram,
+        files: &[PathBuf],
+    ) -> Result<Vec<NativeDiagnostic>, NativeCheckError> {
+        Ok(program
+            .declaration_diagnostics(&options::CompilerPaths::many(files)?)?
+            .into_iter()
+            .map(Into::into)
+            .collect())
+    }
     pub fn source_graph(
         &mut self,
         program: &NativeProgram,
     ) -> Result<NativeProgramSourceGraph, NativeCheckError> {
-        self.request("getProgramSourceGraph", serde_json::to_value(program)?)
+        Ok(program.source_graph()?)
     }
-
-    /// Checker-owned facts for OH `ohApi.ts::transformAnnotation`, batched for
-    /// all selected transform inputs so a module build performs one IPC call.
     pub fn annotation_transform_infos(
         &mut self,
         program: &NativeProgram,
         files: &[PathBuf],
     ) -> Result<Vec<NativeAnnotationTransformInfo>, NativeCheckError> {
-        self.request(
-            "getAnnotationTransformInfos",
-            json!({
-                "snapshot": program.snapshot,
-                "project": program.project,
-                "files": files,
-            }),
-        )
+        Ok(program.annotation_transform_infos(&options::CompilerPaths::many(files)?)?)
     }
-
-    /// Immutable type identities used by ArkTS 1.1 OXC transforms. The tsrs
-    /// service performs all queries in one checker lease and returns no handles.
     pub fn arkts_transform_type_facts(
         &mut self,
         program: &NativeProgram,
         queries: &[NativeArktsTransformTypeQuery],
         sdk_api_use_files: &[PathBuf],
     ) -> Result<Vec<NativeArktsTransformTypeFacts>, NativeCheckError> {
-        self.request(
-            "getArkTSTransformTypeFacts",
-            json!({
-                "snapshot": program.snapshot,
-                "project": program.project,
-                "queries": queries,
-                "sdkApiUseFiles": sdk_api_use_files,
-            }),
-        )
+        Ok(program.arkts_transform_type_facts(
+            queries,
+            &options::CompilerPaths::many(sdk_api_use_files)?,
+        )?)
     }
-
-    /// `ets_checker.ts::printDeclarationDiagnostics` requests declaration
-    /// diagnostics one eligible implementation source at a time for HAR/HSP.
-    pub fn declaration_diagnostics(
-        &mut self,
-        program: &NativeProgram,
-        files: &[PathBuf],
-    ) -> Result<Vec<NativeDiagnostic>, NativeCheckError> {
-        let result: Option<Vec<NativeDiagnostic>> = self.request(
-            "getDeclarationDiagnostics",
-            json!({
-                "snapshot": program.snapshot,
-                "project": program.project,
-                "files": files,
-            }),
-        )?;
-        Ok(result.unwrap_or_default())
-    }
-
-    /// Native api/session.go::handleGetSyntacticDiagnostics. Keep syntax
-    /// conformance independent of missing SDK symbols or semantic diagnostics;
-    /// the build service still requests both phases through `diagnostics`.
-    pub fn syntactic_diagnostics(
-        &mut self,
-        program: &NativeProgram,
-    ) -> Result<Vec<NativeDiagnostic>, NativeCheckError> {
-        let result: Option<Vec<NativeDiagnostic>> =
-            self.request("getSyntacticDiagnostics", serde_json::to_value(program)?)?;
-        Ok(result.unwrap_or_default())
-    }
-
-    /// API positions are UTF-16, explicitly unlike OXC spans. The caller must
-    /// convert against the same source snapshot before submitting a batch.
     pub fn types_at_positions(
         &mut self,
         program: &NativeProgram,
         file: &Path,
         positions: &[u32],
     ) -> Result<Vec<Option<NativeType>>, NativeCheckError> {
-        self.request(
-            "getTypesAtPositions",
-            json!({
-                "snapshot": program.snapshot, "project": program.project,
-                "file": file, "positions": positions
-            }),
-        )
-    }
-
-    pub fn release(&mut self, program: NativeProgram) -> Result<(), NativeCheckError> {
-        let _: Value = self.request("release", json!({ "snapshot": program.snapshot }))?;
-        Ok(())
-    }
-
-    fn request<T: DeserializeOwned>(
-        &mut self,
-        method: &str,
-        params: Value,
-    ) -> Result<T, NativeCheckError> {
-        self.next_id += 1;
-        let id = self.next_id;
-        let request_started = Instant::now();
-        let mut sdk_plugin_callbacks = 0_u64;
-        let mut sdk_plugin_batches = 0_u64;
-        let mut sdk_plugin_callback_time = Duration::ZERO;
-        self.write(
-            &json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }),
-            &format!("{method} request"),
-        )?;
-        loop {
-            let response = match self.messages.recv() {
-                Ok(Ok(response)) => response,
-                failure => {
-                    let _ = self.child.kill();
-                    let _ = self.child.wait();
-                    let tail = self
-                        .stderr
-                        .take()
-                        .and_then(|thread| thread.join().ok())
-                        .unwrap_or_default();
-                    return Err(NativeCheckError::Protocol(format!(
-                        "{method}: {failure:?}; compiler stderr: {}",
-                        String::from_utf8_lossy(&tail)
-                    )));
-                }
-            };
-            if let Some(method) = response.get("method").and_then(Value::as_str) {
-                let result = match method {
-                    "ohSdkPluginBatch" => {
-                        let callback_started = Instant::now();
-                        let requests = response.get("params").cloned().ok_or_else(|| {
-                            NativeCheckError::Protocol(
-                                "OH SDK plugin callback has no params".into(),
-                            )
-                        })?;
-                        let mut requests: Vec<NativeOhSdkPluginRequest> =
-                            serde_json::from_value(requests).map_err(|error| {
-                                NativeCheckError::Protocol(format!(
-                                    "{method}: invalid OH SDK plugin callback batch: {error}"
-                                ))
-                            })?;
-                        for request in &mut requests {
-                            request.session_id = self.sdk_plugin_session_scope;
-                        }
-                        let callback_count = requests.len() as u64;
-                        let host = self.sdk_plugin_host.as_ref().ok_or_else(|| {
-                            NativeCheckError::Protocol(
-                                "OH SDK plugin callback has no JavaScript host".into(),
-                            )
-                        })?;
-                        let response = serde_json::to_value(host.invoke_batch(requests)?).map_err(
-                            |error| {
-                                NativeCheckError::Protocol(format!(
-                                    "{method}: cannot serialize OH SDK plugin callback batch response: {error}"
-                                ))
-                            },
-                        )?;
-                        sdk_plugin_callbacks += callback_count;
-                        sdk_plugin_batches += 1;
-                        sdk_plugin_callback_time += callback_started.elapsed();
-                        response
-                    }
-                    "readFile" | "fileExists" => {
-                        let path = response
-                            .get("params")
-                            .and_then(Value::as_str)
-                            .map(Path::new);
-                        let source = path.and_then(|path| self.sources.get(path));
-                        let deleted = path.is_some_and(|path| self.deleted.contains(path));
-                        // Tagged callback responses distinguish bundled/disk
-                        // fallback from a definitively missing overlay file.
-                        match method {
-                            "readFile" if deleted => json!({"kind": "missing"}),
-                            "fileExists" if deleted => json!({"kind": "value", "value": false}),
-                            "readFile" => source.map_or_else(
-                                || json!({"kind": "useOS"}),
-                                |text| json!({"kind": "value", "value": &**text}),
-                            ),
-                            "fileExists" => source.map_or_else(
-                                || json!({"kind": "useOS"}),
-                                |_| json!({"kind": "value", "value": true}),
-                            ),
-                            _ => unreachable!(),
-                        }
-                    }
-                    _ => {
-                        return Err(NativeCheckError::Protocol(format!(
-                            "unexpected callback {method}"
-                        )));
-                    }
-                };
-                self.write(
-                    &json!({"jsonrpc": "2.0", "id": response["id"], "result": result}),
-                    &format!("{method} callback response"),
-                )?;
-                continue;
-            }
-            if response.get("id").and_then(Value::as_u64) != Some(id) {
-                return Err(NativeCheckError::Protocol("mismatched response id".into()));
-            }
-            if let Some(error) = response.get("error") {
-                return Err(NativeCheckError::Protocol(format!("{method}: {error}")));
-            }
-            let result = response
-                .get("result")
-                .ok_or_else(|| NativeCheckError::Protocol("missing response result".into()))?;
-            tracing::info!(
-                request = method,
-                elapsed_ms = request_started.elapsed().as_millis(),
-                sdk_plugin_callbacks,
-                sdk_plugin_batches,
-                sdk_plugin_callback_ms = sdk_plugin_callback_time.as_millis(),
-                "native tsrs request completed"
-            );
-            return serde_json::from_value(result.clone()).map_err(|error| {
-                NativeCheckError::Protocol(format!(
-                    "{method}: invalid compiler response payload: {error}"
-                ))
-            });
-        }
-    }
-
-    fn write(&mut self, message: &Value, phase: &str) -> Result<(), NativeCheckError> {
-        let bytes = serde_json::to_vec(message).map_err(|error| {
-            NativeCheckError::Protocol(format!(
-                "{phase}: cannot serialize protocol message: {error}"
-            ))
-        })?;
-        let input = self
-            .input
-            .as_mut()
-            .ok_or_else(|| NativeCheckError::Protocol("closed session".into()))?;
-        write!(input, "Content-Length: {}\r\n\r\n", bytes.len())?;
-        input.write_all(&bytes)?;
-        input.flush()?;
-        Ok(())
+        Ok(program
+            .types_at_positions(&options::CompilerPaths::one(file)?, positions)?
+            .into_iter()
+            .map(Some)
+            .collect())
     }
 }
 
-struct NativeMessageReader {
-    output: BufReader<ChildStdout>,
-}
-
-impl NativeMessageReader {
-    fn read(&mut self) -> Result<Value, NativeCheckError> {
-        let mut length = None;
-        let mut header_bytes = 0;
-        loop {
-            let mut line = String::new();
-            let read = self.output.read_line(&mut line)?;
-            if read == 0 {
-                return Err(NativeCheckError::Protocol(
-                    "compiler closed the API stream before responding".into(),
-                ));
-            }
-            header_bytes += read;
-            if header_bytes > 8192 {
-                return Err(NativeCheckError::Protocol("oversized API header".into()));
-            }
-            if line == "\r\n" {
-                break;
-            }
-            if let Some(value) = line.strip_prefix("Content-Length:") {
-                length =
-                    Some(value.trim().parse::<usize>().map_err(|_| {
-                        NativeCheckError::Protocol("invalid Content-Length".into())
-                    })?);
-            }
+impl From<tsrs_api::embedded::Diagnostic> for NativeDiagnostic {
+    fn from(d: tsrs_api::embedded::Diagnostic) -> Self {
+        Self {
+            file_name: d.file_name,
+            pos: d.pos,
+            end: d.end,
+            code: d.code,
+            category: d.category,
+            source: d.source,
+            text: d.text,
+            start_position: d.start_position.map(Into::into),
+            end_position: d.end_position.map(Into::into),
+            message_chain: d.message_chain.into_iter().map(Into::into).collect(),
+            related_information: d.related_information.into_iter().map(Into::into).collect(),
         }
-        let length = length
-            .filter(|length| *length <= 64 * 1024 * 1024)
-            .ok_or_else(|| {
-                NativeCheckError::Protocol("missing or oversized Content-Length".into())
-            })?;
-        let mut bytes = vec![0; length];
-        self.output.read_exact(&mut bytes)?;
-        Ok(serde_json::from_slice(&bytes)?)
     }
 }
-
-impl Drop for NativeTypeSession {
-    fn drop(&mut self) {
-        drop(self.input.take());
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        if let Some(reader) = self.reader.take() {
-            let _ = reader.join();
-        }
-        if let Some(stderr) = self.stderr.take() {
-            let _ = stderr.join();
+impl From<tsrs_api::embedded::DiagnosticPosition> for DiagnosticPosition {
+    fn from(p: tsrs_api::embedded::DiagnosticPosition) -> Self {
+        Self {
+            line: p.line,
+            character: p.character,
         }
     }
 }

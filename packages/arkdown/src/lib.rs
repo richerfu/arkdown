@@ -54,7 +54,6 @@ fn initialize_async_runtime() {
 
 mod hvigor_plugin_plan;
 mod js_callback;
-mod package_layout;
 mod plugin_module;
 mod runtime_observe;
 
@@ -71,7 +70,6 @@ use napi_derive::napi;
 use rustc_hash::FxHashMap;
 
 use js_callback::{MaybeAsyncJsCallback, MaybeAsyncJsCallbackExt, MaybeAsyncJsReturn};
-use package_layout::NapiPackageLayout;
 
 use rolldown_common::{
   side_effects::HookSideEffects, EmittedAsset, EmittedChunk, LogWithoutPlugin, ModuleDefFormat,
@@ -142,7 +140,7 @@ impl NapiSdkPluginHost {
     requests: Vec<NativeOhSdkPluginRequest>,
   ) -> std::result::Result<Vec<NativeOhSdkPluginResponse>, NativeCheckError> {
     let request = serde_json::to_string(&requests).map_err(|error| {
-      NativeCheckError::Protocol(format!(
+      NativeCheckError::Compiler(format!(
         "cannot serialize OH SDK plugin request batch for JavaScript: {error}"
       ))
     })?;
@@ -157,20 +155,20 @@ impl NapiSdkPluginHost {
       },
     );
     if status != Status::Ok {
-      return Err(NativeCheckError::Protocol(format!(
+      return Err(NativeCheckError::Compiler(format!(
         "failed to schedule OH SDK plugin callback batch: {status:?}"
       )));
     }
     let response = receiver.recv().map_err(|error| {
-      NativeCheckError::Protocol(format!(
+      NativeCheckError::Compiler(format!(
         "OH SDK plugin callback batch did not respond: {error}"
       ))
     })?;
     let response = response.map_err(|error| {
-      NativeCheckError::Protocol(format!("OH SDK plugin callback batch threw: {error}"))
+      NativeCheckError::Compiler(format!("OH SDK plugin callback batch threw: {error}"))
     })?;
     serde_json::from_str(&response).map_err(|error| {
-      NativeCheckError::Protocol(format!(
+      NativeCheckError::Compiler(format!(
         "invalid OH SDK plugin batch response from JavaScript: {error}"
       ))
     })
@@ -187,7 +185,7 @@ impl NativeOhSdkPluginHost for NapiSdkPluginHost {
       .into_iter()
       .next()
       .ok_or_else(|| {
-        NativeCheckError::Protocol("OH SDK plugin callback returned no response".into())
+        NativeCheckError::Compiler("OH SDK plugin callback returned no response".into())
       })
   }
 
@@ -221,7 +219,6 @@ pub fn check<'a>(
   config: CheckConfig,
   sdk_plugin_dispatch: Function<'a, (String,), String>,
 ) -> napi::Result<Object<'a>> {
-  let tsrs_executable = NapiPackageLayout::from_env(&env)?.packaged_tsrs_executable()?;
   let sdk_plugin_host = Some(NapiSdkPluginHost::from_dispatch(sdk_plugin_dispatch)?);
   let args = arkdown_build::check::CheckRequest {
     target: config.target.unwrap_or_else(|| "hap".to_string()),
@@ -229,7 +226,7 @@ pub fn check<'a>(
     project: config.project.map(PathBuf::from),
     is_crossplatform: config.is_crossplatform.unwrap_or(false),
     ignore_crossplatform_check: config.ignore_crossplatform_check.unwrap_or(false),
-    tsrs_executable,
+
     sdk_plugin_host,
   };
   let raw_promise = napi::bindgen_prelude::execute_tokio_future(
@@ -2405,7 +2402,6 @@ pub fn build<'a>(
 ) -> napi::Result<Object<'a>> {
   runtime_observe::RuntimeObservability::install_build_safety_net(&config)
     .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-  let tsrs_executable = NapiPackageLayout::from_env(&env)?.packaged_tsrs_executable()?;
   let sdk_plugin_host = Some(NapiSdkPluginHost::from_dispatch(sdk_plugin_dispatch)?);
 
   // 1. Wrap JS plugins synchronously (Env + Array are not Send).
@@ -2526,7 +2522,7 @@ pub fn build<'a>(
     skip_checker: skip_checker.unwrap_or(false),
     cache: cache.unwrap_or(true),
     node_executable: node_executable.map(std::path::PathBuf::from),
-    tsrs_executable,
+
     sdk_plugin_host,
   };
 
@@ -2597,7 +2593,6 @@ struct PackageBuildArgs {
   skip_checker: bool,
   cache: bool,
   node_executable: Option<std::path::PathBuf>,
-  tsrs_executable: Option<std::path::PathBuf>,
   sdk_plugin_host: Option<Arc<dyn NativeOhSdkPluginHost>>,
 }
 
@@ -2664,7 +2659,6 @@ async fn run_build(
     hvigor_properties: Default::default(),
     parameter_file_override: None,
     node_executable: package_args.node_executable,
-    tsrs_executable: package_args.tsrs_executable,
     sdk_plugin_host: package_args.sdk_plugin_host,
     hvigor_cache_dir: Some(project_path.join(".hvigor")),
   };

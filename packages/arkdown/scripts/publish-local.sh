@@ -80,9 +80,8 @@ if [[ $DRY_RUN -eq 0 ]]; then
   npm whoami --registry "$REGISTRY" >/dev/null
 fi
 
-echo "Building the pinned native tsrs distribution..."
-TSRS_DIST="$(node "$PACKAGE_DIR/scripts/build-tsrs-dist.mjs")"
-echo "Using native tsrs distribution: $TSRS_DIST"
+echo "Verifying the pinned compiler crates..."
+node "$PACKAGE_DIR/scripts/compiler-source.mjs" --verify
 
 export XWIN_CACHE_DIR="${XWIN_CACHE_DIR:-$PACKAGE_DIR/.cache/cargo-xwin}"
 mkdir -p "$XWIN_CACHE_DIR"
@@ -170,9 +169,7 @@ fi
 
 cd "$PACKAGE_DIR"
 pnpm exec napi pre-publish --no-gh-release -t npm --skip-optional-publish
-node "$PACKAGE_DIR/scripts/attach-tsrs-dist.mjs" \
-  "$TSRS_DIST" \
-  "$PACKAGE_DIR/npm"
+node "$PACKAGE_DIR/scripts/compiler-source.mjs" --package "$PACKAGE_DIR/npm"
 
 VERSION="$(node -p "require('./package.json').version")"
 if [[ "$VERSION" == *-* ]]; then

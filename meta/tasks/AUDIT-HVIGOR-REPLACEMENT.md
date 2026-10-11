@@ -1,6 +1,6 @@
 # Hvigor 替换全链路审计
 
-2026-10-11 更新：当前 checker 已迁移为 tsrs 原生 snapshot API，固定依赖是 `third_party/tsrs`，
+2026-10-11 更新：当前 checker 已迁移为进程内 tsrs Rust crate snapshot API，固定依赖是 `third_party/tsrs`，
 旧 Go 编译器和分发路径已删除。当前迁移验证见 [迁移记录](ARKTS11-NATIVE-TYPESCRIPT.md)。
 以下 TSGO/Go 提交、真实工程耗时和产物对照属于迁移前历史记录，不代表 tsrs 已通过同样的整包验证。
 

@@ -252,7 +252,6 @@ impl SelfConsistencyOracle {
         parameter_file_override: None,
         build_version: None,
         node_executable: None,
-        tsrs_executable: Some(packaged_tsrs_executable()),
         sdk_plugin_host: Some(Arc::new(UnavailableTestSdkPluginHost)),
         hvigor_cache_dir: None,
         hvigor_properties: Default::default(),
@@ -513,25 +512,6 @@ fn repo_root() -> PathBuf {
     .parent()
     .expect("packages/ -> workspace root")
     .to_path_buf()
-}
-
-fn packaged_tsrs_executable() -> PathBuf {
-  let (platform, executable) = match (std::env::consts::OS, std::env::consts::ARCH) {
-    ("macos", "aarch64") => ("darwin-arm64", "tsrs"),
-    ("linux", "x86_64") => ("linux-x64-gnu", "tsrs"),
-    ("windows", "x86_64") => ("win32-x64-msvc", "tsrs.exe"),
-    (os, arch) => panic!("arkdown has no native TypeScript platform package for {os}/{arch}"),
-  };
-  let path = repo_root()
-    .join("packages/arkdown/npm")
-    .join(platform)
-    .join(executable);
-  assert!(
-    path.is_file(),
-    "native TypeScript platform artifact is missing: {}",
-    path.display()
-  );
-  path
 }
 
 /// Copy the fixture at `src` into a fresh temporary directory, skipping

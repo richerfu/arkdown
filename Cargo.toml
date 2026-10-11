@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+exclude = ["third_party/tsrs"]
 members = [
     "crates/arkdown-core",
     "crates/arkdown-path",
@@ -27,6 +28,9 @@ members = [
 ]
 
 [workspace.dependencies]
+tsrs_api = { path = "third_party/tsrs/crates/tsrs_api" }
+tsrs_core = { path = "third_party/tsrs/crates/tsrs_core" }
+tsrs_vfs = { path = "third_party/tsrs/crates/tsrs_vfs" }
 # Workspace crates
 arkdown = { path = "crates/arkdown" }
 arkdown-abc = { path = "crates/arkdown-abc" }

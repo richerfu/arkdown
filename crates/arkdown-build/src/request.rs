@@ -351,12 +351,6 @@ pub struct BuildRequest {
     /// Node executable supplied by the same-process JavaScript runtime.
     pub node_executable: Option<PathBuf>,
 
-    /// Native ArkTS TypeScript service shipped beside the platform N-API
-    /// binding. The JavaScript entry does not discover or execute this binary;
-    /// the N-API service resolves its own package layout and Rust owns the
-    /// compiler process lifecycle.
-    pub tsrs_executable: Option<PathBuf>,
-
     /// Same-process JavaScript host for source-owned SDK CommonJS checkers.
     /// Rust and tsrs retain all build and type-check orchestration.
     pub sdk_plugin_host: Option<Arc<dyn NativeOhSdkPluginHost>>,

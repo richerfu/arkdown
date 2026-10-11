@@ -258,7 +258,6 @@ impl BuildCoordinator {
                     module_package_resolution.as_ref(),
                     component_metadata,
                 )
-                .with_tsrs_executable(args.tsrs_executable.as_deref())
                 .with_sdk_plugin_host(args.sdk_plugin_host.clone())
                 .with_compile_mode(&loader_json.compile_mode)
                 .with_sdk_plugin_project_config(&share.project_config)

@@ -1,5 +1,4 @@
-//! Real native TypeScript check application regression. Uses the native tsrs
-//! executable shipped in arkdown's current platform package and the configured
+//! In-process tsrs check application regression. Uses linked compiler crates and the configured
 //! OpenHarmony SDK.
 
 use std::fs;
@@ -58,7 +57,6 @@ fn check_reports_native_typescript_semantic_diagnostics() {
         project: Some(temp.path().to_path_buf()),
         is_crossplatform: false,
         ignore_crossplatform_check: false,
-        tsrs_executable: Some(packaged_tsrs_executable()),
         sdk_plugin_host: sdk_plugin_host(),
     })
     .execute()
@@ -84,7 +82,6 @@ fn check_defaults_to_native_typescript_without_a_node_runtime() {
         project: Some(fixture.clone()),
         is_crossplatform: false,
         ignore_crossplatform_check: false,
-        tsrs_executable: Some(packaged_tsrs_executable()),
         sdk_plugin_host: sdk_plugin_host(),
     })
     .execute()
@@ -94,7 +91,7 @@ fn check_defaults_to_native_typescript_without_a_node_runtime() {
 #[test]
 fn check_uses_module_target_and_its_source_owned_standard_library() {
     // ets_checker.ts::getTargetESVersionLib pairs ES2017 with ES2020. A
-    // module-level override must affect the Go program, not only OXC emit.
+    // module-level override must affect the tsrs program, not only OXC emit.
     for target in ["ES2017", "ES2021"] {
         let temp = tempfile::tempdir().expect("module target fixture");
         copy_fixture(&repo_root().join("tests/fixtures/minimal-hap"), temp.path()).unwrap();
@@ -115,7 +112,6 @@ fn check_uses_module_target_and_its_source_owned_standard_library() {
             project: Some(temp.path().to_path_buf()),
             is_crossplatform: false,
             ignore_crossplatform_check: false,
-            tsrs_executable: Some(packaged_tsrs_executable()),
             sdk_plugin_host: sdk_plugin_host(),
         })
         .execute();
@@ -165,7 +161,6 @@ fn check_applies_source_owned_flow_limit_and_invalid_range_default() {
             project: Some(temp.path().to_path_buf()),
             is_crossplatform: false,
             ignore_crossplatform_check: false,
-            tsrs_executable: Some(packaged_tsrs_executable()),
             sdk_plugin_host: sdk_plugin_host(),
         })
         .execute();
@@ -188,25 +183,6 @@ fn repo_root() -> PathBuf {
         .parent()
         .expect("repository root")
         .to_path_buf()
-}
-
-fn packaged_tsrs_executable() -> PathBuf {
-    let (platform, executable) = match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("macos", "aarch64") => ("darwin-arm64", "tsrs"),
-        ("linux", "x86_64") => ("linux-x64-gnu", "tsrs"),
-        ("windows", "x86_64") => ("win32-x64-msvc", "tsrs.exe"),
-        (os, arch) => panic!("arkdown has no native TypeScript platform package for {os}/{arch}"),
-    };
-    let path = repo_root()
-        .join("packages/arkdown/npm")
-        .join(platform)
-        .join(executable);
-    assert!(
-        path.is_file(),
-        "native TypeScript platform artifact is missing: {}",
-        path.display()
-    );
-    path
 }
 
 fn prepend_entry_import(project: &Path, specifier: &str) {
