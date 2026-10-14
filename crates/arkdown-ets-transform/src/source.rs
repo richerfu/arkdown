@@ -317,8 +317,14 @@ impl TransformSourceSnapshot {
     }
 
     /// Original module bytes, before any checker preprocessing or transform overlay.
-    pub fn module_source_text(&self, path: &Path) -> Option<Arc<str>> {
-        self.source_inventory.as_ref()?.source_text(path)
+    pub fn module_source_text(
+        &self,
+        path: &Path,
+    ) -> Result<Option<Arc<str>>, arkdown_core::SourceReadError> {
+        match &self.source_inventory {
+            Some(inventory) => inventory.source_text(path),
+            None => Ok(None),
+        }
     }
 
     /// Pre-index lexical path aliases while the build snapshot is being

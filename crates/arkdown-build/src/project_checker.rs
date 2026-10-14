@@ -561,8 +561,8 @@ impl<'a> ProjectSemanticChecker<'a> {
         self.source_store = Some(source_store);
         self.sdk_declarations = roots
             .iter()
-            .flat_map(|root| source_store.text_sources_under(root))
-            .map(|(path, _)| path.to_path_buf())
+            .flat_map(|root| source_store.source_files_under(root))
+            .map(|file| file.path.clone())
             .filter(|path| {
                 path.file_name()
                     .and_then(|name| name.to_str())
@@ -643,22 +643,14 @@ impl<'a> ProjectSemanticChecker<'a> {
         roots.extend(self.builtin_declarations.iter().cloned());
         roots.sort();
         roots.dedup();
-        let sources = self
-            .source_store
-            .map(|store| {
-                store
-                    .source_files()
-                    .into_iter()
-                    .filter_map(|file| {
-                        if let Some(SourceContent::Text(text)) = file.cached_content() {
-                            Some((file.path.clone(), Arc::clone(text)))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let mut sources = BTreeMap::new();
+        if let Some(store) = self.source_store {
+            for file in store.source_files() {
+                if let SourceContent::Text(text) = file.cached_content()? {
+                    sources.insert(file.path.clone(), text);
+                }
+            }
+        }
         let prepared = PreparedSemanticCheck {
             roots,
             options,
@@ -884,16 +876,17 @@ impl<'a> ProjectSemanticChecker<'a> {
         let directory = loader.join("declarations");
         if let Some(store) = self.source_store {
             self.builtin_declarations = store
-                .text_sources_under(&directory)
+                .source_files_under(&directory)
                 .into_iter()
-                .filter(|(path, _)| {
+                .map(|file| file.path.as_path())
+                .filter(|path| {
                     path.parent() == Some(directory.as_path())
                         && path
                             .file_name()
                             .and_then(|name| name.to_str())
                             .is_some_and(|name| name.ends_with(".d.ts"))
                 })
-                .map(|(path, _)| path.to_path_buf())
+                .map(Path::to_path_buf)
                 .collect();
         }
         self
@@ -1676,9 +1669,9 @@ mod tests {
             .clone();
         let snapshot_source = match store
             .source_by_path(&snapshot_file)
-            .and_then(|file| file.cached_content())
+            .map(|file| file.cached_content().unwrap())
         {
-            Some(SourceContent::Text(source)) => Arc::clone(source),
+            Some(SourceContent::Text(source)) => source,
             _ => panic!("fixture source must be captured as text"),
         };
         let sources = BTreeMap::from([(snapshot_file.clone(), snapshot_source)]);

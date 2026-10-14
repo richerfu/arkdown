@@ -18,16 +18,16 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
-use std::io::{Error, ErrorKind};
+use std::io::Error;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::UNIX_EPOCH;
 
 use arkdown_path::{canonicalize_or_owned, lexical_normalize, HvigorSourceFileFilter};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use arkdown_core::SourceFileId;
+use arkdown_core::{SourceFileId, SourceReadError};
 
 /// Whether `ext` (without the leading dot) belongs to a source-inventory
 /// file.
@@ -101,13 +101,19 @@ pub struct SourceFile {
     /// the immutable source record avoids a second `stat` in plugin hooks.
     pub modified_millis: Option<u64>,
     /// Content captured during session startup.
-    content: Option<SourceContent>,
+    content: Arc<RwLock<Option<SourceContent>>>,
 }
 
 impl SourceFile {
     /// Return the content captured by the startup inventory.
-    pub fn cached_content(&self) -> Option<&SourceContent> {
-        self.content.as_ref()
+    pub fn cached_content(&self) -> Result<SourceContent, SourceReadError> {
+        self.content
+            .read()
+            .expect("source content lock poisoned")
+            .clone()
+            .ok_or_else(|| SourceReadError::Released {
+                path: self.path.clone(),
+            })
     }
 }
 
@@ -333,15 +339,17 @@ impl arkdown_core::SourceInventory for SourceStore {
             })
     }
 
-    fn source_text(&self, path: &Path) -> Option<Arc<str>> {
-        match self
-            .files
-            .get(self.canonical_path(path)?)?
-            .cached_content()?
-        {
-            SourceContent::Text(text) => Some(Arc::clone(text)),
+    fn source_text(&self, path: &Path) -> Result<Option<Arc<str>>, SourceReadError> {
+        let Some(path) = self.canonical_path(path) else {
+            return Ok(None);
+        };
+        let Some(file) = self.files.get(path) else {
+            return Ok(None);
+        };
+        Ok(match file.cached_content()? {
+            SourceContent::Text(text) => Some(text),
             SourceContent::Bytes(_) => None,
-        }
+        })
     }
 }
 
@@ -376,6 +384,37 @@ impl SourceInventoryPaths {
 }
 
 impl SourceStore {
+    /// Retire captured text after the final one-shot consumer. Identity,
+    /// fingerprints and inventories remain available; later reads return
+    /// SourceReadError::Released, never a new filesystem read.
+    pub fn release_texts(&self) {
+        let mut released_bytes = 0usize;
+        let mut leased_bytes = 0usize;
+        for file in self.files.values() {
+            let mut content = file.content.write().expect("source content lock poisoned");
+            if let Some(SourceContent::Text(text)) = content.as_ref() {
+                released_bytes += text.len();
+                if Arc::strong_count(text) > 1 {
+                    leased_bytes += text.len();
+                }
+                *content = None;
+            }
+        }
+        tracing::debug!(released_bytes, leased_bytes, "source store texts released");
+    }
+
+    /// Source identities below a captured root, without acquiring text leases.
+    pub fn source_files_under(&self, root: &Path) -> Vec<&SourceFile> {
+        let root = self.lookup_path(root);
+        let mut files = self
+            .files
+            .values()
+            .filter(|file| file.path.starts_with(&root))
+            .collect::<Vec<_>>();
+        files.sort_unstable_by(|left, right| left.path.cmp(&right.path));
+        files
+    }
+
     /// Discover and fingerprint all source files in `source_roots`.
     ///
     /// This performs the initial scan and source reads at session startup.
@@ -535,7 +574,7 @@ impl SourceStore {
                     path,
                     fingerprint: SourceFingerprint { content_hash, size },
                     modified_millis,
-                    content: Some(SourceContent::Text(content)),
+                    content: Arc::new(RwLock::new(Some(SourceContent::Text(content)))),
                 },
             );
         }
@@ -570,21 +609,17 @@ impl SourceStore {
     }
 
     /// Return startup-captured text sources below `root` in path order.
-    pub fn text_sources_under(&self, root: &Path) -> Vec<(&Path, Arc<str>)> {
-        let root = self.lookup_path(root);
-        let mut sources = self
-            .files
-            .values()
-            .filter(|file| file.path.starts_with(&root))
-            .filter_map(|file| match file.cached_content() {
-                Some(SourceContent::Text(content)) => {
-                    Some((file.path.as_path(), Arc::clone(content)))
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        sources.sort_by(|left, right| left.0.cmp(right.0));
-        sources
+    pub fn text_sources_under(
+        &self,
+        root: &Path,
+    ) -> Result<Vec<(&Path, Arc<str>)>, SourceReadError> {
+        let mut sources = Vec::new();
+        for file in self.source_files_under(root) {
+            if let SourceContent::Text(content) = file.cached_content()? {
+                sources.push((file.path.as_path(), content));
+            }
+        }
+        Ok(sources)
     }
 
     /// Return the source file entry for `path`, if it's in the store.
@@ -698,46 +733,25 @@ impl SourceStore {
     }
 
     /// Return the startup-captured text content of a source file.
-    pub fn read_text(&self, path: &std::path::Path) -> Result<Arc<str>, std::io::Error> {
-        let path = self.lookup_path(path);
-        match self
-            .files
-            .get(path.as_ref())
-            .and_then(SourceFile::cached_content)
-        {
-            Some(SourceContent::Text(content)) => Ok(Arc::clone(content)),
-            Some(SourceContent::Bytes(_)) => Err(Error::new(
-                ErrorKind::InvalidData,
-                format!("source is not UTF-8 text: {}", path.display()),
-            )),
-            None => Err(Error::new(
-                ErrorKind::NotFound,
-                format!(
-                    "source was not captured at session startup: {}",
-                    path.display()
-                ),
-            )),
+    pub fn read_text(&self, path: &Path) -> Result<Arc<str>, SourceReadError> {
+        let file = self
+            .source_by_path(path)
+            .ok_or_else(|| SourceReadError::NotCaptured { path: path.into() })?;
+        match file.cached_content()? {
+            SourceContent::Text(content) => Ok(content),
+            SourceContent::Bytes(_) => Err(SourceReadError::NotText { path: path.into() }),
         }
     }
 
-    /// Read the raw bytes of a source file.
-    pub fn read_bytes(&self, path: &std::path::Path) -> Result<Arc<Vec<u8>>, std::io::Error> {
-        let path = self.lookup_path(path);
-        match self
-            .files
-            .get(path.as_ref())
-            .and_then(SourceFile::cached_content)
-        {
-            Some(SourceContent::Bytes(content)) => Ok(Arc::clone(content)),
-            Some(SourceContent::Text(content)) => Ok(Arc::new(content.as_bytes().to_vec())),
-            None => Err(Error::new(
-                ErrorKind::NotFound,
-                format!(
-                    "source was not captured at session startup: {}",
-                    path.display()
-                ),
-            )),
-        }
+    /// Read captured bytes; retirement has the same typed failure as read_text.
+    pub fn read_bytes(&self, path: &Path) -> Result<Arc<Vec<u8>>, SourceReadError> {
+        let file = self
+            .source_by_path(path)
+            .ok_or_else(|| SourceReadError::NotCaptured { path: path.into() })?;
+        Ok(match file.cached_content()? {
+            SourceContent::Bytes(content) => content,
+            SourceContent::Text(content) => Arc::new(content.as_bytes().to_vec()),
+        })
     }
 
     /// Return the fingerprint for a source file.
@@ -1032,7 +1046,7 @@ mod tests {
             Some(canonical.as_path())
         );
         assert_eq!(
-            store.source_text(&canonical).unwrap().as_ref(),
+            store.source_text(&canonical).unwrap().unwrap().as_ref(),
             "export const value = 1;\r\n"
         );
     }

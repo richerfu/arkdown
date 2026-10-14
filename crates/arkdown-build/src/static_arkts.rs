@@ -1233,9 +1233,9 @@ impl<'a> StaticArktsDriverConfigBuilder<'a> {
                     .module_context
                     .session
                     .source_store
-                    .text_sources_under(root)
+                    .source_files_under(root)
             })
-            .map(|(path, _)| path.to_path_buf())
+            .map(|file| file.path.clone())
             .collect::<Vec<_>>();
         if let Some(entry_file) = self
             .input

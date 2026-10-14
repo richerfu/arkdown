@@ -133,7 +133,7 @@ impl EtsTransformPlugin {
         let plan = self.plan.load();
         Ok(plan
             .sources
-            .module_source_text(path)
+            .module_source_text(path)?
             .map(|source| HookLoadOutput {
                 code: source.as_ref().into(),
                 ..Default::default()

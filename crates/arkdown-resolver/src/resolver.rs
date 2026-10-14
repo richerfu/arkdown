@@ -1864,8 +1864,11 @@ mod tests {
         fn canonical_path(&self, path: &Path) -> Option<&Path> {
             self.0.get(path).map(PathBuf::as_path)
         }
-        fn source_text(&self, _path: &Path) -> Option<Arc<str>> {
-            None
+        fn source_text(
+            &self,
+            _path: &Path,
+        ) -> Result<Option<Arc<str>>, arkdown_core::SourceReadError> {
+            Ok(None)
         }
     }
 
