@@ -74,13 +74,13 @@ oxc_minifier = { git = "https://github.com/ohos-rs/oxc", rev = "3f2b4b7d5338c100
 oxc_resolver = "11.21.3"
 
 # Rolldown
-rolldown = { git = "https://github.com/ohos-rs/rolldown", rev = "3aac1451ad00e255acfaaecb5c94fc2d52c31c03", default-features = false, features = ["experimental"] }
-rolldown_common = { git = "https://github.com/ohos-rs/rolldown", rev = "3aac1451ad00e255acfaaecb5c94fc2d52c31c03" }
-rolldown_plugin = { git = "https://github.com/ohos-rs/rolldown", rev = "3aac1451ad00e255acfaaecb5c94fc2d52c31c03" }
-rolldown_sourcemap = { git = "https://github.com/ohos-rs/rolldown", rev = "3aac1451ad00e255acfaaecb5c94fc2d52c31c03" }
-rolldown_utils = { git = "https://github.com/ohos-rs/rolldown", rev = "3aac1451ad00e255acfaaecb5c94fc2d52c31c03" }
-rolldown_error = { git = "https://github.com/ohos-rs/rolldown", rev = "3aac1451ad00e255acfaaecb5c94fc2d52c31c03" }
-string_wizard = { git = "https://github.com/ohos-rs/rolldown", rev = "3aac1451ad00e255acfaaecb5c94fc2d52c31c03", features = ["sourcemap"] }
+rolldown = { git = "https://github.com/ohos-rs/rolldown", rev = "63112ceaa35eb24750a09d0ce3ae6f2f8074ed42", default-features = false, features = ["experimental"] }
+rolldown_common = { git = "https://github.com/ohos-rs/rolldown", rev = "63112ceaa35eb24750a09d0ce3ae6f2f8074ed42" }
+rolldown_plugin = { git = "https://github.com/ohos-rs/rolldown", rev = "63112ceaa35eb24750a09d0ce3ae6f2f8074ed42" }
+rolldown_sourcemap = { git = "https://github.com/ohos-rs/rolldown", rev = "63112ceaa35eb24750a09d0ce3ae6f2f8074ed42" }
+rolldown_utils = { git = "https://github.com/ohos-rs/rolldown", rev = "63112ceaa35eb24750a09d0ce3ae6f2f8074ed42" }
+rolldown_error = { git = "https://github.com/ohos-rs/rolldown", rev = "63112ceaa35eb24750a09d0ce3ae6f2f8074ed42" }
+string_wizard = { git = "https://github.com/ohos-rs/rolldown", rev = "63112ceaa35eb24750a09d0ce3ae6f2f8074ed42", features = ["sourcemap"] }
 
 # NAPI-RS (Node.js native addon bridge — used by packages/arkdown)
 napi = { version = "3.9.1", features = [
