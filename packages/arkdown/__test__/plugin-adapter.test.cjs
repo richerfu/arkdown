@@ -227,6 +227,23 @@ exports.SyscapChecker = class {
   )
 })
 
+// Observe the stored representation without exposing production host internals.
+function trackSnapshotBuffers(t, text) {
+  const buffers = [], decoded = []
+  const from = Buffer.from, toString = Buffer.prototype.toString
+  t.mock.method(Buffer, 'from', function (value, ...args) {
+    const buffer = Reflect.apply(from, Buffer, [value, ...args])
+    if (value === text) buffers.push(buffer)
+    return buffer
+  })
+  t.mock.method(Buffer.prototype, 'toString', function (...args) {
+    const result = Reflect.apply(toString, this, args)
+    if (buffers.includes(this)) decoded.push(result)
+    return result
+  })
+  return { buffers, decoded }
+}
+
 test('SDK checker AST LRU reparses evicted sources and retains declarations and recent hits', (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'arkdown-sdk-lru-'))
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
@@ -263,7 +280,7 @@ exports.Checker = class {
 }
 `)
   const invoke = createSdkPluginHost()
-  const descriptor = (sourceId, fileName, source = '/* 😀 */ current') => ({
+  const descriptor = (sourceId, fileName, source = '/* 中文 😀 */ current') => ({
     sourceId, fileName, source, pos: 0, end: source.length, start: source.indexOf('current'),
   })
   const reference = (snapshot) => ({ ...snapshot, source: undefined })
@@ -274,6 +291,7 @@ exports.Checker = class {
     sessionId: 1, pluginId: 1, ...(config ? { path: plugin, functionName: 'Checker', className: 'Checker' } : {}), operation: 'syscap',
     args: [{ node, declaration: decl, projectConfigId: 1, ...(config ? { projectConfig: config } : {}) }],
   })
+  const { buffers, decoded } = trackSnapshotBuffers(t, app(2).source)
   const first = request(app(1), declaration, { etsLoaderPath: root })
   assert.equal(first.checkResult, true)
   request(app(2), tsDeclaration)
@@ -284,7 +302,10 @@ exports.Checker = class {
   const { creations } = require(typescriptRoot)
   assert.equal(creations.get('input1.ets'), 1)
   assert.equal(creations.get('input2.ets'), 1)
+  assert.equal(buffers.length, 1, 'LRU eviction encodes the evicted application snapshot')
+  assert.equal(buffers[0].length, Buffer.byteLength(app(2).source))
   const second = request(reference(app(2)))
+  assert.deepEqual(decoded, [app(2).source], 'decode UTF-8 once before reparsing at UTF-16 offsets')
   assert.equal(second.checkMessage, `input2.ets:${app(2).start}:${app(2).end}:current`)
   assert.equal(creations.get('input2.ets'), 2, 'evicted AST must be parsed from retained source text')
   assert.deepEqual(request(reference(app(2))), second)
@@ -305,7 +326,7 @@ exports.Checker = class {
 })
 
 
-function sdkBatchFixture(t) {
+function sdkBatchFixture(t, prefix = '') {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'arkdown-sdk-batch-'))
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   const tsRoot = path.join(root, 'node_modules', 'typescript')
@@ -317,12 +338,14 @@ exports.ScriptKind = { TS: 3, ETS: 99 }
 exports.ScriptTarget = { Latest: 99 }
 exports.createSourceFile = (fileName, text, target, parents) => {
   if (!parents) throw new Error('SDK nodes require parents')
+  if (typeof text !== 'string') throw new Error('parser needs a decoded string')
   exports.creations.set(fileName, (exports.creations.get(fileName) || 0) + 1)
   const sf = { fileName, pos: 0, end: text.length,
     getStart() { throw new Error('getStart on a non-candidate ancestor') } }
-  sf.child = { pos: 0, end: 4, parent: sf,
-    getStart() { exports.starts++; return 0 },
-    getText() { return 'name' }, getSourceFile() { return sf } }
+  const start = text.indexOf('name')
+  sf.child = { pos: start, end: start + 4, parent: sf,
+    getStart() { exports.starts++; return start },
+    getText() { return text.slice(start, start + 4) }, getSourceFile() { return sf } }
   return sf
 }
 exports.forEachChild = (node, visit) => { if (node.child) visit(node.child) }
@@ -330,12 +353,16 @@ exports.forEachChild = (node, visit) => { if (node.child) visit(node.child) }
   const plugin = path.join(root, 'checker.cjs')
   fs.writeFileSync(plugin, `
 exports.calls = []
+exports.nodes = []
+exports.value = () => ({ result: true, message: 'value' })
+exports.format = () => ({ result: true, message: 'format' })
 exports.configs = []
 exports.instances = 0
 exports.Checker = class {
   constructor() { exports.instances++ }
   check(node, declaration, config) {
     exports.configs.push(config)
+    exports.nodes.push([node.pos, node.end, node.getText(), declaration.pos, declaration.end, declaration.getText()])
     if (!node.parent || !declaration.parent) throw new Error('lost parent')
     const name = node.getSourceFile().fileName
     exports.calls.push(name)
@@ -351,14 +378,14 @@ exports.Throws = class {
 `)
   const dispatch = createSdkPluginDispatch()
   const invoke = (requests) => JSON.parse(dispatch(JSON.stringify(requests)))
-  const snapshot = (id, fileName, full = false) => ({ sourceId: id, fileName, pos: 0, end: 4, start: 0,
-    ...(full ? { source: 'name; // trailing comment' } : {}) })
+  const snapshot = (id, fileName, full = false) => ({ sourceId: id, fileName, pos: prefix.length, end: prefix.length + 4, start: prefix.length,
+    ...(full ? { source: prefix + 'name; // trailing comment' } : {}) })
   const request = (i, full = false) => ({ sessionId: 1, pluginId: 1, operation: 'syscap',
     ...(full ? { path: plugin, functionName: 'Checker', className: 'Checker' } : {}),
     args: [{ node: snapshot(i, `file${i}.ets`, full), declaration: snapshot(1000, 'api.d.ets', full),
       projectConfigId: 1, ...(full ? { projectConfig: { etsLoaderPath: root } } : {}) }],
   })
-  return { invoke, request, plugin, ts: require(tsRoot), calls: require(plugin).calls, configs: require(plugin).configs }
+  return { invoke, request, plugin, ts: require(tsRoot), calls: require(plugin).calls, configs: require(plugin).configs, nodes: require(plugin).nodes }
 }
 
 test('SDK compaction reparses application and declaration nodes from retained source IDs', (t) => {
@@ -370,20 +397,28 @@ test('SDK compaction reparses application and declaration nodes from retained so
     Object.defineProperty(process.versions, 'node', previousVersion)
   })
   t.mock.method(process, 'memoryUsage', () => ({ heapUsed: 40 << 20 }))
+  const prefix = '/* 中文 😀 */ '
+  const text = prefix + 'name; // trailing comment'
+  const { buffers, decoded } = trackSnapshotBuffers(t, text)
   for (const version of ['22.0.0', '18.17.0', '20.0.0']) {
     Object.defineProperty(process.versions, 'node', { ...previousVersion, value: version })
     const gcCalls = []
     global.gc = (...args) => gcCalls.push(args)
-    const { invoke, request, plugin, ts, configs } = sdkBatchFixture(t)
+    const { invoke, request, plugin, ts, configs, nodes } = sdkBatchFixture(t, prefix)
+    const encodedBefore = buffers.length, decodedBefore = decoded.length
     assert.deepEqual(invoke([{ sessionId: 1, operation: 'compactSession' }]), [{ found: true }])
     assert.deepEqual(gcCalls, [], 'an unknown session needs neither allocation nor collection')
     const original = invoke([request(1, true)])
     const [{ stats }] = invoke([{ sessionId: 1, operation: 'compactSession' }])
+    assert.equal(buffers.length - encodedBefore, 2, 'compact encodes application and declaration snapshots')
     assert.deepEqual([stats.parses, stats.reparses, stats.batches], [2, 0, 1])
     assert.ok(stats.committedBefore > 0 && stats.retainedCommitted > 0)
     assert.deepEqual(gcCalls, version.startsWith('22')
       ? [[{ type: 'major', execution: 'sync', flavor: 'last-resort' }]] : [[]])
     assert.deepEqual(invoke([request(1)]), original, 'sourceId-only callbacks retain node identity and text')
+    assert.deepEqual(decoded.slice(decodedBefore), [text, text])
+    assert.deepEqual(nodes, Array(2).fill([prefix.length, prefix.length + 4, 'name', prefix.length, prefix.length + 4, 'name']))
+    assert.equal(buffers.length - encodedBefore, 2, 'reparsing stores strings without encoding another copy')
     assert.equal(ts.creations.get('file1.ets'), 2)
     assert.equal(ts.creations.get('api.d.ets'), 2, 'declaration ASTs must also be rebuilt')
     assert.strictEqual(configs[1], configs[0], 'the registered project config survives compaction')
@@ -392,6 +427,30 @@ test('SDK compaction reparses application and declaration nodes from retained so
     assert.deepEqual([released.stats.parses, released.stats.reparses, released.stats.batches], [4, 2, 2])
     assert.deepEqual(gcCalls[1], gcCalls[0], 'release and compaction use the same reduce-memory policy')
   }
+})
+
+test('SDK source release rejects later snapshots but retains function plugins until session release', (t) => {
+  const { invoke, request, plugin } = sdkBatchFixture(t)
+  assert.deepEqual(invoke([{ sessionId: 1, operation: 'releaseSources' }]), [{ found: true }])
+  const functions = ['value', 'format'].map((operation, index) => ({
+    sessionId: 1, pluginId: index + 2, operation, args: [],
+  }))
+  const original = invoke(functions.map((req) => ({ ...req, path: plugin, functionName: req.operation })))
+  assert.ok(invoke([request(1, true)])[0].checkResult)
+  const [{ stats }] = invoke([{ sessionId: 1, operation: 'releaseSources' }])
+  assert.deepEqual([stats.parses, stats.reparses], [2, 0])
+  // Even a repeated full publication must not revive the released snapshots.
+  for (const full of [false, true]) {
+    const [failed] = invoke([request(1, full)])
+    assert.equal(failed.phase, 'invoke')
+    assert.match(failed.error, /SDK checker source 1:1: sources were released before strict diagnostics/)
+  }
+  assert.deepEqual(invoke(functions), original, 'registrations survive source release')
+  assert.deepEqual(original.map((r) => [r.result, r.message]), [[true, 'value'], [true, 'format']])
+  assert.equal(invoke([{ sessionId: 1, operation: 'compactSession' }])[0].found, true)
+  assert.equal(invoke([request(1)])[0].phase, 'invoke', 'compaction must not revive released sources')
+  assert.equal(invoke([{ sessionId: 1, operation: 'releaseSession' }])[0].found, true)
+  assert.deepEqual(invoke([{ sessionId: 1, operation: 'releaseSession' }]), [{ found: true }])
 })
 
 test('syscap batches group source IDs, prune before getStart, and retain the 64-entry LRU', (t) => {
