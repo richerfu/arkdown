@@ -20,8 +20,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::io::Error;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::UNIX_EPOCH;
+use std::time::{Instant, UNIX_EPOCH};
 
 use arkdown_path::{canonicalize_or_owned, lexical_normalize, HvigorSourceFileFilter};
 use rayon::prelude::*;
@@ -77,6 +78,20 @@ pub enum SourceContent {
     Bytes(Arc<Vec<u8>>),
 }
 
+#[derive(Debug)]
+enum SourceContentState {
+    Captured(SourceContent),
+    Evicted,
+    Released,
+}
+
+/// Text affected by a source-store lifecycle transition.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SourceTextCounts {
+    pub files: usize,
+    pub bytes: u64,
+}
+
 // ---------------------------------------------------------------------------
 // SourceFile
 // ---------------------------------------------------------------------------
@@ -100,20 +115,88 @@ pub struct SourceFile {
     /// Hvigor exposes this through `share.getCachedFileInfo()`. Keeping it on
     /// the immutable source record avoids a second `stat` in plugin hooks.
     pub modified_millis: Option<u64>,
-    /// Content captured during session startup.
-    content: Arc<RwLock<Option<SourceContent>>>,
+    /// Content frozen by the startup fingerprint, with explicit residency state.
+    content: Arc<RwLock<SourceContentState>>,
+    on_demand_reloads: Arc<AtomicUsize>,
 }
 
 impl SourceFile {
-    /// Return the content captured by the startup inventory.
+    /// Lease captured content, verifying a reload if evicted. Released content
+    /// never reloads, even when its file still exists on disk.
     pub fn cached_content(&self) -> Result<SourceContent, SourceReadError> {
-        self.content
-            .read()
-            .expect("source content lock poisoned")
-            .clone()
-            .ok_or_else(|| SourceReadError::Released {
+        let content = self.content.read().expect("source content lock poisoned");
+        match &*content {
+            SourceContentState::Captured(content) => return Ok(content.clone()),
+            SourceContentState::Released => {
+                return Err(SourceReadError::Released {
+                    path: self.path.clone(),
+                })
+            }
+            SourceContentState::Evicted => {}
+        }
+        drop(content);
+        let mut content = self.content.write().expect("source content lock poisoned");
+        if matches!(*content, SourceContentState::Evicted) {
+            self.restore_content(&mut content)?;
+            self.on_demand_reloads.fetch_add(1, Ordering::Relaxed);
+            tracing::debug!(path = %self.path.display(), bytes = self.fingerprint.size, "source text reloaded on demand");
+        }
+        match &*content {
+            SourceContentState::Captured(content) => Ok(content.clone()),
+            SourceContentState::Released => Err(SourceReadError::Released {
                 path: self.path.clone(),
-            })
+            }),
+            SourceContentState::Evicted => unreachable!("verified reload captures text"),
+        }
+    }
+
+    fn restore_content(&self, state: &mut SourceContentState) -> Result<(), SourceReadError> {
+        let bytes = std::fs::read(&self.path).map_err(|source| SourceReadError::ReloadIo {
+            path: self.path.clone(),
+            source,
+        })?;
+        let actual_size = bytes.len() as u64;
+        let actual_hash = format!("{:016x}", arkdown_core::fnv1a64(&bytes));
+        if actual_size != self.fingerprint.size || actual_hash != self.fingerprint.content_hash {
+            return Err(SourceReadError::SnapshotMismatch {
+                path: self.path.clone(),
+                expected_size: self.fingerprint.size,
+                actual_size,
+                expected_hash: self.fingerprint.content_hash.clone(),
+                actual_hash,
+            });
+        }
+        let text = String::from_utf8(bytes).map_err(|source| SourceReadError::ReloadIo {
+            path: self.path.clone(),
+            source: Error::new(std::io::ErrorKind::InvalidData, source),
+        })?;
+        *state = SourceContentState::Captured(SourceContent::Text(Arc::from(text)));
+        Ok(())
+    }
+
+    fn restore_evicted_text(&self) -> Result<Option<u64>, SourceReadError> {
+        let mut content = self.content.write().expect("source content lock poisoned");
+        if matches!(*content, SourceContentState::Evicted) {
+            self.restore_content(&mut content)?;
+            Ok(Some(self.fingerprint.size))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+impl arkdown_core::SourceTextHandle for SourceFile {
+    fn size_bytes(&self) -> u64 {
+        self.fingerprint.size
+    }
+
+    fn read_text(&self) -> Result<Arc<str>, SourceReadError> {
+        match self.cached_content()? {
+            SourceContent::Text(text) => Ok(text),
+            SourceContent::Bytes(_) => Err(SourceReadError::NotText {
+                path: self.path.clone(),
+            }),
+        }
     }
 }
 
@@ -241,8 +324,9 @@ impl WorkerSourceInventory {
 ///
 /// The `SourceStore` provides read-only access to all source files known to
 /// the build session. Content and fingerprints are captured together during
-/// `discover()`, so later transform and plugin stages never re-read a source
-/// through this store.
+/// `discover()`. Unleased texts may be evicted during a one-shot checker and
+/// reloaded with size/hash verification. The coordinator restores them before
+/// transform/plugin hooks, and permanently releases them after the final reader.
 ///
 /// # Upstream correspondence
 ///
@@ -272,6 +356,7 @@ pub struct SourceStore {
     inventory_roots: Arc<FxHashSet<PathBuf>>,
     /// Lexical caller roots mapped to their canonical startup identities.
     root_aliases: Arc<SourceRootAliases>,
+    on_demand_reloads: Arc<AtomicUsize>,
 }
 
 /// Component trie: longest-root matching visits the path once, independent of
@@ -384,20 +469,73 @@ impl SourceInventoryPaths {
 }
 
 impl SourceStore {
-    /// Retire captured text after the final one-shot consumer. Identity,
-    /// fingerprints and inventories remain available; later reads return
-    /// SourceReadError::Released, never a new filesystem read.
+    /// Evict only unleased texts after program creation has joined its readers.
+    /// Acquiring a lease clones the Arc under the same lock: a racing reader
+    /// either prevents eviction or observes Evicted and verifies a reload.
+    /// Existing external leases can only be cloned while strong_count > 1.
+    pub fn evict_unleased_texts(&self) -> SourceTextCounts {
+        let mut evicted = SourceTextCounts::default();
+        for file in self.files.values() {
+            let mut state = file.content.write().expect("source content lock poisoned");
+            if let SourceContentState::Captured(SourceContent::Text(text)) = &*state {
+                if Arc::strong_count(text) == 1 {
+                    evicted.files += 1;
+                    evicted.bytes += text.len() as u64;
+                    *state = SourceContentState::Evicted;
+                }
+            }
+        }
+        tracing::info!(
+            evicted_files = evicted.files,
+            evicted_bytes = evicted.bytes,
+            "source store unleased texts evicted"
+        );
+        evicted
+    }
+
+    /// Restore evicted text in parallel before bundling. Results are consumed
+    /// in path order so multiple reload failures produce a deterministic error.
+    /// Released texts stay released and are never reloaded by this operation.
+    pub fn restore_evicted_texts(&self) -> Result<SourceTextCounts, SourceReadError> {
+        let started = Instant::now();
+        let results = self
+            .source_files()
+            .par_iter()
+            .map(|file| file.restore_evicted_text())
+            .collect::<Vec<_>>();
+        let mut restored = SourceTextCounts::default();
+        for result in results {
+            if let Some(bytes) = result? {
+                restored.files += 1;
+                restored.bytes += bytes;
+            }
+        }
+        tracing::info!(
+            restored_files = restored.files,
+            restored_bytes = restored.bytes,
+            on_demand_reloads = self.on_demand_reloads.load(Ordering::Relaxed),
+            elapsed_ms = started.elapsed().as_millis(),
+            "source store evicted texts restored"
+        );
+        Ok(restored)
+    }
+
+    /// Permanently retire captured and evicted texts after the final one-shot
+    /// consumer. Identity, fingerprints, mtime and inventories remain available;
+    /// reads return SourceReadError::Released and bulk restore cannot revive them.
     pub fn release_texts(&self) {
         let mut released_bytes = 0usize;
         let mut leased_bytes = 0usize;
         for file in self.files.values() {
             let mut content = file.content.write().expect("source content lock poisoned");
-            if let Some(SourceContent::Text(text)) = content.as_ref() {
+            if let SourceContentState::Captured(SourceContent::Text(text)) = &*content {
                 released_bytes += text.len();
                 if Arc::strong_count(text) > 1 {
                     leased_bytes += text.len();
                 }
-                *content = None;
+                *content = SourceContentState::Released;
+            } else if matches!(*content, SourceContentState::Evicted) {
+                *content = SourceContentState::Released;
             }
         }
         tracing::debug!(released_bytes, leased_bytes, "source store texts released");
@@ -563,6 +701,7 @@ impl SourceStore {
             })
             .collect::<Vec<_>>();
         let mut files = FxHashMap::default();
+        let on_demand_reloads = Arc::new(AtomicUsize::new(0));
         for (index, (path, content)) in paths.into_iter().zip(contents).enumerate() {
             let (content, modified_millis) = content?;
             let size = content.len() as u64;
@@ -574,7 +713,10 @@ impl SourceStore {
                     path,
                     fingerprint: SourceFingerprint { content_hash, size },
                     modified_millis,
-                    content: Arc::new(RwLock::new(Some(SourceContent::Text(content)))),
+                    content: Arc::new(RwLock::new(SourceContentState::Captured(
+                        SourceContent::Text(content),
+                    ))),
+                    on_demand_reloads: Arc::clone(&on_demand_reloads),
                 },
             );
         }
@@ -589,6 +731,7 @@ impl SourceStore {
             workers: WorkerSourceInventory::default(),
             inventory_roots: Arc::new(inventory_roots.into_iter().collect()),
             root_aliases: Arc::new(SourceRootAliases::new(root_aliases)),
+            on_demand_reloads,
         })
     }
 
@@ -608,7 +751,8 @@ impl SourceStore {
             .any(|inventory_root| root.starts_with(inventory_root))
     }
 
-    /// Return startup-captured text sources below `root` in path order.
+    /// Lease fingerprint-frozen text below `root` in path order, verifying any
+    /// evicted source before returning it.
     pub fn text_sources_under(
         &self,
         root: &Path,
@@ -732,18 +876,16 @@ impl SourceStore {
         !Path::new(&swapped).exists()
     }
 
-    /// Return the startup-captured text content of a source file.
+    /// Read fingerprint-frozen text, verifying a reload when evicted. A released
+    /// source is a typed error; it never falls back to disk.
     pub fn read_text(&self, path: &Path) -> Result<Arc<str>, SourceReadError> {
         let file = self
             .source_by_path(path)
             .ok_or_else(|| SourceReadError::NotCaptured { path: path.into() })?;
-        match file.cached_content()? {
-            SourceContent::Text(content) => Ok(content),
-            SourceContent::Bytes(_) => Err(SourceReadError::NotText { path: path.into() }),
-        }
+        arkdown_core::SourceTextHandle::read_text(file)
     }
 
-    /// Read captured bytes; retirement has the same typed failure as read_text.
+    /// Read fingerprint-frozen bytes; eviction and retirement follow read_text.
     pub fn read_bytes(&self, path: &Path) -> Result<Arc<Vec<u8>>, SourceReadError> {
         let file = self
             .source_by_path(path)
@@ -851,7 +993,7 @@ mod tests {
     }
 
     #[test]
-    fn source_content_and_hash_are_frozen_at_session_startup() {
+    fn evicted_source_restores_identical_bytes_and_startup_metadata() {
         let temp = tempfile::tempdir().expect("tempdir");
         let source_dir = temp.path().join("entry/src/main/ets");
         std::fs::create_dir_all(&source_dir).expect("create source dir");
@@ -859,20 +1001,22 @@ mod tests {
         std::fs::write(&source, "export const value = 1;").expect("write source");
 
         let store = SourceStore::discover(std::slice::from_ref(&source_dir)).expect("discover");
-        let frozen_hash = store
-            .fingerprint(&source)
-            .expect("fingerprint")
-            .content_hash
-            .clone();
-        std::fs::write(&source, "export const value = 2;").expect("mutate source after startup");
+        let metadata = store.source_by_path(&source).unwrap().clone();
+        assert_eq!(store.evict_unleased_texts().files, 1);
 
         assert_eq!(
             store.read_text(&source).expect("cached source").as_ref(),
             "export const value = 1;"
         );
+        assert_eq!(store.evict_unleased_texts().files, 1);
+        assert_eq!(store.restore_evicted_texts().unwrap().files, 1);
+        let restored = store.source_by_path(&source).unwrap();
+        assert_eq!(restored.id, metadata.id);
+        assert_eq!(restored.modified_millis, metadata.modified_millis);
+        assert_eq!(restored.fingerprint, metadata.fingerprint);
         assert_eq!(
-            frozen_hash,
-            format!("{:016x}", arkdown_core::fnv1a64(b"export const value = 1;"))
+            store.read_text(&source).unwrap().as_ref(),
+            "export const value = 1;"
         );
     }
 

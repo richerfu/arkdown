@@ -57,3 +57,85 @@ fn retained_watch_snapshot_keeps_original_bytes_when_a_new_snapshot_is_discovere
     new.release_texts();
     assert_eq!(old.read_text(&source).unwrap().as_ref(), "first");
 }
+
+#[test]
+fn eviction_keeps_leased_texts_and_verified_reads_reject_changed_bytes() {
+    let temp = tempfile::tempdir().unwrap();
+    let used = temp.path().join("used.ts");
+    let unused = temp.path().join("unused.ts");
+    let empty = temp.path().join("empty.ts");
+    std::fs::write(&used, "first").unwrap();
+    std::fs::write(&unused, "unused").unwrap();
+    std::fs::write(&empty, "").unwrap();
+    let store = SourceStore::discover(&[temp.path().into()]).unwrap();
+    let lease = store.read_text(&used).unwrap();
+    let fingerprint = store.fingerprint(&unused).unwrap().clone();
+    let evicted = store.evict_unleased_texts();
+    assert_eq!((evicted.files, evicted.bytes), (2, 6));
+    std::fs::write(&used, "later").unwrap();
+    assert!(std::sync::Arc::ptr_eq(
+        &store.read_text(&used).unwrap(),
+        &lease
+    ));
+    // Same length: content hash, not just size, must be checked.
+    std::fs::write(&unused, "change").unwrap();
+    let error = store.read_text(&unused).unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("ARKDOWN_SOURCE_SNAPSHOT_MISMATCH"));
+    assert!(
+        matches!(error, SourceReadError::SnapshotMismatch { path, .. } if path.ends_with("unused.ts"))
+    );
+    assert_eq!(store.fingerprint(&unused), Some(&fingerprint));
+    std::fs::write(&unused, "unused").unwrap();
+    // Includes an empty file, whose restored file count must not disappear.
+    assert_eq!(store.restore_evicted_texts().unwrap(), evicted);
+    assert_eq!(store.read_bytes(&unused).unwrap().as_slice(), b"unused");
+}
+
+#[test]
+fn parallel_restore_reports_the_first_changed_path_deterministically() {
+    let temp = tempfile::tempdir().unwrap();
+    for name in ["a.ts", "z.ts"] {
+        std::fs::write(temp.path().join(name), "startup").unwrap();
+    }
+    let store = SourceStore::discover(&[temp.path().into()]).unwrap();
+    store.evict_unleased_texts();
+    for name in ["a.ts", "z.ts"] {
+        std::fs::write(temp.path().join(name), "changed and longer").unwrap();
+    }
+    for threads in [1, 4] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        let error = pool.install(|| store.restore_evicted_texts()).unwrap_err();
+        assert!(
+            matches!(error, SourceReadError::SnapshotMismatch { path, .. } if path.ends_with("a.ts"))
+        );
+    }
+}
+
+#[test]
+fn reload_io_errors_are_typed_and_release_permanently_retires_evicted_texts() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source.ts");
+    std::fs::write(&source, "startup").unwrap();
+    let store = SourceStore::discover(&[temp.path().into()]).unwrap();
+    store.evict_unleased_texts();
+    std::fs::remove_file(&source).unwrap();
+    let error = store.read_text(&source).unwrap_err();
+    assert!(error.to_string().contains("ARKDOWN_SOURCE_RELOAD_IO"));
+    assert!(matches!(error, SourceReadError::ReloadIo { path, .. } if path.ends_with("source.ts")));
+    assert!(matches!(
+        store.restore_evicted_texts(),
+        Err(SourceReadError::ReloadIo { .. })
+    ));
+    store.release_texts();
+    std::fs::write(&source, "startup").unwrap();
+    assert_eq!(store.restore_evicted_texts().unwrap().files, 0);
+    assert!(matches!(
+        store.read_text(&source),
+        Err(SourceReadError::Released { .. })
+    ));
+}
