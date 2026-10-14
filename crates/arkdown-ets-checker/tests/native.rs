@@ -47,7 +47,7 @@ fn compiler_options_preserve_oh_acronym_wire_names_and_checker_mode() {
         value["checkers"],
         std::thread::available_parallelism()
             .map_or(4, |count| count.get())
-            .min(6)
+            .min(4)
     );
     assert_eq!(value["module"], 1);
     assert_eq!(value["ohRuntimeOS"], "OpenHarmony");
@@ -198,6 +198,10 @@ impl NativeOhSdkPluginHost for SincePluginHost {
         &self,
         request: NativeOhSdkPluginRequest,
     ) -> Result<NativeOhSdkPluginResponse, NativeCheckError> {
+        if request.operation == "releaseSession" {
+            assert!(request.args.is_empty());
+            return Ok(NativeOhSdkPluginResponse::default());
+        }
         assert_eq!(request.operation, "value");
         assert_eq!(request.function_name, "checkSinceValue");
         let required = request.args[0].as_str().unwrap().parse::<u32>().unwrap();
@@ -277,6 +281,7 @@ fn native_delegates_sdk_since_callback_to_the_api_host() {
 #[derive(Debug, Default)]
 struct SessionRecordingPluginHost {
     session_ids: Mutex<Vec<u64>>,
+    released: Mutex<Vec<u64>>,
 }
 
 impl NativeOhSdkPluginHost for SessionRecordingPluginHost {
@@ -284,6 +289,10 @@ impl NativeOhSdkPluginHost for SessionRecordingPluginHost {
         &self,
         request: NativeOhSdkPluginRequest,
     ) -> Result<NativeOhSdkPluginResponse, NativeCheckError> {
+        if request.operation == "releaseSession" {
+            self.released.lock().unwrap().push(request.session_id);
+            return Ok(NativeOhSdkPluginResponse::default());
+        }
         self.session_ids.lock().unwrap().push(request.session_id);
         Ok(NativeOhSdkPluginResponse {
             found: true,
@@ -337,8 +346,32 @@ fn native_scopes_sdk_plugin_sessions_across_compiler_instances() {
         let program = session
             .create_program(&[sdk_path.clone(), source_path.clone()], &options)
             .unwrap();
-        assert!(session.diagnostics(&program).unwrap().is_empty());
+        assert!(
+            session
+                .arkts_build_diagnostics(&program)
+                .unwrap()
+                .semantic_diagnostics
+                .is_empty()
+        );
+        let lease = program.clone();
         drop(program);
+        drop(session);
+        let before = host.released.lock().unwrap().len();
+        assert_eq!(
+            before,
+            host.session_ids
+                .lock()
+                .unwrap()
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>()
+                .len()
+                - 1,
+            "SDK state must remain live while a snapshot lease exists"
+        );
+        assert!(!lease.source_graph().unwrap().files.is_empty());
+        drop(lease);
+        assert_eq!(host.released.lock().unwrap().len(), before + 1);
     }
 
     let session_ids = host

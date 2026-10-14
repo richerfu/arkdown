@@ -53,6 +53,52 @@ release gates are recorded in
 
 ## Usage
 
+### Performance
+
+Measured on 2026-10-12 with an Apple M2 Pro (12 CPU cores, 16 GiB RAM), macOS 15.6.1,
+Node.js 24.14.1, Rust 1.99.0, and HarmonyOS 26.0.0.105 / API 26. Builds use a release-mode
+native binding and produce a debug HAP with native debug symbols retained.
+
+| Implementation | After public clean | Unchanged-source rebuild | Peak tree RSS, cold / hot | Peak tree physical footprint, cold / hot |
+| --- | ---: | ---: | ---: | ---: |
+| Hvigor 6.26.4 | 557.13 s | 6.51 s | 3.84 / 0.64 GiB | 9.82 / 0.48 GiB |
+| Arkdown, full checker with cached stages | 181.12 s | 36.05 s | 1.93 / 0.52 GiB | 5.19 / 0.37 GiB |
+| Arkdown, full checker before caching | 187.47 s | 137.16 s | 1.77 / 2.03 GiB | 5.33 / 4.79 GiB |
+| Arkdown `--skip-checker`, before caching | 103.76 s | 58.90 s | 1.74 / 1.87 GiB | 4.41 / 2.18 GiB |
+
+Each row is one cold/hot pair, not a statistical average. The two rows before caching are
+historical references; current measurements use the same current project inputs and run
+without other Cargo/Hvigor builds. Cold builds follow the public `clean` command; hot builds
+repeat unchanged inputs in a new process. Dependencies, SDK files, and the OS page cache
+remain available. Hvigor runs without its daemon, with parallel and incremental builds enabled.
+Process-tree memory is sampled every 100 ms; Node uses `--max-old-space-size=8192`.
+RSS and macOS physical footprint are separate measurements.
+
+In the current pair, Arkdown uses 67.49% less cold-build time and 47.12% less peak cold-build
+physical footprint than Hvigor. Its unchanged-source rebuild is still 5.54 times slower.
+
+Successful checking, packaging, and signing are reused on unchanged inputs. Compile cache
+hits verify the generated SDK input files as well as bytecode and source maps; removed or
+modified outputs trigger rebuilding. Content hashing runs in parallel with bounded read
+buffers. The latest hot stages take 3.338 s for profiles, 1.115 s for compile-cache validation,
+0 s for ABC, and 6.379 s for packaging/signing including content validation. Approximately
+25.22 s falls outside these recorded stages, including startup, project/SDK snapshots, and
+teardown. Startup remains the largest hot-build cost.
+
+SDK callback AST caches now end with the native compiler session, and the CLI exposes GC for
+compiler-state release. Normal and strict checker pools are each capped at four workers.
+In an instrumented full build with 5,553 SDK AST construction calls, releasing the session
+reduced used V8 heap from 1.24 GiB to 28.8 MiB; it stayed near 29.3 MiB through packaging,
+compared with 1.19 GiB retained in the earlier implementation.
+
+This removes retained JavaScript ASTs but only modestly changes the complete build's peak:
+the earlier cached-stage sample used 5.28 GiB, versus 5.19 GiB in the current sample. A separate
+instrumented run peaked during ABC compilation at 5.29 GiB: 3.51 GiB in the build host,
+1.77 GiB in `es2abc`, and 0.01 GiB in the CLI parent. Native allocations and SDK subprocesses
+remain substantial. A controlled allocator lazy-commit experiment did not improve the peak
+and is not enabled. Instrumented samples explain memory ownership; they do not replace the
+timing measurements above. Used V8 heap, RSS, and process footprint are different metrics.
+
 ### Prerequisites
 
 - Node.js 18 or later
@@ -156,21 +202,20 @@ stdio policy, process lifecycle, and exit codes.
 ### Build from source
 
 ```sh
-git submodule update --init --checkout
 cd packages/arkdown
 pnpm install
 pnpm build
 pnpm test
 ```
 
-The ArkTS checker is tsrs, pinned at `third_party/tsrs` as a git submodule.
-Run `git submodule update --init --recursive` before building. Cargo links
+The ArkTS checker is tsrs, fetched by Cargo from `ohos-rs/tsrs` with a full
+Git `rev` in the workspace dependencies and `Cargo.lock`. Cargo links
 `tsrs_api`, `tsrs_core` and `tsrs_vfs` directly into the N-API binding with the
 pinned Rust toolchain. Typed snapshots, diagnostics and type facts stay in
 process; SDK CommonJS callbacks use the existing JavaScript host. Compiler
 programs use `noEmit`. The previous Go checker and executable transport are removed.
-`pnpm publish:local --dry-run` and CI verify the clean gitlink and include the
-compiler license and source revision in all three platform packages. The N-API
+Release builds use Cargo `--locked`. Platform package assembly includes the
+compiler license and notices; the dependency revision stays in Cargo manifests. The N-API
 binding embeds the standard libraries; no separate compiler executable is shipped.
 
 The package is distributed as `UNLICENSED`.

@@ -648,6 +648,7 @@ impl BuildCoordinator {
                     )
                     .with_compile_env(task_compile_env)
                     .with_plugin_hash(task_plugin_hash)
+                    .with_diagnostics_checked(!args.skip_checker)
                     .with_additional_obfuscation_rule_files(
                         &module_obfuscation.dependency_rule_files,
                     )
@@ -655,6 +656,13 @@ impl BuildCoordinator {
                         &loader_json.compiler_types,
                         &loader_json.compiler_type_declaration_inputs,
                     )?;
+            let compile_outputs =
+                TaskInputs::compile_outputs(&module_layout.loader_out_dir(), &cache_dir)?;
+            let completion =
+                arkdown_cache::ArtifactCacheStore::new(cache_dir.join("compile-outputs-v1.json"));
+            if let Err(error) = completion.commit("compiled", &compile_outputs) {
+                tracing::warn!(%error, "compile output completion commit failed");
+            }
             if let Err(e) = task_inputs.save(&cache_dir) {
                 tracing::warn!(error = %e, "failed to save task inputs cache");
             }

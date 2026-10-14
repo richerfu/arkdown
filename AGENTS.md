@@ -100,7 +100,7 @@ than inventing or preserving speculative logic.
 
 Do not invent fallback behavior to make a sample pass. Do not hardcode project
 paths, package layouts, native library declaration directories, cache paths, or
-Meituan-specific locations. Paths and specifiers must come from manifests,
+project-specific locations. Paths and specifiers must come from manifests,
 lockfiles, resolver APIs, hvigor task metadata, SDK metadata, or generated
 module records. When hvigor delegates to a resolver or compiler service,
 arkdown should use the corresponding structured Rust dependency or typed

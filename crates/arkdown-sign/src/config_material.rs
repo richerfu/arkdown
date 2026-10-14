@@ -45,7 +45,7 @@ impl<'a> SigningConfigMaterial<'a> {
         })
     }
 
-    fn material_dir(&self) -> PathBuf {
+    pub(crate) fn material_dir(&self) -> PathBuf {
         self.config
             .store_file
             .parent()

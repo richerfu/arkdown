@@ -55,6 +55,7 @@ pub struct PackInfoInput {
     pub delivery_with_install: bool,
 }
 
+#[derive(serde::Serialize)]
 pub struct PackInput {
     pub module_name: String,
     /// Effective Hvigor target name used by MakePackInfo archive identity.

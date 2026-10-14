@@ -47,7 +47,15 @@ test('compiler crates are embedded and executable integration stays deleted', ()
   const workspace = fs.readFileSync(path.join(root, 'Cargo.toml'), 'utf8')
   const checker = fs.readFileSync(path.join(root, 'crates/arkdown-ets-checker/src/native.rs'), 'utf8')
   const workflow = fs.readFileSync(path.join(root, '.github/workflows/publish.yml'), 'utf8')
-  assert.match(workspace, /tsrs_api = \{ path = "third_party\/tsrs\/crates\/tsrs_api" \}/)
+  const pins = [
+    ...workspace.matchAll(
+      /tsrs_(?:api|core|vfs) = \{ git = "https:\/\/github\.com\/ohos-rs\/tsrs\.git", rev = "([0-9a-f]{40})" \}/g,
+    ),
+  ]
+  assert.equal(pins.length, 3)
+  assert.equal(new Set(pins.map((pin) => pin[1])).size, 1)
+  assert.doesNotMatch(workspace, /third_party\/tsrs/)
+  assert.equal(fs.existsSync(path.join(root, 'third_party/tsrs')), false)
   assert.match(checker, /tsrs_api::embedded::Compiler/)
   assert.doesNotMatch(
     checker,
@@ -59,13 +67,21 @@ test('compiler crates are embedded and executable integration stays deleted', ()
     'attach-tsrs-dist.mjs',
     'build-typescript-dist.mjs',
     'attach-typescript-dist.mjs',
+    'compiler-source.mjs',
   ]) {
     assert.equal(fs.existsSync(path.join(packageRoot, 'scripts', script)), false)
   }
   assert.equal(fs.existsSync(path.join(packageRoot, 'src/package_layout.rs')), false)
-  assert.match(workflow, /submodules: recursive/)
-  assert.match(workflow, /compiler-source.mjs --verify/)
-  assert.match(workflow, /compiler-source.mjs --package npm/)
+  assert.doesNotMatch(workflow, /submodules:/)
+  assert.doesNotMatch(workflow, /compiler-source/)
+  assert.match(workflow, /napi build .*-- --locked/)
+  const lockfile = fs.readFileSync(path.join(root, 'Cargo.lock'), 'utf8')
+  assert.ok(lockfile.includes(`git+https://github.com/ohos-rs/tsrs.git?rev=${pins[0][1]}#${pins[0][1]}`))
+  for (const notice of ['tsrs-LICENSE.txt', 'tsrs-NOTICE.txt']) {
+    assert.ok(manifest.files.includes(notice))
+    assert.ok(fs.statSync(path.join(packageRoot, notice)).size > 0)
+    assert.ok(manifest.scripts.artifacts.includes(notice))
+  }
   assert.match(workflow, /cargo test --locked -p arkdown-ets-checker --test native/)
   assert.doesNotMatch(
     workflow,

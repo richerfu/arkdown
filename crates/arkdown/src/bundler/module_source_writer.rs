@@ -123,8 +123,7 @@ impl<'a> HvigorModuleSourceWriter<'a> {
     }
 
     pub(crate) fn write(self) -> Result<Vec<HvigorModuleSourceFile>, ArkdownError> {
-        let had_output_dir = self.output_dir.exists();
-        if had_output_dir && !self.output_dir.is_dir() {
+        if self.output_dir.exists() && !self.output_dir.is_dir() {
             fs_err::remove_file(&self.output_dir)
                 .map_err(|e| ArkdownError::Bundler(e.to_string()))?;
         }
@@ -161,6 +160,27 @@ impl<'a> HvigorModuleSourceWriter<'a> {
                 )));
             }
         }
+        for job in &jobs {
+            if matches!(
+                HvigorModuleSourceId::new(&job.module_id).origin_source_lang(),
+                "ets" | "ts"
+            ) {
+                let alternate = job.path.with_extension(
+                    if self.state.javascript_module_ids.contains(&job.module_id) {
+                        "ts"
+                    } else {
+                        "js"
+                    },
+                );
+                if let Some(existing) = destinations.get(&alternate) {
+                    return Err(ArkdownError::Bundler(format!(
+                        "CompileArkTS source '{}' would remove the active output of '{existing}' at {}",
+                        job.module_id,
+                        alternate.display()
+                    )));
+                }
+            }
+        }
         let files = jobs
             .par_iter()
             .map(|job| self.write_module_source(job, &module_records, &mock_rewrites))
@@ -168,13 +188,6 @@ impl<'a> HvigorModuleSourceWriter<'a> {
             .into_iter()
             .flatten()
             .collect::<Vec<_>>();
-        let active_paths = files
-            .iter()
-            .map(|file| file.path.clone())
-            .collect::<FxHashSet<_>>();
-        if had_output_dir {
-            self.remove_stale_output_files(&active_paths)?;
-        }
         Ok(files)
     }
 
@@ -524,6 +537,22 @@ impl<'a> HvigorModuleSourceWriter<'a> {
             fs_err::create_dir_all(parent).map_err(|e| ArkdownError::Bundler(e.to_string()))?;
         }
         let code = Self::finalize_source_text(code.into_owned(), emits_javascript);
+        // utils.ts::shouldETSOrTSFileTransformToJS removes only the other
+        // transform-language variant of this source. ModuleSourceFile writes
+        // coexist with widget/Hvigor inputs in the same SDK cache directory.
+        if matches!(
+            HvigorModuleSourceId::new(module_id).origin_source_lang(),
+            "ets" | "ts"
+        ) {
+            let alternate = job
+                .path
+                .with_extension(if emits_javascript { "ts" } else { "js" });
+            match fs_err::remove_file(&alternate) {
+                Ok(()) => {}
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => return Err(ArkdownError::Bundler(error.to_string())),
+            }
+        }
         self.write_file(&job.path, code.as_bytes())?;
         let origin_source_lang = HvigorModuleSourceId::new(module_id)
             .origin_source_lang()
@@ -583,56 +612,6 @@ impl<'a> HvigorModuleSourceWriter<'a> {
         }
 
         fs_err::write(path, contents).map_err(|e| ArkdownError::Bundler(e.to_string()))
-    }
-
-    pub(crate) fn remove_stale_output_files(
-        &self,
-        active_paths: &FxHashSet<PathBuf>,
-    ) -> Result<(), ArkdownError> {
-        if !self.output_dir.is_dir() {
-            return Ok(());
-        }
-
-        let mut stack = vec![self.output_dir.clone()];
-        let mut dirs = Vec::new();
-        while let Some(dir) = stack.pop() {
-            dirs.push(dir.clone());
-            for entry in fs_err::read_dir(&dir).map_err(|e| ArkdownError::Bundler(e.to_string()))? {
-                let entry = entry.map_err(|e| ArkdownError::Bundler(e.to_string()))?;
-                let file_type = entry
-                    .file_type()
-                    .map_err(|e| ArkdownError::Bundler(e.to_string()))?;
-                let path = entry.path();
-                if file_type.is_dir() {
-                    stack.push(path);
-                    continue;
-                }
-                let is_stale_module_source =
-                    file_type.is_file() && !active_paths.contains(&path) && {
-                        let source_kind = SourceClassifier::classify_path(&path);
-                        source_kind.is_ets_transform_input() || source_kind.is_javascript_runtime()
-                    };
-                if is_stale_module_source {
-                    fs_err::remove_file(&path).map_err(|e| ArkdownError::Bundler(e.to_string()))?;
-                }
-            }
-        }
-
-        for dir in dirs.into_iter().rev() {
-            if dir == self.output_dir {
-                continue;
-            }
-            match fs_err::remove_dir(&dir) {
-                Ok(()) => {}
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        ErrorKind::DirectoryNotEmpty | ErrorKind::NotFound
-                    ) => {}
-                Err(error) => return Err(ArkdownError::Bundler(error.to_string())),
-            }
-        }
-        Ok(())
     }
 
     pub(crate) fn module_source_record_index(

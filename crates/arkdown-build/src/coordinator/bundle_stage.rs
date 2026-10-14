@@ -242,6 +242,189 @@ impl BuildCoordinator {
                 widget_bundle_outs.push(None);
                 continue;
             }
+            let widget_pass = WidgetCompileArktsPass::new(
+                module_config.as_ref(),
+                module,
+                manifest,
+                loader_json,
+                &module_context.deps,
+                module_context.module.module_json.as_ref(),
+            );
+            // Static `BaseMode` builds one dependency graph from the complete
+            // `compileFiles` inventory and links it into `modules_static.abc`.
+            // The separate `widgets.abc` pass belongs to ets2abc's dynamic
+            // frontend and must not run alongside the static SDK driver.
+            let widget_compile_plan = if session.arkts_language_version.is_static() {
+                None
+            } else {
+                widget_pass.plan()?
+            };
+            let task_plugin_hash =
+                module_package_plugins
+                    .iter()
+                    .fold(0xcbf29ce484222325u64, |mut hash, plugin| {
+                        for byte in plugin.cache_identity().bytes() {
+                            hash ^= u64::from(byte);
+                            hash = hash.wrapping_mul(0x100000001b3);
+                        }
+                        hash
+                    });
+            let task_input_snapshot = TaskInputSnapshot::for_module(session.as_ref(), &module.name)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "missing session input fingerprints for module '{}'",
+                        module.name
+                    )
+                })?;
+            let bundle_compile_env = CompileEnvKeyBuilder::new(
+                module_config.as_ref(),
+                module,
+                loader_json,
+                module_obfuscation.is_enabled(&config.build_mode),
+                module_target_name,
+                args.hvigor_properties.rollup_cache_use_source_hash,
+                self.session.arkts_language_version,
+            )
+            .with_preview_mode(
+                args.preview
+                    || args.preview_transform_mode
+                    || matches!(config.output_target, arkdown_core::OutputTarget::Preview),
+            )
+            .with_check_entry(args.check_entry)
+            .with_crossplatform(args.is_crossplatform, args.ignore_crossplatform_check)
+            .with_ui_transform_optimization(args.ui_transform_optimization)
+            .with_use_get_current_bundle_name(args.integrated_hsp_use_get_current_bundle_name)
+            .build()?;
+            let task_inputs =
+                TaskInputs::compute(module_config.as_ref(), loader_json, &task_input_snapshot)
+                    .with_arkts_language_version(self.session.arkts_language_version)
+                    .with_effective_obfuscation(
+                        module_obfuscation.config.as_ref(),
+                        &config.build_mode,
+                    )
+                    .with_compile_env(bundle_compile_env.clone())
+                    .with_plugin_hash(task_plugin_hash)
+                    .with_diagnostics_checked(!args.skip_checker)
+                    .with_additional_obfuscation_rule_files(
+                        &module_obfuscation.dependency_rule_files,
+                    )
+                    .with_custom_type_inputs(
+                        &loader_json.compiler_types,
+                        &loader_json.compiler_type_declaration_inputs,
+                    )?;
+
+            // Compute deterministic cache-group snapshots for this module.
+            // Mirrors hvigor's invalid-cache-plugin.ts group tracking.
+            let group_snapshots = build_cache_group_snapshots(
+                &bundle_compile_env,
+                module_config.as_ref(),
+                module,
+                loader_json,
+                &module_package_plugins,
+                project_root,
+                args.byte_code_har_integrated_optimization,
+            );
+
+            // Build the cache bridge — loads group_keys.json and diffs against current snapshots.
+            let cache_bridge = BundleCacheBridge::from_plan(
+                bundle_compile_env.clone(),
+                Some(cache_dir.clone()),
+                group_snapshots.clone(),
+            );
+
+            let widget_cache_ready = widget_compile_plan
+                .as_ref()
+                .is_none_or(|plan| plan.modules_abc_path.exists());
+            let declaration_cache_ready = !matches!(module.module_type, OhosModuleType::Shared)
+                || module_layout.declarations_dir().is_dir();
+            let static_dynamic_abc_cache_ready = !session.arkts_language_version.is_static()
+                || !module_layout
+                    .arkts_interop_dir()
+                    .join("declgen-v2-request.json")
+                    .is_file()
+                || output_dir.join("modules.abc").is_file();
+            let unit_test_coverage_cache_ready =
+                !matches!(config.output_target, OutputTarget::Test)
+                    || !coverage_mode
+                    || module_layout.test_init_coverage_json().is_file();
+            let aot_output_dir = module_layout.aot_output_dir();
+            let aot_cache_ready = AotArtifactWriter::new(
+                &module.name,
+                loader_json.an_build_mode.as_deref(),
+                loader_json.an_build_out_put.as_deref(),
+                loader_json.ap_path.as_deref(),
+                &aot_output_dir,
+                coverage_mode,
+            )
+            .cache_ready();
+            let mut cache_hit = quickfix_task_plan.is_none()
+                && hot_reload_task_plan.is_none()
+                && !disable_abc_cache
+                && task_inputs.matches_cached(&cache_dir)
+                && arkdown_cache::ArtifactCacheStore::new(
+                    cache_dir.join("compile-outputs-v1.json"),
+                )
+                .matches(
+                    "compiled",
+                    &TaskInputs::compile_outputs(&module_layout.loader_out_dir(), &cache_dir)?,
+                )
+                .unwrap_or(false)
+                && cached_abc.exists()
+                && widget_cache_ready
+                && declaration_cache_ready
+                && static_dynamic_abc_cache_ready
+                && unit_test_coverage_cache_ready
+                && aot_cache_ready;
+            if cache_hit {
+                // System-level check: compile-env + file changes + cache group changes.
+                let system_request = ShouldInvalidCacheRequest {
+                    compile_env: bundle_compile_env.clone(),
+                    changed_files: watch_changed_files.clone(),
+                    module_name: Some(module.name.clone()),
+                    cache_dir: Some(cache_dir.clone()),
+                    is_watch: is_incremental_watch,
+                    cache_hit,
+                    group_snapshots: group_snapshots.clone(),
+                    module_deps: vec![],
+                };
+                let system_result = cache_bridge.ask_plugins(&system_request);
+                if system_result.should_invalidate {
+                    tracing::debug!(
+                        module = %module.name,
+                        reason = ?system_result.reason,
+                        global = system_result.global_invalidation,
+                        changed_groups = %system_result.changed_groups.explain(),
+                        "cache invalidated by system check"
+                    );
+                    cache_hit = false;
+                }
+            }
+            if cache_hit {
+                cache_hit = !PluginCacheInvalidationRunner::new(
+                    &module_package_plugins,
+                    cache_dir.as_path(),
+                )
+                .should_invalidate()
+                .await?;
+            }
+
+            if cache_hit {
+                plugin_context_cache.commit().await?;
+                tracing::info!(module = %module.name, "compile cache hit; checker and type facts skipped");
+
+                let additional_abc_paths = (session.arkts_language_version.is_static()
+                    && cached_abc.file_name().and_then(|name| name.to_str())
+                        == Some("modules_static.abc")
+                    && static_interop_request.is_file())
+                .then(|| output_dir.join("modules.abc"))
+                .into_iter()
+                .collect();
+                bundle_outs.push((BundleStageOutput::from_cache(cached_abc, output_dir)
+                    .with_additional_abc_paths(additional_abc_paths),));
+                widget_bundle_outs.push(None);
+                continue;
+            }
+
             let type_facts = if session.arkts_language_version
                 == arkdown_core::ArktsLanguageVersion::V1_1
             {
@@ -340,179 +523,6 @@ impl BuildCoordinator {
             } else {
                 arkdown_ets_transform::ArktsTypeFactsSnapshot::default()
             };
-            let widget_pass = WidgetCompileArktsPass::new(
-                module_config.as_ref(),
-                module,
-                manifest,
-                loader_json,
-                &module_context.deps,
-                module_context.module.module_json.as_ref(),
-            );
-            // Static `BaseMode` builds one dependency graph from the complete
-            // `compileFiles` inventory and links it into `modules_static.abc`.
-            // The separate `widgets.abc` pass belongs to ets2abc's dynamic
-            // frontend and must not run alongside the static SDK driver.
-            let widget_compile_plan = if session.arkts_language_version.is_static() {
-                None
-            } else {
-                widget_pass.plan()?
-            };
-            let task_plugin_hash =
-                module_package_plugins
-                    .iter()
-                    .fold(0xcbf29ce484222325u64, |mut hash, plugin| {
-                        for byte in plugin.cache_identity().bytes() {
-                            hash ^= u64::from(byte);
-                            hash = hash.wrapping_mul(0x100000001b3);
-                        }
-                        hash
-                    });
-            let task_input_snapshot = TaskInputSnapshot::for_module(session.as_ref(), &module.name)
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "missing session input fingerprints for module '{}'",
-                        module.name
-                    )
-                })?;
-            let bundle_compile_env = CompileEnvKeyBuilder::new(
-                module_config.as_ref(),
-                module,
-                loader_json,
-                module_obfuscation.is_enabled(&config.build_mode),
-                module_target_name,
-                args.hvigor_properties.rollup_cache_use_source_hash,
-                self.session.arkts_language_version,
-            )
-            .with_preview_mode(
-                args.preview
-                    || args.preview_transform_mode
-                    || matches!(config.output_target, arkdown_core::OutputTarget::Preview),
-            )
-            .with_check_entry(args.check_entry)
-            .with_crossplatform(args.is_crossplatform, args.ignore_crossplatform_check)
-            .with_ui_transform_optimization(args.ui_transform_optimization)
-            .with_use_get_current_bundle_name(args.integrated_hsp_use_get_current_bundle_name)
-            .build()?;
-            let task_inputs =
-                TaskInputs::compute(module_config.as_ref(), loader_json, &task_input_snapshot)
-                    .with_arkts_language_version(self.session.arkts_language_version)
-                    .with_effective_obfuscation(
-                        module_obfuscation.config.as_ref(),
-                        &config.build_mode,
-                    )
-                    .with_compile_env(bundle_compile_env.clone())
-                    .with_plugin_hash(task_plugin_hash)
-                    .with_additional_obfuscation_rule_files(
-                        &module_obfuscation.dependency_rule_files,
-                    )
-                    .with_custom_type_inputs(
-                        &loader_json.compiler_types,
-                        &loader_json.compiler_type_declaration_inputs,
-                    )?;
-
-            // Compute deterministic cache-group snapshots for this module.
-            // Mirrors hvigor's invalid-cache-plugin.ts group tracking.
-            let group_snapshots = build_cache_group_snapshots(
-                &bundle_compile_env,
-                module_config.as_ref(),
-                module,
-                loader_json,
-                &module_package_plugins,
-                project_root,
-                args.byte_code_har_integrated_optimization,
-            );
-
-            // Build the cache bridge — loads group_keys.json and diffs against current snapshots.
-            let cache_bridge = BundleCacheBridge::from_plan(
-                bundle_compile_env.clone(),
-                Some(cache_dir.clone()),
-                group_snapshots.clone(),
-            );
-
-            let widget_cache_ready = widget_compile_plan
-                .as_ref()
-                .is_none_or(|plan| plan.modules_abc_path.exists());
-            let declaration_cache_ready = !matches!(module.module_type, OhosModuleType::Shared)
-                || module_layout.declarations_dir().is_dir();
-            let static_dynamic_abc_cache_ready = !session.arkts_language_version.is_static()
-                || !module_layout
-                    .arkts_interop_dir()
-                    .join("declgen-v2-request.json")
-                    .is_file()
-                || output_dir.join("modules.abc").is_file();
-            let unit_test_coverage_cache_ready =
-                !matches!(config.output_target, OutputTarget::Test)
-                    || !coverage_mode
-                    || module_layout.test_init_coverage_json().is_file();
-            let aot_output_dir = module_layout.aot_output_dir();
-            let aot_cache_ready = AotArtifactWriter::new(
-                &module.name,
-                loader_json.an_build_mode.as_deref(),
-                loader_json.an_build_out_put.as_deref(),
-                loader_json.ap_path.as_deref(),
-                &aot_output_dir,
-                coverage_mode,
-            )
-            .cache_ready();
-            let mut cache_hit = quickfix_task_plan.is_none()
-                && hot_reload_task_plan.is_none()
-                && !disable_abc_cache
-                && task_inputs.matches_cached(&cache_dir)
-                && cached_abc.exists()
-                && widget_cache_ready
-                && declaration_cache_ready
-                && static_dynamic_abc_cache_ready
-                && unit_test_coverage_cache_ready
-                && aot_cache_ready;
-            if cache_hit {
-                // System-level check: compile-env + file changes + cache group changes.
-                let system_request = ShouldInvalidCacheRequest {
-                    compile_env: bundle_compile_env.clone(),
-                    changed_files: watch_changed_files.clone(),
-                    module_name: Some(module.name.clone()),
-                    cache_dir: Some(cache_dir.clone()),
-                    is_watch: is_incremental_watch,
-                    cache_hit,
-                    group_snapshots: group_snapshots.clone(),
-                    module_deps: vec![],
-                };
-                let system_result = cache_bridge.ask_plugins(&system_request);
-                if system_result.should_invalidate {
-                    tracing::debug!(
-                        module = %module.name,
-                        reason = ?system_result.reason,
-                        global = system_result.global_invalidation,
-                        changed_groups = %system_result.changed_groups.explain(),
-                        "cache invalidated by system check"
-                    );
-                    cache_hit = false;
-                }
-            }
-            if cache_hit {
-                cache_hit = !PluginCacheInvalidationRunner::new(
-                    &module_package_plugins,
-                    cache_dir.as_path(),
-                )
-                .should_invalidate()
-                .await?;
-            }
-
-            if cache_hit {
-                plugin_context_cache.commit().await?;
-
-                let additional_abc_paths = (session.arkts_language_version.is_static()
-                    && cached_abc.file_name().and_then(|name| name.to_str())
-                        == Some("modules_static.abc")
-                    && static_interop_request.is_file())
-                .then(|| output_dir.join("modules.abc"))
-                .into_iter()
-                .collect();
-                bundle_outs.push((BundleStageOutput::from_cache(cached_abc, output_dir)
-                    .with_additional_abc_paths(additional_abc_paths),));
-                widget_bundle_outs.push(None);
-                continue;
-            }
-
             // SDK `watchChangedFiles.beforeBuild` writes this handoff before the
             // Rollup transform starts. Preserve the raw event kinds: Hvigor treats
             // updates as modified and create/delete events as removed.

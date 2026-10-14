@@ -7,6 +7,7 @@ use crate::error::PackError;
 use crate::zip_writer;
 
 mod archive;
+mod cache;
 mod har;
 mod inputs;
 mod module_json;
@@ -26,6 +27,7 @@ pub use module_json::minify_package_intermediate_module_json;
 pub struct Packager {
     pub config: Arc<ArkdownConfig>,
     compress_level: u32,
+    cache_directory: Option<PathBuf>,
 }
 
 impl Packager {
@@ -33,6 +35,7 @@ impl Packager {
         Packager {
             config,
             compress_level: 1,
+            cache_directory: None,
         }
     }
 
@@ -40,6 +43,11 @@ impl Packager {
     /// Latest hvigor maps `fast`, `standard`, and `ultimate` to 1, 5, and 9.
     pub fn with_compress_level(mut self, compress_level: u32) -> Self {
         self.compress_level = compress_level;
+        self
+    }
+
+    pub fn with_cache_directory(mut self, directory: Option<PathBuf>) -> Self {
+        self.cache_directory = directory;
         self
     }
 
@@ -395,6 +403,20 @@ impl Packager {
     }
 
     pub fn pack_hap(&self, input: PackInput) -> Result<PathBuf, PackError> {
+        let completion = self.package_completion(&input);
+        if let Some((store, key)) = &completion {
+            match store.matches(key, std::slice::from_ref(&input.output_path)) {
+                Ok(true) => {
+                    tracing::info!(output = %input.output_path.display(), "package cache hit");
+                    return Ok(input.output_path);
+                }
+                Ok(false) => {}
+                Err(error) => tracing::warn!(%error, "package cache validation failed; rebuilding"),
+            }
+            if let Err(error) = store.invalidate() {
+                tracing::warn!(%error, "package cache invalidation failed");
+            }
+        }
         if let Some(parent) = input.output_path.parent() {
             fs_err::create_dir_all(parent)?;
         }
@@ -651,6 +673,11 @@ impl Packager {
             zip_writer::add_bytes_stored(&mut writer, "pkgSdkInfo.json", &pkg_sdk_info)?;
         }
         writer.finish()?;
+        if let Some((store, key)) = completion {
+            if let Err(error) = store.commit(&key, std::slice::from_ref(&input.output_path)) {
+                tracing::warn!(%error, "package completion cache commit failed");
+            }
+        }
         Ok(input.output_path)
     }
 

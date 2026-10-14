@@ -1,20 +1,22 @@
 # ArkTS 1.1 原生 tsrs 集成
 
-## 当前迁移（2026-10-11）
+## 当前迁移（2026-10-12）
 
-- `third_party/tsrs` gitlink 固定 Rust crate，Cargo 直接链接进 N-API binding。
+- Cargo Git dependency 用完整 `rev` 固定 tsrs Rust crates，Cargo 直接链接进 N-API binding。
 - `tsrs_api::embedded::Compiler` 提供 typed create/update/query；Program/type lease 通过 RAII 回收。
 - 每份源码快照包含不可变 overlay 和删除 tombstones；增量成功才提交 inventory。SDK CommonJS ABI 保持由 JS host 执行。
 - 删除编译器子进程、JSON-RPC、可执行文件定位、`ARKDOWN_TSRS_PATH` 和独立编译器分发脚本。
 - checker 固定 `noEmit`。动态 ArkTS parser/binder/checker/linter/SDK policies/Kit imports 与类型事实由 tsrs 负责。
   ArkTS static 语法不在范围内；普通 class static block 仍在范围内。
 - 上次语言移植验证：1003/1003 linter、243/243 compiler programs 与固定 OH 编译器完整诊断一致。
-- 发布校验 clean gitlink；三平台包只附带 binding、编译器 license/notice/source metadata，标准库已嵌入。
-- Rust 工具链与 tsrs 一致，固定 1.99.0；先推送 tsrs 分支，再推送 Arkdown gitlink，远端才能取到源码。
+- 构建使用 Cargo `--locked`；三平台包附带 binding 和编译器 license/notice，标准库已嵌入。
+  删除独立 `compiler-source.mjs`，版本固定由 Cargo.toml / Cargo.lock 负责。
+- Rust 工具链与 tsrs 一致，固定 1.99.0；先推送 tsrs 分支，再更新 Arkdown 的 Cargo rev 和 lockfile，远端才能取到源码。
 
 ## 本次 crate 接入验证
 
-- tsrs 固定版本：`7308ab7f29516b3330d9d0dad4945b571b54772c`（`ohos`）。
+- 最初接入验证版本：`7308ab7f29516b3330d9d0dad4945b571b54772c`（`ohos`）。
+- 当前 Cargo 固定版本：`fb3668e6d47a695508f83a28bf05305f385deb58`（`ohos`）；无 vendor/submodule 集成。
 - checker：17 项集成测试 + 1 项文件系统回归通过；OXC 语法语料正例 5/5、反例 7/7 通过。
 - 真实 SDK `check_semantic` 4/4、build crate 单元测试 106/106、JavaScript 单元测试 30/30 通过。
 - macOS arm64 N-API release 构建、Node checker 端到端、JS CLI check/smoke 通过。
@@ -25,8 +27,8 @@
   Rust 1.99 新增 lint 要求 watcher 的定长分块改用 `as_chunks`，现有 SHA-1 回归通过。
 - tsrs 的 86 项 API 测试、7 项嵌入/内存填毒回归、243/243 OH 完整诊断对照和 15,197 个 conformance
   变体通过相应门禁；无新增失败、崩溃、超时。完整记录在 tsrs `notes/arkts-port.md`。
-- 打包脚本的三平台结构、旧可执行文件清理和 dirty/mismatched gitlink 拒绝测试通过。
-  使用本次实际 macOS binding 的 npm pack dry-run 包含编译器 license/notice/source metadata，不包含独立编译器。
+- 最初 submodule 接入的打包脚本验证通过；该脚本现已删除，Git rev / lockfile 与 N-API 构建取代它。
+  使用本次实际 macOS binding 的 npm pack dry-run 包含编译器 license/notice，不包含独立编译器。
 - Linux/Windows 的实际 binding 构建和执行交由三平台 CI；本机没有把历史异平台产物计为本次验收。
 
 ## 迁移前记录（仅供行为与性能历史参考）

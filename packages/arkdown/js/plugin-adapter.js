@@ -96,9 +96,17 @@ class SdkPluginHost {
   constructor() {
     this.classInstances = new Map()
     this.typeScriptModules = new Map()
-    this.sourceSnapshots = new Map()
-    this.sourceFiles = new WeakMap()
-    this.projectConfigs = new Map()
+    this.sessions = new Map()
+  }
+
+  session(sessionId) {
+    if (!this.sessions.has(sessionId))
+      this.sessions.set(sessionId, {
+        snapshots: new Map(),
+        sourceFiles: new WeakMap(),
+        configs: new Map(),
+      })
+    return this.sessions.get(sessionId)
   }
 
   loadTypeScript(etsLoaderPath) {
@@ -113,10 +121,10 @@ class SdkPluginHost {
   materializeSnapshot(sessionId, snapshot) {
     const key = `${sessionId}:${snapshot.sourceId}`
     if (snapshot.source !== undefined) {
-      this.sourceSnapshots.set(key, { fileName: snapshot.fileName, source: snapshot.source })
+      this.session(sessionId).snapshots.set(key, { fileName: snapshot.fileName, source: snapshot.source })
       return snapshot
     }
-    const cached = this.sourceSnapshots.get(key)
+    const cached = this.session(sessionId).snapshots.get(key)
     if (!cached || cached.fileName !== snapshot.fileName) {
       throw new Error(`SDK checker source ${key} is not registered`)
     }
@@ -131,10 +139,10 @@ class SdkPluginHost {
         projectConfig.syscapIntersectionSet || projectConfig.syscapIntersection || [],
       )
       projectConfig.syscapUnionSet = new Set(projectConfig.syscapUnionSet || projectConfig.syscapUnion || [])
-      this.projectConfigs.set(key, projectConfig)
+      this.session(sessionId).configs.set(key, projectConfig)
       return projectConfig
     }
-    const projectConfig = this.projectConfigs.get(key)
+    const projectConfig = this.session(sessionId).configs.get(key)
     if (!projectConfig) throw new Error(`SDK checker project config ${key} is not registered`)
     return projectConfig
   }
@@ -145,10 +153,11 @@ class SdkPluginHost {
       snapshot.fileName.endsWith('.ets') && typescript.ScriptKind.ETS !== undefined
         ? typescript.ScriptKind.ETS
         : typescript.ScriptKind.TS
-    let files = this.sourceFiles.get(typescript)
+    const sourceFiles = this.session(sessionId).sourceFiles
+    let files = sourceFiles.get(typescript)
     if (!files) {
       files = new Map()
-      this.sourceFiles.set(typescript, files)
+      sourceFiles.set(typescript, files)
     }
     let source = files.get(snapshot.fileName)
     if (!source || source.text !== snapshot.source || source.scriptKind !== scriptKind) {
@@ -230,6 +239,12 @@ class SdkPluginHost {
   }
 
   dispatch(request) {
+    if (request.operation === 'releaseSession') {
+      const released = this.sessions.delete(request.sessionId)
+      // serviceChecker releases state before exposed GC.
+      if (released && typeof global.gc === 'function') global.gc()
+      return { found: true }
+    }
     if (request.operation === 'prepareClass' || request.operation === 'syscap') {
       let checker
       try {

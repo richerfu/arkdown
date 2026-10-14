@@ -230,9 +230,12 @@ impl NativeCompilerOptions {
             paths_base_path: project_root.to_path_buf(),
             base_url: project_root.to_path_buf(),
             no_emit: true,
+            // ArkTS retains normal and strict pools together. Bound both
+            // pools to four checkers so duplicated inference state stays
+            // within the native service memory budget.
             checkers: std::thread::available_parallelism()
                 .map_or(4, |count| count.get())
-                .min(6),
+                .min(4),
             incremental: true,
             ts_build_info_file: PathBuf::new(),
             skip_paths_in_key_for_compilation_settings: true,
@@ -433,7 +436,7 @@ impl NativeTypeSession {
         ))?;
         let sdk_plugin_executor = sdk_plugin_host.map(|host| {
             Arc::new(tsrs_api::embedded::SdkPluginExecutor::new(Arc::new(
-                plugins::PluginHost(host),
+                plugins::PluginHost::new(host),
             ))) as Arc<dyn tsrs_core::OhSdkPluginExecutor>
         });
         Ok(Self {

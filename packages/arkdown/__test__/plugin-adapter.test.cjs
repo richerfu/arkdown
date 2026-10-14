@@ -147,6 +147,36 @@ exports.SyscapChecker = class {
     { found: true, checkResult: true, checkMessage: 'syscap' },
   )
   assert.equal(require(typescriptRoot).sourceFileCreations(), 2)
+  const otherSession = { ...syscapRequest, sessionId: 8 }
+  invoke(otherSession)
+  const creationsBeforeRelease = require(typescriptRoot).sourceFileCreations()
+  assert.deepEqual(invoke({ sessionId: 7, operation: 'releaseSession', args: [] }), { found: true })
+  const otherReferences = {
+    ...otherSession,
+    args: [
+      {
+        node: { ...syscapRequest.args[0].node, source: undefined },
+        declaration: { ...syscapRequest.args[0].declaration, source: undefined },
+        projectConfigId: 1,
+      },
+    ],
+  }
+  invoke(otherReferences)
+  assert.equal(
+    require(typescriptRoot).sourceFileCreations(),
+    creationsBeforeRelease,
+    'releasing one session must preserve another session sharing its file names',
+  )
+  const expired = invoke({ ...otherReferences, sessionId: 7 })
+  assert.equal(expired.phase, 'invoke')
+  assert.match(expired.error, /not registered/)
+  invoke(syscapRequest)
+  assert.equal(
+    require(typescriptRoot).sourceFileCreations(),
+    creationsBeforeRelease + 2,
+    'released ASTs must be recreated from a newly registered source',
+  )
+
   assert.deepEqual(
     JSON.parse(
       createSdkPluginDispatch()(

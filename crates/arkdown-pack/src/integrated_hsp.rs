@@ -27,7 +27,7 @@ use crate::error::PackError;
 use crate::zip_writer;
 
 /// Descriptor for a single remote HSP to be integrated into a HAP.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct IntegratedHspEntry {
     /// Directory name used inside the HAP `libs/` tree (e.g. `"mylib@1.0.0"`).
     pub hsp_dir_name: String,

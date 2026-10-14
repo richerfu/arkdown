@@ -49,6 +49,55 @@ fn build_profile_adapter_uses_published_sha384_backend_for_in_place_signing() {
         store_file: keystore_path,
         store_password: encrypted_password,
     };
+    let output = temporary.path().join("signed.hap");
+    let runner =
+        SignBackendRunner::new().with_cache_directory(Some(temporary.path().join("cache")));
+    runner
+        .sign_or_skip(&application_path, &output, Some(&config))
+        .unwrap();
+    let signed_before = fs_err::read(&output).unwrap();
+    let marker = std::time::UNIX_EPOCH + std::time::Duration::from_secs(123456);
+    fs_err::File::options()
+        .write(true)
+        .open(&output)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(marker))
+        .unwrap();
+    let saved_time = fs_err::metadata(&output).unwrap().modified().unwrap();
+    runner
+        .sign_or_skip(&application_path, &output, Some(&config))
+        .unwrap();
+    assert_eq!(
+        fs_err::metadata(&output).unwrap().modified().unwrap(),
+        saved_time
+    );
+    assert_eq!(
+        fs_err::read(&output).unwrap(),
+        signed_before,
+        "unchanged signing inputs must preserve signature bytes"
+    );
+    fs_err::write(&output, b"corrupt signature").unwrap();
+    runner
+        .sign_or_skip(&application_path, &output, Some(&config))
+        .unwrap();
+    ApplicationVerifier::new(&fs_err::read(&output).unwrap())
+        .verify(InputFormat::Zip)
+        .unwrap();
+    let original_profile = fs_err::read(&config.profile_path).unwrap();
+    fs_err::write(&config.profile_path, b"invalid profile").unwrap();
+    assert!(
+        runner
+            .sign_or_skip(&application_path, &output, Some(&config))
+            .is_err(),
+        "changed signing material must invalidate"
+    );
+    fs_err::write(&config.profile_path, original_profile).unwrap();
+    runner
+        .sign_or_skip(&application_path, &output, Some(&config))
+        .unwrap();
+    ApplicationVerifier::new(&fs_err::read(&output).unwrap())
+        .verify(InputFormat::Zip)
+        .unwrap();
     SignBackendRunner::new()
         .sign_or_skip(&application_path, &application_path, Some(&config))
         .expect("sign in place through Arkdown adapter");

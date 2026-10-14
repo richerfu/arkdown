@@ -20,6 +20,56 @@ use arkdown_path::{ArtifactPath, HostPlatform};
 use flate2::write::DeflateEncoder;
 use indexmap::IndexMap;
 
+#[test]
+fn package_cache_validates_inputs_and_reuses_the_completed_archive() {
+    let temp = tempfile::tempdir().unwrap();
+    let (abc, resources, module) = write_minimal_inputs(temp.path());
+    let output = temp.path().join("entry.hap");
+    let cache = temp.path().join("cache");
+    let packager = Packager::new(make_config()).with_cache_directory(Some(cache.clone()));
+    let build = || {
+        packager
+            .pack_hap(minimal_pack_input(
+                abc.clone(),
+                resources.clone(),
+                module.clone(),
+                output.clone(),
+            ))
+            .unwrap()
+    };
+    build();
+    let marker = std::time::UNIX_EPOCH + std::time::Duration::from_secs(123456);
+    fs::File::options()
+        .write(true)
+        .open(&output)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(marker))
+        .unwrap();
+    let saved_time = fs::metadata(&output).unwrap().modified().unwrap();
+    build();
+    assert_eq!(
+        fs::metadata(&output).unwrap().modified().unwrap(),
+        saved_time,
+        "cache hit must not rewrite the archive"
+    );
+    fs::write(&abc, b"modified bytecode").unwrap();
+    build();
+    let mut zip = zip::ZipArchive::new(fs::File::open(&output).unwrap()).unwrap();
+    let mut bytes = Vec::new();
+    zip.by_name("ets/modules.abc")
+        .unwrap()
+        .read_to_end(&mut bytes)
+        .unwrap();
+    assert_eq!(bytes, b"modified bytecode");
+    drop(zip);
+    fs::write(&output, b"corrupted archive").unwrap();
+    build();
+    assert!(zip::ZipArchive::new(fs::File::open(&output).unwrap()).is_ok());
+    fs::remove_file(&output).unwrap();
+    build();
+    assert!(output.is_file());
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

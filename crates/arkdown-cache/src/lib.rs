@@ -22,6 +22,7 @@
 //! | `key.rs` | `CompileEnv`, `CacheFingerprint` |
 //! | `module_transform.rs` | OXC artifacts, graph manifest and atomic commit |
 
+mod artifact;
 pub mod error;
 pub mod group_invalidation;
 mod har_importee;
@@ -34,6 +35,7 @@ pub mod plugin_context;
 // ---------------------------------------------------------------------------
 
 // error
+pub use artifact::{ArtifactCacheStore, ArtifactInputHasher};
 pub use error::CacheError;
 
 // key — cache key types

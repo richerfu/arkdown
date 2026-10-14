@@ -1,4 +1,0 @@
-[submodule "third_party/tsrs"]
-	path = third_party/tsrs
-	url = https://github.com/ohos-rs/tsrs.git
-	branch = ohos

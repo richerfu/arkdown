@@ -10,12 +10,19 @@ use crate::error::SignError;
 use crate::plan::SignPlan;
 
 /// Sequential signing-stage runner backed by the published hapsigner crate.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct SignBackendRunner;
+#[derive(Debug, Default, Clone)]
+pub struct SignBackendRunner {
+    cache_directory: Option<PathBuf>,
+}
 
 impl SignBackendRunner {
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    pub fn with_cache_directory(mut self, directory: Option<PathBuf>) -> Self {
+        self.cache_directory = directory;
+        self
     }
 
     /// Execute an already resolved local-signing plan.
@@ -46,7 +53,83 @@ impl SignBackendRunner {
         };
 
         let plan = SigningConfigMaterial::new(config).plan(input, output)?;
-        self.run(&plan)
+        let completion = self.signing_completion(input, output, config);
+        if let Some((store, key)) = &completion {
+            match store.matches(key, &[output.to_path_buf()]) {
+                Ok(true) => {
+                    tracing::info!(output = %output.display(), "sign cache hit");
+                    return Ok(());
+                }
+                Ok(false) => {}
+                Err(error) => tracing::warn!(%error, "sign cache validation failed; signing again"),
+            }
+            if let Err(error) = store.invalidate() {
+                tracing::warn!(%error, "sign cache invalidation failed");
+            }
+        }
+        // SignHap.doTaskAction removes stale output only when the task runs.
+        if output.is_file() && input != output {
+            fs_err::remove_file(output)?;
+        }
+        self.run(&plan)?;
+        if let Some((store, key)) = completion {
+            if let Err(error) = store.commit(&key, &[output.to_path_buf()]) {
+                tracing::warn!(%error, "sign completion cache commit failed");
+            }
+        }
+        Ok(())
+    }
+
+    /// SignUtil declares algorithm/alias/password options plus certificate,
+    /// profile, keystore and unsigned archive contents as signing inputs.
+    fn signing_completion(
+        &self,
+        input: &Path,
+        output: &Path,
+        config: &SigningConfig,
+    ) -> Option<(arkdown_cache::ArtifactCacheStore, String)> {
+        let directory = self.cache_directory.as_deref()?;
+        let result = (|| -> Result<_, arkdown_cache::CacheError> {
+            let store = arkdown_cache::ArtifactCacheStore::for_output(directory, "sign", output)?;
+            let mut hash = arkdown_cache::ArtifactInputHasher::new("hapsigner-sign-v1");
+            hash.value(&serde_json::to_vec(config)?);
+            for path in [
+                input,
+                config.cert_path.as_path(),
+                config.profile_path.as_path(),
+                config.store_file.as_path(),
+            ] {
+                hash.file(path)?;
+            }
+            // DevEcoPasswordResolver::resolve reads this material subtree.
+            let material = SigningConfigMaterial::new(config)
+                .material_dir()
+                .join("material");
+            hash.value(&serde_json::to_vec(&material)?);
+            if material.is_dir() {
+                let mut paths = Vec::new();
+                for entry in walkdir::WalkDir::new(&material).follow_links(false) {
+                    let entry = entry.map_err(std::io::Error::other)?;
+                    if entry.file_type().is_file() {
+                        paths.push(entry.into_path());
+                    }
+                }
+                paths.sort();
+                for path in paths {
+                    hash.file(&path)?;
+                }
+            } else {
+                hash.value(b"missing-password-material");
+            }
+            Ok((store, hash.finish()))
+        })();
+        match result {
+            Ok(completion) => Some(completion),
+            Err(error) => {
+                tracing::warn!(%error, "sign input fingerprint failed; signing again");
+                None
+            }
+        }
     }
 }
 

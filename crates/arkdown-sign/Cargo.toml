@@ -6,6 +6,9 @@ edition = "2021"
 [dependencies]
 aes-gcm      = { workspace = true }
 arkdown-core = { workspace = true }
+arkdown-cache = { workspace = true }
+serde_json = { workspace = true }
+walkdir = { workspace = true }
 fs-err       = { workspace = true }
 hapsigner    = { workspace = true }
 hex          = { workspace = true }

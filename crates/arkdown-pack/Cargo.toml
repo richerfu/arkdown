@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 arkdown-core = { workspace = true }
+arkdown-cache = { workspace = true }
 arkdown-path = { workspace = true }
 zip = { workspace = true }
 rawzip = { workspace = true }

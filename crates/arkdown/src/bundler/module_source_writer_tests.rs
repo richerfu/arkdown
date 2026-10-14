@@ -2971,3 +2971,129 @@ fn module_source_writer_rewrites_ohpm_imports_to_package_records() {
         "{hmcore_output}"
     );
 }
+
+#[test]
+fn module_source_writes_preserve_other_sdk_pass_inputs_in_shared_cache() {
+    // ModuleSourceFile.writeSourceFile writes its own inputs. Main, widget and
+    // incremental Hvigor passes share cache storage; absence from one pass's
+    // graph does not mean another pass's generated source was deleted.
+    let project = tempfile::tempdir().unwrap();
+    let module_root = project.path().join("entry");
+    let cache = project.path().join("cache");
+    let map = HvigorModulePathMap::new("entry", &module_root, &[]);
+    let packages = runtime_packages(&[("entry", "entry", "app", "entry", "1.0.0", false)]);
+    let mut state = HvigorModuleSourceState::default();
+    let ids = ["main.ets", "widget.ets"].map(|name| {
+        module_root
+            .join("src/main/ets")
+            .join(name)
+            .to_str()
+            .unwrap()
+            .to_owned()
+    });
+    for id in &ids {
+        state.sources.insert(
+            id.clone(),
+            HvigorCollectedModuleSource {
+                code: "export const value = 1;".into(),
+            },
+        );
+    }
+    let facts = ModuleGraphFacts {
+        full_module_ids: ids.to_vec(),
+        ..Default::default()
+    };
+    let first = module_source_writer!(
+        "app",
+        "entry",
+        project.path(),
+        &map,
+        &packages,
+        &[],
+        false,
+        &facts,
+        vec![ids[0].clone()],
+        state.clone(),
+        cache.clone()
+    )
+    .write()
+    .unwrap();
+    let alternate = first[0].path.with_extension("js");
+    std::fs::write(&alternate, "previous transform variant").unwrap();
+    let second = module_source_writer!(
+        "app",
+        "entry",
+        project.path(),
+        &map,
+        &packages,
+        &[],
+        false,
+        &facts,
+        vec![ids[1].clone()],
+        state.clone(),
+        cache.clone()
+    )
+    .write()
+    .unwrap();
+    assert!(
+        first[0].path.is_file(),
+        "widget pass must preserve the main pass input"
+    );
+    assert!(second[0].path.is_file());
+    assert!(
+        alternate.is_file(),
+        "another pass does not own this variant"
+    );
+    module_source_writer!(
+        "app",
+        "entry",
+        project.path(),
+        &map,
+        &packages,
+        &[],
+        false,
+        &facts,
+        vec![ids[0].clone()],
+        state.clone(),
+        cache.clone()
+    )
+    .write()
+    .unwrap();
+    assert!(
+        !alternate.exists(),
+        "rewriting a TS source removes its JS variant"
+    );
+    assert!(second[0].path.is_file());
+
+    // Independent parallel outputs must not delete each other. Reject a
+    // simultaneously active TS/JS variant pair before writing either one.
+    let javascript_id = module_root
+        .join("src/main/ets/main.js")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    state.sources.insert(
+        javascript_id.clone(),
+        HvigorCollectedModuleSource {
+            code: "export const value = 2;".into(),
+        },
+    );
+    state.javascript_module_ids.insert(javascript_id.clone());
+    let error = module_source_writer!(
+        "app",
+        "entry",
+        project.path(),
+        &map,
+        &packages,
+        &[],
+        false,
+        &facts,
+        vec![ids[0].clone(), javascript_id],
+        state,
+        cache
+    )
+    .write()
+    .unwrap_err();
+    assert!(error.to_string().contains("would remove the active output"));
+    assert!(first[0].path.is_file());
+}
