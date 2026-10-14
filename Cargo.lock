@@ -134,7 +134,7 @@ dependencies = [
  "async-trait",
  "fs-err",
  "indexmap",
- "json5",
+ "json5 0.4.1",
  "memory-stats",
  "oxc_allocator",
  "oxc_ast",
@@ -204,7 +204,7 @@ dependencies = [
  "fs-err",
  "globset",
  "indexmap",
- "json5",
+ "json5 0.4.1",
  "jsonschema",
  "junction",
  "oxc_span",
@@ -229,6 +229,8 @@ dependencies = [
  "arkdown-core",
  "arkdown-path",
  "fs-err",
+ "oxc_index",
+ "rayon",
  "rustc-hash 2.1.3",
  "serde",
  "serde_json",
@@ -245,7 +247,7 @@ dependencies = [
  "arkdown-core",
  "arkdown-path",
  "fs-err",
- "json5",
+ "json5 0.4.1",
  "rustc-hash 2.1.3",
  "serde",
  "serde_json",
@@ -273,12 +275,17 @@ dependencies = [
 name = "arkdown-ets-checker"
 version = "0.1.0"
 dependencies = [
+ "arkdown-core",
  "arkdown-ohos-schema",
+ "arkdown-path",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
  "tracing",
+ "tsrs_api",
+ "tsrs_core",
+ "tsrs_vfs",
 ]
 
 [[package]]
@@ -289,7 +296,7 @@ dependencies = [
  "arkdown-core",
  "arkdown-path",
  "fs-err",
- "json5",
+ "json5 0.4.1",
  "junction",
  "oxc_allocator",
  "oxc_ast",
@@ -298,6 +305,7 @@ dependencies = [
  "oxc_isolated_declarations",
  "oxc_parser",
  "oxc_semantic",
+ "oxc_sourcemap",
  "oxc_span",
  "oxc_str",
  "oxc_syntax",
@@ -328,6 +336,7 @@ dependencies = [
  "arkdown-config",
  "arkdown-core",
  "arkdown-ets-checker",
+ "arkdown-ets-transform",
  "arkdown-path",
  "arkdown-profile",
  "arkdown-sign",
@@ -335,13 +344,16 @@ dependencies = [
  "flate2",
  "hapsigner",
  "hex",
- "json5",
+ "json5 0.4.1",
+ "libc",
+ "libmimalloc-sys2",
  "mimalloc-safe",
  "napi",
  "napi-build",
  "napi-derive",
  "num_cpus",
  "pbkdf2",
+ "rayon",
  "rolldown_common",
  "rolldown_plugin",
  "rolldown_sourcemap",
@@ -421,6 +433,7 @@ dependencies = [
 name = "arkdown-pack"
 version = "0.1.0"
 dependencies = [
+ "arkdown-cache",
  "arkdown-core",
  "arkdown-path",
  "crc32fast",
@@ -428,7 +441,8 @@ dependencies = [
  "fs-err",
  "globset",
  "indexmap",
- "json5",
+ "json5 0.4.1",
+ "oxc_index",
  "rawzip",
  "rayon",
  "semver",
@@ -464,7 +478,7 @@ dependencies = [
  "arkdown-session",
  "fs-err",
  "indexmap",
- "json5",
+ "json5 0.4.1",
  "jsonschema",
  "junction",
  "oxc_allocator",
@@ -487,7 +501,7 @@ dependencies = [
  "arkdown-core",
  "arkdown-path",
  "fs-err",
- "json5",
+ "json5 0.4.1",
  "junction",
  "oxc_resolver",
  "rustc-hash 2.1.3",
@@ -503,7 +517,7 @@ version = "0.1.0"
 dependencies = [
  "arkdown-path",
  "fs-err",
- "json5",
+ "json5 0.4.1",
  "rustc-hash 2.1.3",
  "serde",
  "serde_json",
@@ -521,7 +535,7 @@ dependencies = [
  "arkdown-path",
  "compact_str 0.8.2",
  "indexmap",
- "json5",
+ "json5 0.4.1",
  "oxc_index",
  "rayon",
  "rustc-hash 2.1.3",
@@ -540,15 +554,18 @@ name = "arkdown-sign"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
+ "arkdown-cache",
  "arkdown-core",
  "fs-err",
  "hapsigner",
  "hex",
  "pbkdf2",
+ "serde_json",
  "sha2",
  "tempfile",
  "thiserror 2.0.20",
  "tracing",
+ "walkdir",
  "zip",
 ]
 
@@ -1164,6 +1181,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "cty"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b365fabc795046672053e29c954733ec3b05e4be654ab130fe8f1f94d7051f35"
+
+[[package]]
 name = "dashmap"
 version = "6.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1761,8 +1784,7 @@ dependencies = [
 [[package]]
 name = "hapsigner"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "959e468956e4e555f1388cb8ee9653811f0945eb77bdfd245aa9d03562352250"
+source = "git+https://github.com/harmony-contrib/hapsigner-rs.git?rev=0b4a16ad812d679c28e9d5602f0b0a239f28c719#0b4a16ad812d679c28e9d5602f0b0a239f28c719"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -1781,6 +1803,7 @@ dependencies = [
  "pkcs5",
  "pkcs8",
  "rand",
+ "rayon",
  "rsa",
  "serde_json",
  "sha2",
@@ -2253,6 +2276,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "json5"
+version = "1.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "733a844dbd6fef128e98cb4487b887cb55454d92cd9994b1bafe004fabbe670c"
+dependencies = [
+ "serde",
+ "ucd-trie",
+]
+
+[[package]]
 name = "jsonschema"
 version = "0.49.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2384,6 +2417,7 @@ checksum = "921641155d9dc4f434332abd912518e33c70e37c557434818b6cfd1fbbb6138d"
 dependencies = [
  "cc",
  "cmake",
+ "cty",
  "libc",
 ]
 
@@ -3923,7 +3957,7 @@ dependencies = [
 [[package]]
 name = "rolldown"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "anyhow",
  "append-only-vec",
@@ -3988,7 +4022,7 @@ dependencies = [
 [[package]]
 name = "rolldown_common"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "anyhow",
  "arcstr",
@@ -4023,7 +4057,7 @@ dependencies = [
 [[package]]
 name = "rolldown_dev_common"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "derive_more",
  "rolldown_common",
@@ -4034,7 +4068,7 @@ dependencies = [
 [[package]]
 name = "rolldown_devtools"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "blake3",
  "rolldown_devtools_action",
@@ -4048,7 +4082,7 @@ dependencies = [
 [[package]]
 name = "rolldown_devtools_action"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "serde",
  "ts-rs",
@@ -4057,7 +4091,7 @@ dependencies = [
 [[package]]
 name = "rolldown_ecmascript"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "arcstr",
  "oxc",
@@ -4070,7 +4104,7 @@ dependencies = [
 [[package]]
 name = "rolldown_ecmascript_utils"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "memchr",
  "oxc",
@@ -4081,7 +4115,7 @@ dependencies = [
 [[package]]
 name = "rolldown_error"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "anyhow",
  "arcstr",
@@ -4098,7 +4132,7 @@ dependencies = [
 [[package]]
 name = "rolldown_fs"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "oxc_resolver",
  "vfs",
@@ -4107,7 +4141,7 @@ dependencies = [
 [[package]]
 name = "rolldown_plugin"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "anyhow",
  "arcstr",
@@ -4137,7 +4171,7 @@ dependencies = [
 [[package]]
 name = "rolldown_plugin_asset_module"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "anyhow",
  "rolldown_common",
@@ -4150,7 +4184,7 @@ dependencies = [
 [[package]]
 name = "rolldown_plugin_chunk_import_map"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "arcstr",
  "rolldown_common",
@@ -4164,7 +4198,7 @@ dependencies = [
 [[package]]
 name = "rolldown_plugin_copy_module"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "anyhow",
  "arcstr",
@@ -4178,7 +4212,7 @@ dependencies = [
 [[package]]
 name = "rolldown_plugin_data_url"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "arcstr",
  "base64-simd",
@@ -4192,7 +4226,7 @@ dependencies = [
 [[package]]
 name = "rolldown_plugin_hmr"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "rolldown_common",
  "rolldown_plugin",
@@ -4201,7 +4235,7 @@ dependencies = [
 [[package]]
 name = "rolldown_plugin_lazy_compilation"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "anyhow",
  "arcstr",
@@ -4215,7 +4249,7 @@ dependencies = [
 [[package]]
 name = "rolldown_plugin_oxc_runtime"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "arcstr",
  "phf",
@@ -4227,7 +4261,7 @@ dependencies = [
 [[package]]
 name = "rolldown_plugin_utils"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "anyhow",
  "arcstr",
@@ -4245,7 +4279,7 @@ dependencies = [
 [[package]]
 name = "rolldown_resolver"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "anyhow",
  "arcstr",
@@ -4261,7 +4295,7 @@ dependencies = [
 [[package]]
 name = "rolldown_sourcemap"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "memchr",
  "oxc",
@@ -4271,7 +4305,7 @@ dependencies = [
 [[package]]
 name = "rolldown_std_utils"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "regex",
  "sugar_path",
@@ -4280,7 +4314,7 @@ dependencies = [
 [[package]]
 name = "rolldown_tracing"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "tracing",
  "tracing-subscriber",
@@ -4289,7 +4323,7 @@ dependencies = [
 [[package]]
 name = "rolldown_utils"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "anyhow",
  "arcstr",
@@ -4836,7 +4870,7 @@ checksum = "d08889ec5408683408db66ad89e0e1f93dff55c73a4ccc71c427d5b277ee47e6"
 [[package]]
 name = "string_wizard"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "memchr",
  "oxc_index",
@@ -5335,6 +5369,421 @@ dependencies = [
  "quote",
  "syn 2.0.119",
  "termcolor",
+]
+
+[[package]]
+name = "tsrs_api"
+version = "0.11.0"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=4d7e69df3847b5e0e5708b22a3f713082e5e6d02#4d7e69df3847b5e0e5708b22a3f713082e5e6d02"
+dependencies = [
+ "rustc-hash 2.1.3",
+ "serde",
+ "serde_json",
+ "tsrs_api_codec",
+ "tsrs_api_transport",
+ "tsrs_ast",
+ "tsrs_astnav",
+ "tsrs_checker",
+ "tsrs_compiler",
+ "tsrs_core",
+ "tsrs_diagnostics",
+ "tsrs_ls",
+ "tsrs_lsproto",
+ "tsrs_module",
+ "tsrs_printer",
+ "tsrs_project",
+ "tsrs_scanner",
+ "tsrs_tsoptions",
+ "tsrs_vfs",
+]
+
+[[package]]
+name = "tsrs_api_codec"
+version = "0.11.0"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=4d7e69df3847b5e0e5708b22a3f713082e5e6d02#4d7e69df3847b5e0e5708b22a3f713082e5e6d02"
+dependencies = [
+ "rustc-hash 2.1.3",
+ "serde",
+ "serde_json",
+ "tsrs_ast",
+ "tsrs_core",
+]
+
+[[package]]
+name = "tsrs_api_transport"
+version = "0.11.0"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=4d7e69df3847b5e0e5708b22a3f713082e5e6d02#4d7e69df3847b5e0e5708b22a3f713082e5e6d02"
+dependencies = [
+ "rustc-hash 2.1.3",
+ "serde",
+ "serde_json",
+ "tsrs_vfs",
+]
+
+[[package]]
+name = "tsrs_ast"
+version = "0.11.0"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=4d7e69df3847b5e0e5708b22a3f713082e5e6d02#4d7e69df3847b5e0e5708b22a3f713082e5e6d02"
+dependencies = [
+ "bitflags 2.13.1",
+ "hashbrown 0.17.1",
+ "memchr",
+ "rustc-hash 2.1.3",
+ "tsrs_core",
+ "tsrs_diagnostics",
+ "tsrs_spanmap",
+]
+
+[[package]]
+name = "tsrs_astnav"
+version = "0.11.0"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=4d7e69df3847b5e0e5708b22a3f713082e5e6d02#4d7e69df3847b5e0e5708b22a3f713082e5e6d02"
+dependencies = [
+ "tsrs_ast",
+ "tsrs_core",
+ "tsrs_scanner",
+]
+
+[[package]]
+name = "tsrs_binder"
+version = "0.11.0"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=4d7e69df3847b5e0e5708b22a3f713082e5e6d02#4d7e69df3847b5e0e5708b22a3f713082e5e6d02"
+dependencies = [
+ "bitflags 2.13.1",
+ "rustc-hash 2.1.3",
+ "tsrs_ast",
+ "tsrs_core",
+ "tsrs_diagnostics",
+ "tsrs_scanner",
+]
+
+[[package]]
+name = "tsrs_checker"
+version = "0.11.0"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=4d7e69df3847b5e0e5708b22a3f713082e5e6d02#4d7e69df3847b5e0e5708b22a3f713082e5e6d02"
+dependencies = [
+ "bitflags 2.13.1",
+ "hashbrown 0.17.1",
+ "regex",
+ "regress",
+ "rustc-hash 2.1.3",
+ "serde",
+ "serde_json",
+ "tsrs_ast",
+ "tsrs_astnav",
+ "tsrs_binder",
+ "tsrs_core",
+ "tsrs_diagnostics",
+ "tsrs_module",
+ "tsrs_modulespecifiers",
+ "tsrs_parser",
+ "tsrs_printer",
+ "tsrs_pseudochecker",
+ "tsrs_scanner",
+ "tsrs_tsoptions",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "tsrs_compiler"
+version = "0.11.0"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=4d7e69df3847b5e0e5708b22a3f713082e5e6d02#4d7e69df3847b5e0e5708b22a3f713082e5e6d02"
+dependencies = [
+ "rayon",
+ "rustc-hash 2.1.3",
+ "serde",
+ "serde_json",
+ "tsrs_ast",
+ "tsrs_binder",
+ "tsrs_checker",
+ "tsrs_contentmapper",
+ "tsrs_core",
+ "tsrs_declarations",
+ "tsrs_diagnostics",
+ "tsrs_module",
+ "tsrs_modulespecifiers",
+ "tsrs_parser",
+ "tsrs_printer",
+ "tsrs_scanner",
+ "tsrs_sourcemap",
+ "tsrs_spanmap",
+ "tsrs_transformers",
+ "tsrs_tsoptions",
+ "tsrs_vfs",
+]
+
+[[package]]
+name = "tsrs_contentmapper"
+version = "0.11.0"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=4d7e69df3847b5e0e5708b22a3f713082e5e6d02#4d7e69df3847b5e0e5708b22a3f713082e5e6d02"
+dependencies = [
+ "rustc-hash 2.1.3",
+ "tsrs_ast",
+ "tsrs_core",
+ "tsrs_diagnostics",
+ "tsrs_ipc",
+ "tsrs_parser",
+ "tsrs_spanmap",
+ "tsrs_tsoptions",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "tsrs_core"
+version = "0.11.0"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=4d7e69df3847b5e0e5708b22a3f713082e5e6d02#4d7e69df3847b5e0e5708b22a3f713082e5e6d02"
+dependencies = [
+ "hashbrown 0.17.1",
+ "indexmap",
+ "libc",
+ "memchr",
+ "rustc-hash 2.1.3",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "tsrs_declarations"
+version = "0.11.0"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=4d7e69df3847b5e0e5708b22a3f713082e5e6d02#4d7e69df3847b5e0e5708b22a3f713082e5e6d02"
+dependencies = [
+ "rustc-hash 2.1.3",
+ "tsrs_ast",
+ "tsrs_checker",
+ "tsrs_core",
+ "tsrs_diagnostics",
+ "tsrs_modulespecifiers",
+ "tsrs_printer",
+ "tsrs_scanner",
+ "tsrs_transformers",
+ "tsrs_tsoptions",
+]
+
+[[package]]
+name = "tsrs_diagnostics"
+version = "0.11.0"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=4d7e69df3847b5e0e5708b22a3f713082e5e6d02#4d7e69df3847b5e0e5708b22a3f713082e5e6d02"
+dependencies = [
+ "rustc-hash 2.1.3",
+]
+
+[[package]]
+name = "tsrs_ipc"
+version = "0.11.0"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=4d7e69df3847b5e0e5708b22a3f713082e5e6d02#4d7e69df3847b5e0e5708b22a3f713082e5e6d02"
+dependencies = [
+ "rustc-hash 2.1.3",
+ "tsrs_core",
+]
+
+[[package]]
+name = "tsrs_ls"
+version = "0.11.0"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=4d7e69df3847b5e0e5708b22a3f713082e5e6d02#4d7e69df3847b5e0e5708b22a3f713082e5e6d02"
+dependencies = [
+ "bitflags 2.13.1",
+ "indexmap",
+ "rustc-hash 2.1.3",
+ "tsrs_ast",
+ "tsrs_astnav",
+ "tsrs_binder",
+ "tsrs_checker",
+ "tsrs_compiler",
+ "tsrs_core",
+ "tsrs_diagnostics",
+ "tsrs_lsproto",
+ "tsrs_module",
+ "tsrs_modulespecifiers",
+ "tsrs_parser",
+ "tsrs_printer",
+ "tsrs_projectutil",
+ "tsrs_scanner",
+ "tsrs_sourcemap",
+ "tsrs_spanmap",
+ "tsrs_tsoptions",
+ "tsrs_vfs",
+]
+
+[[package]]
+name = "tsrs_lsproto"
+version = "0.11.0"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=4d7e69df3847b5e0e5708b22a3f713082e5e6d02#4d7e69df3847b5e0e5708b22a3f713082e5e6d02"
+dependencies = [
+ "rustc-hash 2.1.3",
+ "tsrs_core",
+ "tsrs_vfs",
+]
+
+[[package]]
+name = "tsrs_module"
+version = "0.11.0"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=4d7e69df3847b5e0e5708b22a3f713082e5e6d02#4d7e69df3847b5e0e5708b22a3f713082e5e6d02"
+dependencies = [
+ "bitflags 2.13.1",
+ "json5 1.3.1",
+ "rustc-hash 2.1.3",
+ "serde",
+ "tsrs_ast",
+ "tsrs_core",
+ "tsrs_diagnostics",
+ "tsrs_vfs",
+]
+
+[[package]]
+name = "tsrs_modulespecifiers"
+version = "0.11.0"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=4d7e69df3847b5e0e5708b22a3f713082e5e6d02#4d7e69df3847b5e0e5708b22a3f713082e5e6d02"
+dependencies = [
+ "regex",
+ "rustc-hash 2.1.3",
+ "tsrs_ast",
+ "tsrs_core",
+ "tsrs_module",
+ "tsrs_tsoptions",
+]
+
+[[package]]
+name = "tsrs_parser"
+version = "0.11.0"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=4d7e69df3847b5e0e5708b22a3f713082e5e6d02#4d7e69df3847b5e0e5708b22a3f713082e5e6d02"
+dependencies = [
+ "bitflags 2.13.1",
+ "rustc-hash 2.1.3",
+ "tsrs_ast",
+ "tsrs_core",
+ "tsrs_diagnostics",
+ "tsrs_scanner",
+]
+
+[[package]]
+name = "tsrs_printer"
+version = "0.11.0"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=4d7e69df3847b5e0e5708b22a3f713082e5e6d02#4d7e69df3847b5e0e5708b22a3f713082e5e6d02"
+dependencies = [
+ "bitflags 2.13.1",
+ "rustc-hash 2.1.3",
+ "tsrs_ast",
+ "tsrs_core",
+ "tsrs_scanner",
+ "tsrs_sourcemap",
+]
+
+[[package]]
+name = "tsrs_project"
+version = "0.11.0"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=4d7e69df3847b5e0e5708b22a3f713082e5e6d02#4d7e69df3847b5e0e5708b22a3f713082e5e6d02"
+dependencies = [
+ "rustc-hash 2.1.3",
+ "tsrs_ast",
+ "tsrs_binder",
+ "tsrs_checker",
+ "tsrs_compiler",
+ "tsrs_contentmapper",
+ "tsrs_core",
+ "tsrs_diagnostics",
+ "tsrs_ls",
+ "tsrs_lsproto",
+ "tsrs_module",
+ "tsrs_parser",
+ "tsrs_projectutil",
+ "tsrs_tsoptions",
+ "tsrs_vfs",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "tsrs_projectutil"
+version = "0.11.0"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=4d7e69df3847b5e0e5708b22a3f713082e5e6d02#4d7e69df3847b5e0e5708b22a3f713082e5e6d02"
+dependencies = [
+ "rustc-hash 2.1.3",
+ "tsrs_core",
+]
+
+[[package]]
+name = "tsrs_pseudochecker"
+version = "0.11.0"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=4d7e69df3847b5e0e5708b22a3f713082e5e6d02#4d7e69df3847b5e0e5708b22a3f713082e5e6d02"
+dependencies = [
+ "tsrs_ast",
+ "tsrs_core",
+]
+
+[[package]]
+name = "tsrs_scanner"
+version = "0.11.0"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=4d7e69df3847b5e0e5708b22a3f713082e5e6d02#4d7e69df3847b5e0e5708b22a3f713082e5e6d02"
+dependencies = [
+ "bitflags 2.13.1",
+ "memchr",
+ "rustc-hash 2.1.3",
+ "tsrs_ast",
+ "tsrs_core",
+ "tsrs_diagnostics",
+]
+
+[[package]]
+name = "tsrs_sourcemap"
+version = "0.11.0"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=4d7e69df3847b5e0e5708b22a3f713082e5e6d02#4d7e69df3847b5e0e5708b22a3f713082e5e6d02"
+dependencies = [
+ "rustc-hash 2.1.3",
+ "tsrs_ast",
+ "tsrs_core",
+ "tsrs_scanner",
+]
+
+[[package]]
+name = "tsrs_spanmap"
+version = "0.11.0"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=4d7e69df3847b5e0e5708b22a3f713082e5e6d02#4d7e69df3847b5e0e5708b22a3f713082e5e6d02"
+dependencies = [
+ "bitflags 2.13.1",
+ "tsrs_core",
+]
+
+[[package]]
+name = "tsrs_transformers"
+version = "0.11.0"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=4d7e69df3847b5e0e5708b22a3f713082e5e6d02#4d7e69df3847b5e0e5708b22a3f713082e5e6d02"
+dependencies = [
+ "bitflags 2.13.1",
+ "rustc-hash 2.1.3",
+ "tsrs_ast",
+ "tsrs_binder",
+ "tsrs_checker",
+ "tsrs_core",
+ "tsrs_printer",
+ "tsrs_scanner",
+ "tsrs_tsoptions",
+]
+
+[[package]]
+name = "tsrs_tsoptions"
+version = "0.11.0"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=4d7e69df3847b5e0e5708b22a3f713082e5e6d02#4d7e69df3847b5e0e5708b22a3f713082e5e6d02"
+dependencies = [
+ "rustc-hash 2.1.3",
+ "serde_json",
+ "tsrs_ast",
+ "tsrs_core",
+ "tsrs_diagnostics",
+ "tsrs_module",
+ "tsrs_parser",
+ "tsrs_scanner",
+ "tsrs_vfs",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "tsrs_vfs"
+version = "0.11.0"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=4d7e69df3847b5e0e5708b22a3f713082e5e6d02#4d7e69df3847b5e0e5708b22a3f713082e5e6d02"
+dependencies = [
+ "bitflags 2.13.1",
+ "rayon",
+ "rustc-hash 2.1.3",
+ "tsrs_core",
 ]
 
 [[package]]

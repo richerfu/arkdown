@@ -74,11 +74,26 @@ impl NavigationRouteMap {
         NavigationRouteMapCollector::from_routes(routes).collect()
     }
 
-    pub(crate) fn routes_for_source(&self, source_id: &str) -> Option<&[NavigationRoute]> {
-        let path = NavigationRouteSourcePath::normalize(Path::new(source_id));
-        self.routes_by_source
-            .get(&path)
-            .map(|routes| routes.as_slice())
+    pub(crate) fn routes_for_source(
+        &self,
+        source_id: &str,
+        sources: &crate::TransformSourceSnapshot,
+    ) -> Option<&[NavigationRoute]> {
+        if self.routes_by_source.is_empty() {
+            return None;
+        }
+        let path = Path::new(source_id);
+        if let Some(routes) = self.routes_by_source.get(path) {
+            return Some(routes);
+        }
+        let fallback;
+        let path = if let Some(path) = sources.canonical_source_path(path) {
+            path
+        } else {
+            fallback = NavigationRouteSourcePath::normalize(path);
+            &fallback
+        };
+        self.routes_by_source.get(path).map(Vec::as_slice)
     }
 }
 

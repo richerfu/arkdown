@@ -31,6 +31,27 @@ static ALLOC: mimalloc_safe::MiMalloc = mimalloc_safe::MiMalloc;
 /// threads otherwise lets a large cold graph create hundreds of parked stacks.
 #[napi_derive::module_init]
 fn initialize_async_runtime() {
+  #[cfg(all(
+    feature = "allocator",
+    not(debug_assertions),
+    not(feature = "dhat-heap"),
+    not(any(
+      target_arch = "arm",
+      target_os = "android",
+      target_os = "freebsd",
+      target_os = "windows",
+      target_family = "wasm"
+    ))
+  ))]
+  {
+    // mimalloc-safe exposes no option setter. libmimalloc-sys2 0.1.60 exposes
+    // mi_option_set but omits this constant: mimalloc.h assigns purge_delay 15.
+    const MI_OPTION_PURGE_DELAY: libmimalloc_sys2::mi_option_t = 15;
+    // Round 1 starts at 0 ms; the final delay awaits acceptance measurements.
+    // SAFETY: set the valid option once at binding initialization, before
+    // starting the runtime or exposing any build/check services to JavaScript.
+    unsafe { libmimalloc_sys2::mi_option_set(MI_OPTION_PURGE_DELAY, 0) };
+  }
   #[cfg(not(target_family = "wasm"))]
   {
     let max_blocking_threads = std::env::var("ROLLDOWN_MAX_BLOCKING_THREADS")
@@ -41,10 +62,11 @@ fn initialize_async_runtime() {
       .ok()
       .and_then(|value| value.parse::<usize>().ok())
       .unwrap_or_else(|| num_cpus::get_physical() * 3 / 2);
-    let runtime = tokio::runtime::Builder::new_multi_thread()
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    heap_reclaimer::NapiHeapReclaimer::configure_runtime(&mut builder, worker_threads);
+    let runtime = builder
       .worker_threads(worker_threads)
       .max_blocking_threads(max_blocking_threads)
-      .thread_name("arkdown-rolldown-worker")
       .enable_all()
       .build()
       .expect("failed to initialize the Arkdown N-API runtime");
@@ -52,9 +74,9 @@ fn initialize_async_runtime() {
   }
 }
 
+mod heap_reclaimer;
 mod hvigor_plugin_plan;
 mod js_callback;
-mod package_layout;
 mod plugin_module;
 mod runtime_observe;
 
@@ -71,7 +93,6 @@ use napi_derive::napi;
 use rustc_hash::FxHashMap;
 
 use js_callback::{MaybeAsyncJsCallback, MaybeAsyncJsCallbackExt, MaybeAsyncJsReturn};
-use package_layout::NapiPackageLayout;
 
 use rolldown_common::{
   side_effects::HookSideEffects, EmittedAsset, EmittedChunk, LogWithoutPlugin, ModuleDefFormat,
@@ -95,7 +116,8 @@ use arkdown::plugins::hvigor_compile::{
 };
 use arkdown::PluginCacheModule;
 use arkdown_ets_checker::{
-  NativeCheckError, NativeOhSdkPluginHost, NativeOhSdkPluginRequest, NativeOhSdkPluginResponse,
+  NativeCheckError, NativeOhSdkPluginCompletion, NativeOhSdkPluginHost, NativeOhSdkPluginRequest,
+  NativeOhSdkPluginResponse,
 };
 
 #[napi(object)]
@@ -136,66 +158,75 @@ impl NapiSdkPluginHost {
     );
     Ok(Arc::new(Self { dispatch }))
   }
-
-  fn dispatch_batch(
-    &self,
-    requests: Vec<NativeOhSdkPluginRequest>,
-  ) -> std::result::Result<Vec<NativeOhSdkPluginResponse>, NativeCheckError> {
-    let request = serde_json::to_string(&requests).map_err(|error| {
-      NativeCheckError::Protocol(format!(
-        "cannot serialize OH SDK plugin request batch for JavaScript: {error}"
-      ))
-    })?;
-    let (sender, receiver) = mpsc::sync_channel(1);
-    let status = self.dispatch.call_with_return_value(
-      request,
-      ThreadsafeFunctionCallMode::NonBlocking,
-      move |result, _env| {
-        let result = result.map_err(|error| error.to_string());
-        let _ = sender.send(result);
-        Ok(())
-      },
-    );
-    if status != Status::Ok {
-      return Err(NativeCheckError::Protocol(format!(
-        "failed to schedule OH SDK plugin callback batch: {status:?}"
-      )));
-    }
-    let response = receiver.recv().map_err(|error| {
-      NativeCheckError::Protocol(format!(
-        "OH SDK plugin callback batch did not respond: {error}"
-      ))
-    })?;
-    let response = response.map_err(|error| {
-      NativeCheckError::Protocol(format!("OH SDK plugin callback batch threw: {error}"))
-    })?;
-    serde_json::from_str(&response).map_err(|error| {
-      NativeCheckError::Protocol(format!(
-        "invalid OH SDK plugin batch response from JavaScript: {error}"
-      ))
-    })
-  }
 }
 
 impl NativeOhSdkPluginHost for NapiSdkPluginHost {
-  fn invoke(
-    &self,
-    request: NativeOhSdkPluginRequest,
-  ) -> std::result::Result<NativeOhSdkPluginResponse, NativeCheckError> {
-    self
-      .dispatch_batch(vec![request])?
-      .into_iter()
-      .next()
-      .ok_or_else(|| {
-        NativeCheckError::Protocol("OH SDK plugin callback returned no response".into())
-      })
-  }
-
   fn invoke_batch(
     &self,
     requests: Vec<NativeOhSdkPluginRequest>,
   ) -> std::result::Result<Vec<NativeOhSdkPluginResponse>, NativeCheckError> {
-    self.dispatch_batch(requests)
+    let (sender, receiver) = mpsc::sync_channel(1);
+    self.submit_batch(
+      requests,
+      Box::new(move |result| {
+        let _ = sender.send(result);
+      }),
+    );
+    receiver.recv().map_err(|error| {
+      NativeCheckError::Compiler(format!(
+        "OH SDK plugin callback batch did not respond: {error}"
+      ))
+    })?
+  }
+
+  fn submit_batch(
+    &self,
+    requests: Vec<NativeOhSdkPluginRequest>,
+    complete: NativeOhSdkPluginCompletion,
+  ) {
+    let request = match serde_json::to_string(&requests) {
+      Ok(request) => request,
+      Err(error) => {
+        complete(Err(NativeCheckError::Compiler(format!(
+          "cannot serialize OH SDK plugin request batch for JavaScript: {error}"
+        ))));
+        return;
+      }
+    };
+    // Either scheduling fails or the JS callback completes. This one-shot slot
+    // gives both paths ownership without holding a lock while invoking the host.
+    let completion = Arc::new(std::sync::Mutex::new(Some(complete)));
+    let callback = Arc::clone(&completion);
+    let status = self.dispatch.call_with_return_value(
+      request,
+      ThreadsafeFunctionCallMode::NonBlocking,
+      move |result, _env| {
+        let result = result
+          .map_err(|error| {
+            NativeCheckError::Compiler(format!("OH SDK plugin callback batch threw: {error}"))
+          })
+          .and_then(|response| {
+            serde_json::from_str(&response).map_err(|error| {
+              NativeCheckError::Compiler(format!(
+                "invalid OH SDK plugin batch response from JavaScript: {error}"
+              ))
+            })
+          });
+        let complete = callback.lock().unwrap().take();
+        if let Some(complete) = complete {
+          complete(result);
+        }
+        Ok(())
+      },
+    );
+    if status != Status::Ok {
+      let complete = completion.lock().unwrap().take();
+      if let Some(complete) = complete {
+        complete(Err(NativeCheckError::Compiler(format!(
+          "failed to schedule OH SDK plugin callback batch: {status:?}"
+        ))));
+      }
+    }
   }
 }
 
@@ -221,8 +252,6 @@ pub fn check<'a>(
   config: CheckConfig,
   sdk_plugin_dispatch: Function<'a, (String,), String>,
 ) -> napi::Result<Object<'a>> {
-  let typescript_executable =
-    NapiPackageLayout::from_env(&env)?.packaged_typescript_executable()?;
   let sdk_plugin_host = Some(NapiSdkPluginHost::from_dispatch(sdk_plugin_dispatch)?);
   let args = arkdown_build::check::CheckRequest {
     target: config.target.unwrap_or_else(|| "hap".to_string()),
@@ -230,8 +259,9 @@ pub fn check<'a>(
     project: config.project.map(PathBuf::from),
     is_crossplatform: config.is_crossplatform.unwrap_or(false),
     ignore_crossplatform_check: config.ignore_crossplatform_check.unwrap_or(false),
-    typescript_executable,
+
     sdk_plugin_host,
+    heap_reclaimer: Some(heap_reclaimer::NapiHeapReclaimer::from_env(&env)?),
   };
   let raw_promise = napi::bindgen_prelude::execute_tokio_future(
     env.raw(),
@@ -2406,8 +2436,6 @@ pub fn build<'a>(
 ) -> napi::Result<Object<'a>> {
   runtime_observe::RuntimeObservability::install_build_safety_net(&config)
     .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-  let typescript_executable =
-    NapiPackageLayout::from_env(&env)?.packaged_typescript_executable()?;
   let sdk_plugin_host = Some(NapiSdkPluginHost::from_dispatch(sdk_plugin_dispatch)?);
 
   // 1. Wrap JS plugins synchronously (Env + Array are not Send).
@@ -2528,8 +2556,9 @@ pub fn build<'a>(
     skip_checker: skip_checker.unwrap_or(false),
     cache: cache.unwrap_or(true),
     node_executable: node_executable.map(std::path::PathBuf::from),
-    typescript_executable,
+
     sdk_plugin_host,
+    heap_reclaimer: Some(heap_reclaimer::NapiHeapReclaimer::from_env(&env)?),
   };
 
   // 2. Spawn the async build and return a JS Promise.
@@ -2599,8 +2628,8 @@ struct PackageBuildArgs {
   skip_checker: bool,
   cache: bool,
   node_executable: Option<std::path::PathBuf>,
-  typescript_executable: Option<std::path::PathBuf>,
   sdk_plugin_host: Option<Arc<dyn NativeOhSdkPluginHost>>,
+  heap_reclaimer: Option<Arc<dyn arkdown_build::request::BuildHeapReclaimer>>,
 }
 
 async fn run_build(
@@ -2666,8 +2695,8 @@ async fn run_build(
     hvigor_properties: Default::default(),
     parameter_file_override: None,
     node_executable: package_args.node_executable,
-    typescript_executable: package_args.typescript_executable,
     sdk_plugin_host: package_args.sdk_plugin_host,
+    heap_reclaimer: package_args.heap_reclaimer,
     hvigor_cache_dir: Some(project_path.join(".hvigor")),
   };
 

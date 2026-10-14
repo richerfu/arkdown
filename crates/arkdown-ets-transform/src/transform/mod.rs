@@ -553,7 +553,9 @@ impl<'a> ArktsTransformer<'a> {
         )
         .validate(&parsed.program)?;
         let navigation_registrations = NavigationBuilderRegistrationBlock::for_source(
-            options.navigation_routes.routes_for_source(&source.id.id),
+            options
+                .navigation_routes
+                .routes_for_source(&source.id.id, &options.sources),
             &local_builder_functions,
             &source.id.id,
         )?;

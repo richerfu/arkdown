@@ -72,7 +72,7 @@ pub(super) struct WatchStageInput {
     pub(super) cache: bool,
     pub(super) package_plugins: Vec<PackagePlugin>,
     pub(super) node_executable: Option<PathBuf>,
-    pub(super) typescript_executable: Option<PathBuf>,
+    pub(super) heap_reclaimer: Option<Arc<dyn crate::request::BuildHeapReclaimer>>,
     pub(super) sdk_plugin_host: Option<Arc<dyn arkdown_ets_checker::NativeOhSdkPluginHost>>,
     pub(super) pack_compress_level: Option<u32>,
     pub(super) align_device_types: Vec<String>,
@@ -155,8 +155,8 @@ impl WatchStageInput {
             cache: args.cache,
             package_plugins,
             node_executable: args.node_executable.clone(),
-            typescript_executable: args.typescript_executable.clone(),
             sdk_plugin_host: args.sdk_plugin_host.clone(),
+            heap_reclaimer: args.heap_reclaimer.clone(),
             pack_compress_level: args.pack_compress_level,
             align_device_types: args.align_device_types.clone(),
             enable_sign_task: args.enable_sign_task,
@@ -217,8 +217,8 @@ impl WatchStage {
         let cache = input.cache;
         let package_plugins = input.package_plugins;
         let node_executable = input.node_executable;
-        let typescript_executable = input.typescript_executable;
         let sdk_plugin_host = input.sdk_plugin_host;
+        let heap_reclaimer = input.heap_reclaimer;
         let pack_compress_level = input.pack_compress_level;
         let align_device_types = input.align_device_types;
         let enable_sign_task = input.enable_sign_task;
@@ -393,8 +393,8 @@ impl WatchStage {
                     hvigor_properties: hvigor_properties.clone(),
                     parameter_file_override: parameter_file_override.clone(),
                     node_executable: node_executable.clone(),
-                    typescript_executable: typescript_executable.clone(),
                     sdk_plugin_host: sdk_plugin_host.clone(),
+                    heap_reclaimer: heap_reclaimer.clone(),
                     hvigor_cache_dir: hvigor_cache_dir.clone(),
                 };
                 let command =
@@ -406,14 +406,11 @@ impl WatchStage {
                 }
                 Ok(())
             });
-            let semantic_close_result = semantic_runtime
-                .close()
-                .map_err(|error| arkdown_watcher::WatchError::Build(error.to_string()));
+            semantic_runtime.close();
             let bundle_close_result = rt
                 .block_on(bundle_runtime.close())
                 .map_err(|error| arkdown_watcher::WatchError::Build(error.to_string()));
             watch_result?;
-            semantic_close_result?;
             bundle_close_result
         })
         .await

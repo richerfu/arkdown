@@ -7,6 +7,21 @@ use arkdown_core::ArktsLanguageVersion;
 use arkdown_ets_checker::NativeOhSdkPluginHost;
 use arkdown_watcher::WatchInvalidationBatch;
 
+/// Allocation owners may reclaim unused pages after a build stage releases its data.
+/// This service never changes live build state and must not wait for Tokio workers.
+pub trait BuildHeapReclaimer: std::fmt::Debug + Send + Sync {
+    fn reclaim(&self, boundary: BuildHeapBoundary);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuildHeapBoundary {
+    NormalCheckerReleased,
+    CheckerReleased,
+    BundleCompleted,
+    BeforeBytecode,
+    BeforePack,
+}
+
 /// Properties read directly by hvigor-ohos-plugin from the global Hvigor
 /// parameter map. They cross the JS/native boundary as one typed value so a
 /// supported property cannot be silently dropped by native orchestration.
@@ -351,15 +366,12 @@ pub struct BuildRequest {
     /// Node executable supplied by the same-process JavaScript runtime.
     pub node_executable: Option<PathBuf>,
 
-    /// Native ArkTS TypeScript service shipped beside the platform N-API
-    /// binding. The JavaScript entry does not discover or execute this binary;
-    /// the N-API service resolves its own package layout and Rust owns the
-    /// compiler process lifecycle.
-    pub typescript_executable: Option<PathBuf>,
-
     /// Same-process JavaScript host for source-owned SDK CommonJS checkers.
-    /// Rust and TSGO retain all build and type-check orchestration.
+    /// Rust and tsrs retain all build and type-check orchestration.
     pub sdk_plugin_host: Option<Arc<dyn NativeOhSdkPluginHost>>,
+
+    /// Allocator-owned page reclamation at typed build lifecycle boundaries.
+    pub heap_reclaimer: Option<Arc<dyn BuildHeapReclaimer>>,
 
     /// Project-scoped Hvigor cache directory resolved by `PathUtil` in the JS
     /// runtime. Direct package builds derive `<project>/.hvigor` at the use site.
@@ -367,6 +379,12 @@ pub struct BuildRequest {
 }
 
 impl BuildRequest {
+    pub(crate) fn reclaim_heap(&self, boundary: BuildHeapBoundary) {
+        if let Some(reclaimer) = &self.heap_reclaimer {
+            reclaimer.reclaim(boundary);
+        }
+    }
+
     pub fn resolved_node_executable(&self) -> PathBuf {
         if let Some(executable) = self.node_executable.as_ref() {
             return executable.clone();

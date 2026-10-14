@@ -32,10 +32,9 @@ pub struct CheckRequest {
     pub is_crossplatform: bool,
     /// Downgrade cross-platform API diagnostics to warnings.
     pub ignore_crossplatform_check: bool,
-    /// Native ArkTS TypeScript service resolved from the loaded N-API package.
-    pub typescript_executable: Option<PathBuf>,
     /// Same-process JavaScript host for SDK CommonJS checker plugins.
     pub sdk_plugin_host: Option<Arc<dyn NativeOhSdkPluginHost>>,
+    pub heap_reclaimer: Option<Arc<dyn crate::request::BuildHeapReclaimer>>,
 }
 
 pub struct CheckApplication {
@@ -96,8 +95,8 @@ impl CheckApplication {
                 module_context: &module_context,
                 is_crossplatform: self.args.is_crossplatform,
                 ignore_crossplatform_check: self.args.ignore_crossplatform_check,
-                typescript_executable: self.args.typescript_executable.as_deref(),
                 sdk_plugin_host: self.args.sdk_plugin_host.as_ref(),
+                heap_reclaimer: self.args.heap_reclaimer.as_ref(),
             }
             .run()?;
             summary.merge(module_summary);
@@ -135,8 +134,8 @@ struct CheckModuleRunner<'a> {
     module_context: &'a ModuleCompileContext,
     is_crossplatform: bool,
     ignore_crossplatform_check: bool,
-    typescript_executable: Option<&'a Path>,
     sdk_plugin_host: Option<&'a Arc<dyn NativeOhSdkPluginHost>>,
+    heap_reclaimer: Option<&'a Arc<dyn crate::request::BuildHeapReclaimer>>,
 }
 
 impl<'a> CheckModuleRunner<'a> {
@@ -200,8 +199,8 @@ impl<'a> CheckModuleRunner<'a> {
             &package_resolution,
             component_metadata.as_ref(),
         )
-        .with_typescript_executable(self.typescript_executable)
         .with_sdk_plugin_host(self.sdk_plugin_host.cloned())
+        .with_heap_reclaimer(self.heap_reclaimer.cloned())
         .with_compile_mode(compile_mode)
         .with_sdk_options(&self.session.sdk)?
         .with_sdk_declaration_roots(

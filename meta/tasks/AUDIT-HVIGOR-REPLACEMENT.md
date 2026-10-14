@@ -1,5 +1,10 @@
 # Hvigor 替换全链路审计
 
+2026-10-12 更新：当前 checker 已迁移为进程内 tsrs Rust crate snapshot API，依赖为 Cargo Git dependency，以完整 `rev` 固定到 `ohos-rs/tsrs` 的 `ohos` 分支，
+旧 Go 编译器和分发路径已删除。当前迁移验证见 [迁移记录](ARKTS11-NATIVE-TYPESCRIPT.md)。
+以下 TSGO/Go 提交、真实工程耗时和产物对照属于迁移前历史记录，不代表 tsrs 已通过同样的整包验证。
+
+
 审计日期：2026-09-10。Arkdown 起始基线：
 `9915ed8971dfb6d60fb0072792084dfce492963c`。
 
@@ -39,7 +44,7 @@ TypeScript 源码由 `third_party/typescript` gitlink 固定；本地和 CI npm 
 
 本轮发行门禁已通过：N-API release 构建、JS 28/28、Rust workspace test、
 Clippy `-D warnings`、rustfmt 和 diff check 均成功；不设置
-`ARKDOWN_TYPESCRIPT_PATH` 的 JS CLI `check` 能从本地平台包发现 TSGO，npm
+`ARKDOWN_TSRS_PATH` 的 JS CLI `check` 能从本地平台包发现 TSGO，npm
 platform package dry-run 同时包含原生绑定、`tsc`、clean revision 构建清单、
 许可证与 NOTICE。Linux/Windows 仅声明交叉构建和 hash 验证，不声明对应平台运行。
 

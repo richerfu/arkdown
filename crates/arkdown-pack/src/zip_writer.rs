@@ -1,5 +1,9 @@
 use std::io::{BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
+
+use oxc_index::IndexVec;
 
 use flate2::write::DeflateEncoder;
 use rayon::prelude::*;
@@ -156,25 +160,35 @@ impl<W: Write + Seek> RawZipWriter<W> {
         })
     }
 
-    pub fn add_precompressed_deflated(
+    /// Compress independent entries on the current Rayon pool while one writer
+    /// consumes their results in input order (SDK ParallelScatterZipCreator order).
+    pub fn add_files_deflated(
         &mut self,
-        entry: &ParallelDeflatedEntry,
+        entries: Vec<(String, PathBuf)>,
+        compress_level: u32,
+    ) -> Result<(), PackError>
+    where
+        W: Send,
+    {
+        ParallelDeflatedFiles::new().write(self, entries, compress_level)
+    }
+
+    fn add_precompressed_deflated(
+        &mut self,
+        mut entry: ParallelDeflatedEntry<'_>,
     ) -> Result<(), PackError> {
         let header = self.start_file(
             &entry.archive_path,
             METHOD_DEFLATED,
-            entry.uncompressed_size,
-            Some(entry.compressed_size),
+            entry.stats.uncompressed_size,
+            Some(entry.output.len()),
         )?;
-        let file = fs_err::File::open(&entry.compressed_path)?;
-        let mut reader = BufReader::with_capacity(PACK_WRITE_BUFFER_SIZE, file);
-        let copied = std::io::copy(&mut reader, &mut self.writer)?;
-        debug_assert_eq!(copied, entry.compressed_size);
+        entry.output.copy_to(&mut self.writer)?;
         self.finish_file(
             header,
-            entry.crc32,
-            entry.compressed_size,
-            entry.uncompressed_size,
+            entry.stats.crc32,
+            entry.output.len(),
+            entry.stats.uncompressed_size,
         )
     }
 
@@ -496,89 +510,232 @@ impl<W: Write + Seek> RawZipWriter<W> {
     }
 }
 
-#[derive(Debug)]
-pub struct ParallelDeflatedFiles {
-    _temp_dir: tempfile::TempDir,
-    entries: Vec<ParallelDeflatedEntry>,
+// Shared by running compressors and completed entries awaiting the ordered writer.
+// 64 MiB bounds compressed payloads independently of archive size; each active
+// worker additionally owns 1 MiB input/output buffers and bounded deflater state.
+// Completed spills retain only a temp path; their worker buffer and file handle
+// are released, bounding open files by active workers rather than entry count.
+const COMPRESSED_MEMORY_BUDGET: usize = 64 * 1024 * 1024;
+const COMPRESSED_BLOCK_SIZE: usize = 64 * 1024;
+
+oxc_index::define_index_type! {
+    struct PackEntryId = u32;
+    MAX_INDEX = u32::MAX as usize;
+}
+
+struct ParallelDeflatedFiles {
+    available: AtomicUsize,
 }
 
 impl ParallelDeflatedFiles {
-    pub fn compress_hvigor_default(entries: Vec<(String, PathBuf)>) -> Result<Self, PackError> {
-        Self::compress(entries, HVIGOR_DEFAULT_COMPRESS_LEVEL)
+    fn new() -> Self {
+        Self {
+            available: AtomicUsize::new(COMPRESSED_MEMORY_BUDGET),
+        }
     }
 
-    pub fn compress(
+    fn write<W: Write + Seek + Send>(
+        &self,
+        writer: &mut RawZipWriter<W>,
         entries: Vec<(String, PathBuf)>,
         compress_level: u32,
-    ) -> Result<Self, PackError> {
-        let temp_dir = tempfile::Builder::new()
-            .prefix("parallelscatter")
-            .tempdir()?;
-        let temp_root = temp_dir.path().to_path_buf();
-        let mut compressed = entries
-            .into_par_iter()
-            .enumerate()
-            .map(|(index, (archive_path, source_path))| {
-                ParallelDeflatedEntry::compress(
-                    index,
-                    archive_path,
-                    source_path,
-                    &temp_root,
-                    compress_level,
-                )
-            })
-            .collect::<Result<Vec<_>, PackError>>()?;
-        compressed.sort_by_key(|entry| entry.index);
-        Ok(Self {
-            _temp_dir: temp_dir,
-            entries: compressed,
+    ) -> Result<(), PackError> {
+        let channels: IndexVec<PackEntryId, _> =
+            entries.iter().map(|_| mpsc::sync_channel(1)).collect();
+        let (senders, receivers): (Vec<_>, Vec<_>) = channels
+            .into_iter_enumerated()
+            .map(|(id, (sender, receiver))| ((id, sender), (id, receiver)))
+            .unzip();
+        // Keep compression on the caller's Rayon pool, including a one-worker
+        // pool. A separate scoped writer can wait without starving that pool.
+        std::thread::scope(|scope| {
+            let writing = scope.spawn(move || {
+                for (expected, receiver) in receivers {
+                    let (id, entry) = receiver.recv().map_err(|_| {
+                        std::io::Error::other("ZIP compression worker disconnected")
+                    })?;
+                    debug_assert_eq!(id, expected);
+                    writer.add_precompressed_deflated(entry?)?;
+                }
+                Ok(())
+            });
+            entries.into_par_iter().zip(senders).for_each(
+                |((archive_path, source_path), (id, sender))| {
+                    let entry = ParallelDeflatedEntry::compress(
+                        archive_path,
+                        source_path,
+                        &self.available,
+                        compress_level,
+                    );
+                    // On a writer error the receiver is gone; dropping the result
+                    // releases its memory reservation or removes its spill file.
+                    let _ = sender.send((id, entry));
+                },
+            );
+            writing
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
         })
     }
-
-    pub fn entries(&self) -> &[ParallelDeflatedEntry] {
-        &self.entries
-    }
 }
 
-#[derive(Debug)]
-pub struct ParallelDeflatedEntry {
-    index: usize,
+struct ParallelDeflatedEntry<'a> {
     archive_path: String,
-    compressed_path: PathBuf,
-    compressed_size: u64,
-    uncompressed_size: u64,
-    crc32: u32,
+    output: CompressedPayload<'a>,
+    stats: EntryStats,
 }
 
-impl ParallelDeflatedEntry {
+impl<'a> ParallelDeflatedEntry<'a> {
     fn compress(
-        index: usize,
         archive_path: String,
         source_path: PathBuf,
-        temp_root: &Path,
+        available: &'a AtomicUsize,
         compress_level: u32,
     ) -> Result<Self, PackError> {
-        let compressed_path = temp_root.join(format!("n{}", index + 1));
         let source = fs_err::File::open(&source_path)?;
         let mut reader = BufReader::with_capacity(PACK_WRITE_BUFFER_SIZE, source);
-        let output = fs_err::File::create(&compressed_path)?;
-        let output = BufWriter::with_capacity(PACK_WRITE_BUFFER_SIZE, output);
+        let output =
+            BufWriter::with_capacity(PACK_WRITE_BUFFER_SIZE, CompressedOutput::new(available));
         let encoder = DeflateEncoder::new(output, flate2::Compression::new(compress_level));
         let mut data_writer = TrackingWriter::new(encoder);
         std::io::copy(&mut reader, &mut data_writer)?;
         let (encoder, stats) = data_writer.finish()?;
         let mut output = encoder.finish()?;
         output.flush()?;
-        drop(output);
-        let compressed_size = fs_err::metadata(&compressed_path)?.len();
+        let output = output.into_inner().map_err(|error| error.into_error())?;
         Ok(Self {
-            index,
             archive_path,
-            compressed_path,
-            compressed_size,
-            uncompressed_size: stats.uncompressed_size,
-            crc32: stats.crc32,
+            output: output.finish(),
+            stats,
         })
+    }
+}
+
+enum CompressedPayload<'a> {
+    Memory(CompressedOutput<'a>),
+    File { path: tempfile::TempPath, len: u64 },
+}
+
+impl CompressedPayload<'_> {
+    fn len(&self) -> u64 {
+        match self {
+            Self::Memory(output) => output.len,
+            Self::File { len, .. } => *len,
+        }
+    }
+
+    fn copy_to(&mut self, writer: &mut dyn Write) -> std::io::Result<()> {
+        match self {
+            Self::File { path, len } => {
+                let file = fs_err::File::open(&**path)?;
+                let mut reader = BufReader::with_capacity(PACK_WRITE_BUFFER_SIZE, file);
+                let copied = std::io::copy(&mut reader, writer)?;
+                debug_assert_eq!(copied, *len);
+            }
+            Self::Memory(output) => {
+                for (index, block) in output.blocks.iter().enumerate() {
+                    let len = (output.len as usize - index * COMPRESSED_BLOCK_SIZE)
+                        .min(COMPRESSED_BLOCK_SIZE);
+                    writer.write_all(&block[..len])?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+struct CompressedOutput<'a> {
+    available: &'a AtomicUsize,
+    blocks: Vec<Box<[u8]>>,
+    len: u64,
+    spill: Option<tempfile::NamedTempFile>,
+}
+
+impl<'a> CompressedOutput<'a> {
+    fn new(available: &'a AtomicUsize) -> Self {
+        Self {
+            available,
+            blocks: Vec::new(),
+            len: 0,
+            spill: None,
+        }
+    }
+
+    fn release_blocks(&mut self) {
+        let reserved = self.blocks.len() * COMPRESSED_BLOCK_SIZE;
+        self.blocks.clear();
+        self.available.fetch_add(reserved, Ordering::Relaxed);
+    }
+
+    fn spill(&mut self) -> std::io::Result<()> {
+        let mut writer = tempfile::Builder::new()
+            .prefix("parallelscatter")
+            .tempfile()?;
+        for (index, block) in self.blocks.iter().enumerate() {
+            let len =
+                (self.len as usize - index * COMPRESSED_BLOCK_SIZE).min(COMPRESSED_BLOCK_SIZE);
+            writer.write_all(&block[..len])?;
+        }
+        self.release_blocks();
+        self.spill = Some(writer);
+        Ok(())
+    }
+
+    fn finish(mut self) -> CompressedPayload<'a> {
+        match self.spill.take() {
+            Some(file) => CompressedPayload::File {
+                path: file.into_temp_path(),
+                len: self.len,
+            },
+            None => CompressedPayload::Memory(self),
+        }
+    }
+}
+
+impl Write for CompressedOutput<'_> {
+    fn write(&mut self, mut bytes: &[u8]) -> std::io::Result<usize> {
+        let original_len = bytes.len();
+        while !bytes.is_empty() {
+            if let Some(spill) = &mut self.spill {
+                spill.write_all(bytes)?;
+                self.len += bytes.len() as u64;
+                break;
+            }
+            let used = self.len as usize % COMPRESSED_BLOCK_SIZE;
+            if used == 0 {
+                if self
+                    .available
+                    .try_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+                        remaining.checked_sub(COMPRESSED_BLOCK_SIZE)
+                    })
+                    .is_err()
+                {
+                    self.spill()?;
+                    continue;
+                }
+                self.blocks
+                    .push(vec![0; COMPRESSED_BLOCK_SIZE].into_boxed_slice());
+            }
+            let take = bytes.len().min(COMPRESSED_BLOCK_SIZE - used);
+            self.blocks.last_mut().expect("reserved output block")[used..used + take]
+                .copy_from_slice(&bytes[..take]);
+            self.len += take as u64;
+            bytes = &bytes[take..];
+        }
+        Ok(original_len)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match &mut self.spill {
+            Some(spill) => spill.flush(),
+            None => Ok(()),
+        }
+    }
+}
+
+impl Drop for CompressedOutput<'_> {
+    fn drop(&mut self) {
+        self.release_blocks();
     }
 }
 
@@ -789,3 +946,7 @@ impl ZipTimestamp {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "zip_writer_tests.rs"]
+mod tests;

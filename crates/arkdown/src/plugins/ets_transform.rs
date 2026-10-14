@@ -20,8 +20,9 @@ use arkdown_ets_transform::{
 };
 use rolldown_common::LogWithoutPlugin;
 use rolldown_plugin::{
-    HookTransformArgs, HookTransformOutput, HookTransformOutputMap, HookTransformReturn, HookUsage,
-    Plugin, SharedTransformPluginContext,
+    HookLoadArgs, HookLoadOutput, HookLoadReturn, HookTransformArgs, HookTransformOutput,
+    HookTransformOutputMap, HookTransformReturn, HookUsage, Plugin, SharedLoadPluginContext,
+    SharedTransformPluginContext,
 };
 use rolldown_utils::dashmap::FxDashMap;
 
@@ -119,6 +120,24 @@ impl EtsTransformPlugin {
     ) {
         let plan = self.plan.load_full();
         self.cache.commit(&plan, module_imports, active_module_ids);
+    }
+
+    fn load_source(&self, id: &str) -> HookLoadReturn {
+        let path = std::path::Path::new(id);
+        if !matches!(
+            path.extension().and_then(|ext| ext.to_str()),
+            Some("ets" | "ts" | "js" | "mjs" | "cjs")
+        ) {
+            return Ok(None);
+        }
+        let plan = self.plan.load();
+        Ok(plan
+            .sources
+            .module_source_text(path)?
+            .map(|source| HookLoadOutput {
+                code: source.as_ref().into(),
+                ..Default::default()
+            }))
     }
 
     fn transform_sync(
@@ -352,7 +371,30 @@ impl Plugin for EtsTransformPlugin {
     }
 
     fn register_hook_usage(&self) -> HookUsage {
-        HookUsage::Transform
+        HookUsage::Transform | HookUsage::Load
+    }
+
+    fn load_meta(&self) -> Option<rolldown_plugin::PluginHookMeta> {
+        // Replace Rolldown's disk fallback only after all SDK/user load hooks,
+        // including `order: post`, have had the opportunity to supply code.
+        Some(rolldown_plugin::PluginHookMeta {
+            order: Some(rolldown_plugin::PluginOrder::PinPost),
+        })
+    }
+
+    fn load(
+        &self,
+        ctx: SharedLoadPluginContext,
+        args: &HookLoadArgs<'_>,
+    ) -> impl std::future::Future<Output = HookLoadReturn> + Send {
+        let result = self.load_source(args.id);
+        if matches!(&result, Ok(Some(_))) {
+            // Match module_task.rs disk loading: only the global watch set.
+            // Self-dependencies allocate a sharded set per module and serve
+            // Rolldown HMR, which our snapshot/invalidation rebuilds do not use.
+            ctx.inner.add_watch_file(args.id);
+        }
+        ready(result)
     }
 
     fn transform(
@@ -363,3 +405,7 @@ impl Plugin for EtsTransformPlugin {
         ready(self.transform_sync(ctx, args))
     }
 }
+
+#[cfg(test)]
+#[path = "ets_transform_tests.rs"]
+mod tests;

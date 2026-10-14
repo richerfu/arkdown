@@ -174,6 +174,10 @@ pub struct DependencyNodeSnapshot {
 /// - CompileArkTS package metadata
 #[derive(Debug, Clone, Default)]
 pub struct DependencyGraphSnapshot {
+    /// Physical identities captured at startup, including installed aliases.
+    /// Hand-built partial graphs may omit entries; callers must retain their
+    /// realpath fallback for roots outside this inventory.
+    pub canonical_package_roots: rustc_hash::FxHashMap<PathBuf, PathBuf>,
     /// The host module name.
     pub host_module: String,
     /// Canonical package root of the host module. Project-root direct package
@@ -191,6 +195,17 @@ pub struct DependencyGraphSnapshot {
     /// ByteCode HAR extra importees resolved from the host module root for
     /// widget `pkgName2OtherCompileFiles` generation.
     pub widget_extra_importee_source_files: BTreeMap<String, IndexMap<String, PathBuf>>,
+}
+
+impl DependencyGraphSnapshot {
+    /// Startup identity, with the original realpath behavior for an external
+    /// root or a partial graph. Inventoried roots never touch the filesystem.
+    pub fn canonical_package_root<'a>(&'a self, path: &Path) -> std::borrow::Cow<'a, Path> {
+        self.canonical_package_roots
+            .get(path)
+            .map(|root| std::borrow::Cow::Borrowed(root.as_path()))
+            .unwrap_or_else(|| std::borrow::Cow::Owned(arkdown_path::canonicalize_or_owned(path)))
+    }
 }
 
 #[derive(Debug, Clone, Default)]

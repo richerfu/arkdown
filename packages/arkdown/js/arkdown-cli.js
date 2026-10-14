@@ -323,7 +323,23 @@ Options:
   }
 }
 
-if (require.main === module) {
+if (
+  require.main === module &&
+  ['build', 'check'].includes(process.argv[2]) &&
+  typeof global.gc !== 'function' &&
+  !process.execArgv.includes('--no-expose-gc')
+) {
+  // Current Hvigor calcChildExecArgv exposes GC by default; serviceChecker
+  // uses it after releasing compiler state. Process ownership stays in JS.
+  const { spawnSync } = require('node:child_process')
+  const child = spawnSync(
+    process.execPath,
+    [...process.execArgv, '--expose-gc', __filename, ...process.argv.slice(2)],
+    { stdio: 'inherit' },
+  )
+  if (child.error) writeStderr(`error: ${child.error.message}`)
+  process.exitCode = child.status ?? 1
+} else if (require.main === module) {
   new ArkdownPackageCli(process.argv.slice(2))
     .run()
     .then((code) => {

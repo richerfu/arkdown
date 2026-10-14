@@ -26,7 +26,9 @@
     "index.d.ts",
     "index.js",
     "runtime-entry.d.ts",
-    "README.md"
+    "README.md",
+    "tsrs-LICENSE.txt",
+    "tsrs-NOTICE.txt"
   ],
   "napi": {
     "binaryName": "arkdown",
@@ -45,10 +47,9 @@
     "provenance": true
   },
   "scripts": {
-    "artifacts": "napi artifacts",
+    "artifacts": "napi artifacts && node -e \"const fs = require('node:fs'); for (const name of fs.readdirSync('npm')) { const dir = 'npm/' + name; const file = dir + '/package.json'; if (!fs.existsSync(file)) continue; const pkg = JSON.parse(fs.readFileSync(file)); for (const notice of ['tsrs-LICENSE.txt', 'tsrs-NOTICE.txt']) { fs.copyFileSync(notice, dir + '/' + notice); pkg.files = [...new Set([...pkg.files, notice])]; } fs.writeFileSync(file, JSON.stringify(pkg, null, 2) + '\\n'); }\"",
     "build": "napi build --platform --release",
     "build:debug": "napi build --platform",
-    "build:typescript": "node scripts/build-typescript-dist.mjs",
     "test": "node --test",
     "smoke": "node -e \"const arkdown = require('./js/runtime-entry.js'); if (typeof arkdown.build !== 'function') process.exit(1)\" && node js/arkdown-cli.js --help",
     "publish:local": "bash scripts/publish-local.sh",

@@ -49,6 +49,8 @@ impl TaskInputSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskInputs {
     pub schema_version: u32,
+    /// A facts-only build cannot satisfy a later full diagnostic request.
+    pub diagnostics_checked: bool,
     pub source_hash: String,
     pub obfuscation_hash: u64,
     pub sdk_version: String,
@@ -68,11 +70,53 @@ pub struct TaskInputs {
 }
 
 const TASK_INPUTS_FILE: &str = ".task_inputs";
-const TASK_INPUTS_SCHEMA_VERSION: u32 = 7;
+const TASK_INPUTS_SCHEMA_VERSION: u32 = 10;
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
 
 impl TaskInputs {
+    /// CompileArkTS output verification precedes checking on a cache hit.
+    /// Track the complete generated output roots, so removed or edited ABC,
+    /// source maps, widgets and declarations force a real compile.
+    pub(crate) fn compile_outputs(root: &Path, cache: &Path) -> io::Result<Vec<PathBuf>> {
+        if !root.is_dir() {
+            return Ok(Vec::new());
+        }
+        let mut paths = Vec::new();
+        for entry in walkdir::WalkDir::new(root).follow_links(false) {
+            let entry = entry.map_err(io::Error::other)?;
+            if entry.file_type().is_file() {
+                paths.push(entry.into_path());
+            }
+        }
+        // ModuleMode.genDescriptionsForMergedEs2abc owns this SDK handoff:
+        // column one names a materialized compiler input. These files must
+        // survive cache hits and later Hvigor compilation, not only the ABC.
+        let manifest = cache.join("filesInfo.txt");
+        if manifest.is_file() {
+            let content = fs_err::read_to_string(&manifest)?;
+            for line in content.lines().filter(|line| !line.is_empty()) {
+                let (source, _) = line.split_once(';').ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "invalid es2abc input manifest row",
+                    )
+                })?;
+                if source.is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "empty es2abc input path",
+                    ));
+                }
+                paths.push(PathBuf::from(source));
+            }
+            paths.push(manifest);
+        }
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
+    }
+
     /// Compute current task inputs from config and loader data.
     pub fn compute(
         config: &ArkdownConfig,
@@ -129,6 +173,7 @@ impl TaskInputs {
         };
         TaskInputs {
             schema_version: TASK_INPUTS_SCHEMA_VERSION,
+            diagnostics_checked: false,
             source_hash: snapshot.source_hash.clone(),
             obfuscation_hash,
             sdk_version,
@@ -148,6 +193,11 @@ impl TaskInputs {
     /// Builder: set the plugin hash (FNV-1a of package plugin identities).
     pub fn with_plugin_hash(mut self, h: u64) -> Self {
         self.plugin_hash = h;
+        self
+    }
+
+    pub fn with_diagnostics_checked(mut self, checked: bool) -> Self {
+        self.diagnostics_checked = checked;
         self
     }
 
@@ -301,6 +351,7 @@ impl TaskInputs {
             return false;
         };
         stored.schema_version == self.schema_version
+            && (!self.diagnostics_checked || stored.diagnostics_checked)
             && stored.source_hash == self.source_hash
             && stored.obfuscation_hash == self.obfuscation_hash
             && stored.sdk_version == self.sdk_version
@@ -321,6 +372,7 @@ impl TaskInputs {
         std::fs::create_dir_all(cache_dir)?;
         let stored = StoredTaskInputs {
             schema_version: self.schema_version,
+            diagnostics_checked: self.diagnostics_checked,
             source_hash: self.source_hash.clone(),
             obfuscation_hash: self.obfuscation_hash,
             sdk_version: self.sdk_version.clone(),
@@ -344,6 +396,8 @@ impl TaskInputs {
 struct StoredTaskInputs {
     #[serde(default)]
     schema_version: u32,
+    #[serde(default)]
+    diagnostics_checked: bool,
     #[serde(default)]
     source_hash: String,
     obfuscation_hash: u64,
@@ -437,6 +491,36 @@ impl TaskInputs {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn compile_completion_inventory_includes_sdk_handoff_inputs() {
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("loader_out");
+        let cache = root.path().join("cache");
+        std::fs::create_dir_all(&output).unwrap();
+        std::fs::create_dir_all(&cache).unwrap();
+        let abc = output.join("modules.abc");
+        let source = cache.join("entry.js");
+        let manifest = cache.join("filesInfo.txt");
+        std::fs::write(&abc, b"abc").unwrap();
+        std::fs::write(&source, b"export {}").unwrap();
+        std::fs::write(
+            &manifest,
+            format!("{};entry;esm;entry.js;;;;\n", source.display()),
+        )
+        .unwrap();
+        let files = super::TaskInputs::compile_outputs(&output, &cache).unwrap();
+        assert!(files.contains(&source));
+        let store = arkdown_cache::ArtifactCacheStore::new(cache.join("completion.json"));
+        store.commit("compiled", &files).unwrap();
+        std::fs::remove_file(&source).unwrap();
+        assert!(!store
+            .matches(
+                "compiled",
+                &super::TaskInputs::compile_outputs(&output, &cache).unwrap()
+            )
+            .unwrap());
+    }
     use super::*;
     use std::path::PathBuf;
 
@@ -589,6 +673,27 @@ mod tests {
         assert!(inputs.matches_cached(&tmp), "after save → cache hit");
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn facts_only_completion_cannot_skip_full_diagnostics() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = make_config();
+        let loader = make_loader(vec!["./ets/Index.ets".into()], "/tmp/cache");
+        let inputs = TaskInputs::compute(&config, &loader, &make_snapshot("index"));
+        let facts = inputs.clone().with_diagnostics_checked(false);
+        let full = inputs.with_diagnostics_checked(true);
+        facts.save(temp.path()).unwrap();
+        assert!(
+            !full.matches_cached(temp.path()),
+            "skip-checker cannot certify diagnostics"
+        );
+        full.save(temp.path()).unwrap();
+        assert!(full.matches_cached(temp.path()));
+        assert!(
+            facts.matches_cached(temp.path()),
+            "full checking satisfies a facts-only request"
+        );
     }
 
     #[test]

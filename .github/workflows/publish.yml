@@ -27,7 +27,7 @@ env:
   MACOSX_DEPLOYMENT_TARGET: "10.13"
   PNPM_VERSION: "10.12.1"
   RUST_BACKTRACE: "1"
-  RUST_TOOLCHAIN: "1.95.0"
+  RUST_TOOLCHAIN: "1.99.0"
 
 defaults:
   run:
@@ -90,7 +90,7 @@ jobs:
           pnpm --version
 
       - name: Check Rust formatting
-        run: cargo fmt --all -- --check
+        run: cargo fmt --manifest-path ../../Cargo.toml --check
 
       - name: Check NAPI package
         run: cargo check --locked -p arkdown-napi --all-targets
@@ -111,13 +111,13 @@ jobs:
         settings:
           - host: windows-latest
             target: x86_64-pc-windows-msvc
-            build: pnpm build --target x86_64-pc-windows-msvc
+            build: pnpm exec napi build --platform --release --target x86_64-pc-windows-msvc -- --locked
           - host: macos-latest
             target: aarch64-apple-darwin
-            build: pnpm build --target aarch64-apple-darwin
+            build: pnpm exec napi build --platform --release --target aarch64-apple-darwin -- --locked
           - host: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            build: pnpm build --target x86_64-unknown-linux-gnu --use-napi-cross
+            build: pnpm exec napi build --platform --release --target x86_64-unknown-linux-gnu --use-napi-cross -- --locked
 
     steps:
       - name: Checkout
@@ -171,6 +171,10 @@ jobs:
       - name: Build binding
         run: ${{ matrix.settings.build }}
         shell: bash
+
+      - name: Test embedded compiler snapshots
+        shell: bash
+        run: cargo test --locked -p arkdown-ets-checker --test native
 
       - name: Upload binding
         uses: actions/upload-artifact@v6
@@ -285,8 +289,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
-        with:
-          submodules: recursive
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -301,12 +303,6 @@ jobs:
           cache: pnpm
           cache-dependency-path: packages/arkdown/pnpm-lock.yaml
 
-      - name: Setup Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: third_party/typescript/tsc/go.mod
-          cache-dependency-path: third_party/typescript/tsc/go.sum
-
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
@@ -316,17 +312,11 @@ jobs:
           npm --version
           pnpm --version
           pnpm exec napi --version
-          go version
-
-      - name: Build pinned native TypeScript distribution
-        id: typescript
-        run: |
-          distribution="$(node scripts/build-typescript-dist.mjs)"
-          echo "distribution=${distribution}" >> "$GITHUB_OUTPUT"
 
       - name: Download all bindings
         uses: actions/download-artifact@v7
         with:
+          pattern: bindings-*
           path: packages/arkdown/artifacts
 
       - name: Assemble platform packages
@@ -344,9 +334,6 @@ jobs:
       - name: Prepare and validate npm packages
         run: |
           pnpm exec napi pre-publish --no-gh-release -t npm --skip-optional-publish
-          node scripts/attach-typescript-dist.mjs \
-            "${{ steps.typescript.outputs.distribution }}" \
-            npm
           for child_directory in ./npm/darwin-arm64 ./npm/linux-x64-gnu ./npm/win32-x64-msvc; do
             npm pack "$child_directory" --dry-run --ignore-scripts --json >/dev/null
           done

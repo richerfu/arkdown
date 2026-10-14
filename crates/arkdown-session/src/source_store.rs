@@ -15,17 +15,20 @@
 //! | `VisualSourceInventory` | `.visual` file to `.ets` association |
 //! | `WorkerSourceInventory` | `loadWorker`/`readWorkerFile` inventories |
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{Error, ErrorKind};
+use std::ffi::OsString;
+use std::io::Error;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::UNIX_EPOCH;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, RwLock};
+use std::time::{Instant, UNIX_EPOCH};
 
 use arkdown_path::{canonicalize_or_owned, lexical_normalize, HvigorSourceFileFilter};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use arkdown_core::SourceFileId;
+use arkdown_core::{SourceFileId, SourceReadError};
 
 /// Whether `ext` (without the leading dot) belongs to a source-inventory
 /// file.
@@ -75,6 +78,20 @@ pub enum SourceContent {
     Bytes(Arc<Vec<u8>>),
 }
 
+#[derive(Debug)]
+enum SourceContentState {
+    Captured(SourceContent),
+    Evicted,
+    Released,
+}
+
+/// Text affected by a source-store lifecycle transition.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SourceTextCounts {
+    pub files: usize,
+    pub bytes: u64,
+}
+
 // ---------------------------------------------------------------------------
 // SourceFile
 // ---------------------------------------------------------------------------
@@ -98,14 +115,88 @@ pub struct SourceFile {
     /// Hvigor exposes this through `share.getCachedFileInfo()`. Keeping it on
     /// the immutable source record avoids a second `stat` in plugin hooks.
     pub modified_millis: Option<u64>,
-    /// Content captured during session startup.
-    content: Option<SourceContent>,
+    /// Content frozen by the startup fingerprint, with explicit residency state.
+    content: Arc<RwLock<SourceContentState>>,
+    on_demand_reloads: Arc<AtomicUsize>,
 }
 
 impl SourceFile {
-    /// Return the content captured by the startup inventory.
-    pub fn cached_content(&self) -> Option<&SourceContent> {
-        self.content.as_ref()
+    /// Lease captured content, verifying a reload if evicted. Released content
+    /// never reloads, even when its file still exists on disk.
+    pub fn cached_content(&self) -> Result<SourceContent, SourceReadError> {
+        let content = self.content.read().expect("source content lock poisoned");
+        match &*content {
+            SourceContentState::Captured(content) => return Ok(content.clone()),
+            SourceContentState::Released => {
+                return Err(SourceReadError::Released {
+                    path: self.path.clone(),
+                })
+            }
+            SourceContentState::Evicted => {}
+        }
+        drop(content);
+        let mut content = self.content.write().expect("source content lock poisoned");
+        if matches!(*content, SourceContentState::Evicted) {
+            self.restore_content(&mut content)?;
+            self.on_demand_reloads.fetch_add(1, Ordering::Relaxed);
+            tracing::debug!(path = %self.path.display(), bytes = self.fingerprint.size, "source text reloaded on demand");
+        }
+        match &*content {
+            SourceContentState::Captured(content) => Ok(content.clone()),
+            SourceContentState::Released => Err(SourceReadError::Released {
+                path: self.path.clone(),
+            }),
+            SourceContentState::Evicted => unreachable!("verified reload captures text"),
+        }
+    }
+
+    fn restore_content(&self, state: &mut SourceContentState) -> Result<(), SourceReadError> {
+        let bytes = std::fs::read(&self.path).map_err(|source| SourceReadError::ReloadIo {
+            path: self.path.clone(),
+            source,
+        })?;
+        let actual_size = bytes.len() as u64;
+        let actual_hash = format!("{:016x}", arkdown_core::fnv1a64(&bytes));
+        if actual_size != self.fingerprint.size || actual_hash != self.fingerprint.content_hash {
+            return Err(SourceReadError::SnapshotMismatch {
+                path: self.path.clone(),
+                expected_size: self.fingerprint.size,
+                actual_size,
+                expected_hash: self.fingerprint.content_hash.clone(),
+                actual_hash,
+            });
+        }
+        let text = String::from_utf8(bytes).map_err(|source| SourceReadError::ReloadIo {
+            path: self.path.clone(),
+            source: Error::new(std::io::ErrorKind::InvalidData, source),
+        })?;
+        *state = SourceContentState::Captured(SourceContent::Text(Arc::from(text)));
+        Ok(())
+    }
+
+    fn restore_evicted_text(&self) -> Result<Option<u64>, SourceReadError> {
+        let mut content = self.content.write().expect("source content lock poisoned");
+        if matches!(*content, SourceContentState::Evicted) {
+            self.restore_content(&mut content)?;
+            Ok(Some(self.fingerprint.size))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+impl arkdown_core::SourceTextHandle for SourceFile {
+    fn size_bytes(&self) -> u64 {
+        self.fingerprint.size
+    }
+
+    fn read_text(&self) -> Result<Arc<str>, SourceReadError> {
+        match self.cached_content()? {
+            SourceContent::Text(text) => Ok(text),
+            SourceContent::Bytes(_) => Err(SourceReadError::NotText {
+                path: self.path.clone(),
+            }),
+        }
     }
 }
 
@@ -233,8 +324,9 @@ impl WorkerSourceInventory {
 ///
 /// The `SourceStore` provides read-only access to all source files known to
 /// the build session. Content and fingerprints are captured together during
-/// `discover()`, so later transform and plugin stages never re-read a source
-/// through this store.
+/// `discover()`. Unleased texts may be evicted during a one-shot checker and
+/// reloaded with size/hash verification. The coordinator restores them before
+/// transform/plugin hooks, and permanently releases them after the final reader.
 ///
 /// # Upstream correspondence
 ///
@@ -261,12 +353,206 @@ pub struct SourceStore {
     /// Worker entry inventory.
     workers: WorkerSourceInventory,
     /// Canonical roots covered by this immutable inventory.
-    inventory_roots: Arc<[PathBuf]>,
+    inventory_roots: Arc<FxHashSet<PathBuf>>,
     /// Lexical caller roots mapped to their canonical startup identities.
-    root_aliases: Arc<[(PathBuf, PathBuf)]>,
+    root_aliases: Arc<SourceRootAliases>,
+    on_demand_reloads: Arc<AtomicUsize>,
+}
+
+/// Component trie: longest-root matching visits the path once, independent of
+/// the number of dependency aliases. Component keys preserve platform spelling.
+#[derive(Debug, Default)]
+struct SourceRootAliases {
+    children: FxHashMap<OsString, SourceRootAliases>,
+    canonical: Option<PathBuf>,
+}
+
+impl SourceRootAliases {
+    fn new(aliases: Vec<(PathBuf, PathBuf)>) -> Self {
+        let mut roots = Self::default();
+        for (alias, canonical) in aliases {
+            let mut node = &mut roots;
+            for part in alias.components() {
+                node = node
+                    .children
+                    .entry(part.as_os_str().to_owned())
+                    .or_default();
+            }
+            node.canonical = Some(canonical);
+        }
+        roots
+    }
+
+    fn resolve(&self, path: &Path) -> Option<PathBuf> {
+        let mut node = self;
+        let mut parts = path.components();
+        let mut matched = self.canonical.as_ref().map(|root| (root, path));
+        while let Some(part) = parts.next() {
+            let Some(child) = node.children.get(part.as_os_str()) else {
+                break;
+            };
+            node = child;
+            if let Some(canonical) = &node.canonical {
+                matched = Some((canonical, parts.as_path()));
+            }
+        }
+        matched.map(|(canonical, relative)| canonical.join(relative))
+    }
+}
+
+impl arkdown_core::SourceInventory for SourceStore {
+    fn canonical_path(&self, path: &Path) -> Option<&Path> {
+        if let Some(file) = self.files.get(path) {
+            return Some(&file.path);
+        }
+        // A parent component after an uncaptured symlink requires realpath;
+        // lexical normalization is not evidence of physical identity.
+        if path
+            .components()
+            .any(|part| part == std::path::Component::ParentDir)
+        {
+            return None;
+        }
+        let path = self.lookup_path(path);
+        self.files
+            .get(path.as_ref())
+            .map(|file| file.path.as_path())
+            .or_else(|| {
+                self.inventory_roots
+                    .get(path.as_ref())
+                    .map(PathBuf::as_path)
+            })
+    }
+
+    fn source_text(&self, path: &Path) -> Result<Option<Arc<str>>, SourceReadError> {
+        let Some(path) = self.canonical_path(path) else {
+            return Ok(None);
+        };
+        let Some(file) = self.files.get(path) else {
+            return Ok(None);
+        };
+        Ok(match file.cached_content()? {
+            SourceContent::Text(text) => Some(text),
+            SourceContent::Bytes(_) => None,
+        })
+    }
+}
+
+/// Per-startup walk cache. WalkDir's non-followed entry names have the directory's
+/// actual spelling; joining them to the physical parent preserves realpath identity.
+#[derive(Debug, Default)]
+pub(crate) struct SourceInventoryPaths {
+    directories: FxHashMap<PathBuf, Option<PathBuf>>,
+}
+
+impl SourceInventoryPaths {
+    pub(crate) fn canonical_file(&mut self, entry: &walkdir::DirEntry) -> PathBuf {
+        // A root file's name came from the caller, rather than directory enumeration.
+        if entry.depth() == 0 || entry.file_type().is_symlink() {
+            return canonicalize_or_owned(entry.path());
+        }
+        let Some(parent) = entry.path().parent() else {
+            return canonicalize_or_owned(entry.path());
+        };
+        match self
+            .directories
+            .entry(parent.to_path_buf())
+            .or_insert_with(|| {
+                arkdown_path::AbsPath::canonicalize(parent)
+                    .ok()
+                    .map(arkdown_path::AbsPath::into_path_buf)
+            }) {
+            Some(parent) => parent.join(entry.file_name()),
+            None => canonicalize_or_owned(entry.path()),
+        }
+    }
 }
 
 impl SourceStore {
+    /// Evict only unleased texts after program creation has joined its readers.
+    /// Acquiring a lease clones the Arc under the same lock: a racing reader
+    /// either prevents eviction or observes Evicted and verifies a reload.
+    /// Existing external leases can only be cloned while strong_count > 1.
+    pub fn evict_unleased_texts(&self) -> SourceTextCounts {
+        let mut evicted = SourceTextCounts::default();
+        for file in self.files.values() {
+            let mut state = file.content.write().expect("source content lock poisoned");
+            if let SourceContentState::Captured(SourceContent::Text(text)) = &*state {
+                if Arc::strong_count(text) == 1 {
+                    evicted.files += 1;
+                    evicted.bytes += text.len() as u64;
+                    *state = SourceContentState::Evicted;
+                }
+            }
+        }
+        tracing::info!(
+            evicted_files = evicted.files,
+            evicted_bytes = evicted.bytes,
+            "source store unleased texts evicted"
+        );
+        evicted
+    }
+
+    /// Restore evicted text in parallel before bundling. Results are consumed
+    /// in path order so multiple reload failures produce a deterministic error.
+    /// Released texts stay released and are never reloaded by this operation.
+    pub fn restore_evicted_texts(&self) -> Result<SourceTextCounts, SourceReadError> {
+        let started = Instant::now();
+        let results = self
+            .source_files()
+            .par_iter()
+            .map(|file| file.restore_evicted_text())
+            .collect::<Vec<_>>();
+        let mut restored = SourceTextCounts::default();
+        for result in results {
+            if let Some(bytes) = result? {
+                restored.files += 1;
+                restored.bytes += bytes;
+            }
+        }
+        tracing::info!(
+            restored_files = restored.files,
+            restored_bytes = restored.bytes,
+            on_demand_reloads = self.on_demand_reloads.load(Ordering::Relaxed),
+            elapsed_ms = started.elapsed().as_millis(),
+            "source store evicted texts restored"
+        );
+        Ok(restored)
+    }
+
+    /// Permanently retire captured and evicted texts after the final one-shot
+    /// consumer. Identity, fingerprints, mtime and inventories remain available;
+    /// reads return SourceReadError::Released and bulk restore cannot revive them.
+    pub fn release_texts(&self) {
+        let mut released_bytes = 0usize;
+        let mut leased_bytes = 0usize;
+        for file in self.files.values() {
+            let mut content = file.content.write().expect("source content lock poisoned");
+            if let SourceContentState::Captured(SourceContent::Text(text)) = &*content {
+                released_bytes += text.len();
+                if Arc::strong_count(text) > 1 {
+                    leased_bytes += text.len();
+                }
+                *content = SourceContentState::Released;
+            } else if matches!(*content, SourceContentState::Evicted) {
+                *content = SourceContentState::Released;
+            }
+        }
+        tracing::debug!(released_bytes, leased_bytes, "source store texts released");
+    }
+
+    /// Source identities below a captured root, without acquiring text leases.
+    pub fn source_files_under(&self, root: &Path) -> Vec<&SourceFile> {
+        let root = self.lookup_path(root);
+        let mut files = self
+            .files
+            .values()
+            .filter(|file| file.path.starts_with(&root))
+            .collect::<Vec<_>>();
+        files.sort_unstable_by(|left, right| left.path.cmp(&right.path));
+        files
+    }
+
     /// Discover and fingerprint all source files in `source_roots`.
     ///
     /// This performs the initial scan and source reads at session startup.
@@ -293,6 +579,7 @@ impl SourceStore {
     ) -> Result<Self, std::io::Error> {
         let mut paths = BTreeSet::new();
         let mut visuals = VisualSourceInventory::default();
+        let mut inventory_paths = SourceInventoryPaths::default();
 
         let mut walk_roots = source_roots
             .iter()
@@ -336,7 +623,8 @@ impl SourceStore {
 
         for (_, inventory) in preinventoried_roots {
             for path in inventory.iter() {
-                let path = canonicalize_or_owned(path);
+                // DependencySnapshotInventory already captured physical file identities.
+                let path = path.clone();
                 if HvigorSourceFileFilter::new(&path).is_ignored_macos_metadata() {
                     continue;
                 }
@@ -351,9 +639,10 @@ impl SourceStore {
             }
         }
 
-        let walk_roots = walk_roots
-            .into_iter()
-            .map(|root| canonicalize_or_owned(&root))
+        let walk_roots = root_aliases
+            .iter()
+            .filter(|(root, _)| walk_roots.contains(root))
+            .map(|(_, canonical)| canonical.clone())
             .collect::<BTreeSet<_>>();
         for root in &walk_roots {
             if !root.exists() {
@@ -373,7 +662,7 @@ impl SourceStore {
                 if !entry.file_type().is_file() {
                     continue;
                 }
-                let path = canonicalize_or_owned(entry.path());
+                let path = inventory_paths.canonical_file(&entry);
                 if HvigorSourceFileFilter::new(&path).is_ignored_macos_metadata() {
                     continue;
                 }
@@ -412,6 +701,7 @@ impl SourceStore {
             })
             .collect::<Vec<_>>();
         let mut files = FxHashMap::default();
+        let on_demand_reloads = Arc::new(AtomicUsize::new(0));
         for (index, (path, content)) in paths.into_iter().zip(contents).enumerate() {
             let (content, modified_millis) = content?;
             let size = content.len() as u64;
@@ -423,7 +713,10 @@ impl SourceStore {
                     path,
                     fingerprint: SourceFingerprint { content_hash, size },
                     modified_millis,
-                    content: Some(SourceContent::Text(content)),
+                    content: Arc::new(RwLock::new(SourceContentState::Captured(
+                        SourceContent::Text(content),
+                    ))),
+                    on_demand_reloads: Arc::clone(&on_demand_reloads),
                 },
             );
         }
@@ -436,8 +729,9 @@ impl SourceStore {
             code_resources: CodeResourceInventory::default(),
             visuals,
             workers: WorkerSourceInventory::default(),
-            inventory_roots: Arc::from(inventory_roots.into_iter().collect::<Vec<_>>()),
-            root_aliases: Arc::from(root_aliases),
+            inventory_roots: Arc::new(inventory_roots.into_iter().collect()),
+            root_aliases: Arc::new(SourceRootAliases::new(root_aliases)),
+            on_demand_reloads,
         })
     }
 
@@ -457,27 +751,24 @@ impl SourceStore {
             .any(|inventory_root| root.starts_with(inventory_root))
     }
 
-    /// Return startup-captured text sources below `root` in path order.
-    pub fn text_sources_under(&self, root: &Path) -> Vec<(&Path, Arc<str>)> {
-        let root = self.lookup_path(root);
-        let mut sources = self
-            .files
-            .values()
-            .filter(|file| file.path.starts_with(&root))
-            .filter_map(|file| match file.cached_content() {
-                Some(SourceContent::Text(content)) => {
-                    Some((file.path.as_path(), Arc::clone(content)))
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        sources.sort_by(|left, right| left.0.cmp(right.0));
-        sources
+    /// Lease fingerprint-frozen text below `root` in path order, verifying any
+    /// evicted source before returning it.
+    pub fn text_sources_under(
+        &self,
+        root: &Path,
+    ) -> Result<Vec<(&Path, Arc<str>)>, SourceReadError> {
+        let mut sources = Vec::new();
+        for file in self.source_files_under(root) {
+            if let SourceContent::Text(content) = file.cached_content()? {
+                sources.push((file.path.as_path(), content));
+            }
+        }
+        Ok(sources)
     }
 
     /// Return the source file entry for `path`, if it's in the store.
     pub fn source_by_path(&self, path: &std::path::Path) -> Option<&SourceFile> {
-        self.files.get(&self.lookup_path(path))
+        self.files.get(self.lookup_path(path).as_ref())
     }
 
     /// Return the startup source inventory in stable path order.
@@ -490,17 +781,18 @@ impl SourceStore {
         files
     }
 
-    fn lookup_path(&self, path: &Path) -> PathBuf {
+    fn lookup_path<'a>(&'a self, path: &'a Path) -> Cow<'a, Path> {
+        if let Some((canonical, _)) = self.files.get_key_value(path) {
+            return Cow::Borrowed(canonical);
+        }
+        if let Some(root) = self.inventory_roots.get(path) {
+            return Cow::Borrowed(root);
+        }
         let path = lexical_normalize(path);
-        if self.files.contains_key(&path) || self.inventory_roots.iter().any(|root| root == &path) {
-            return path;
+        if self.files.contains_key(&path) || self.inventory_roots.contains(&path) {
+            return Cow::Owned(path);
         }
-        for (alias, canonical) in self.root_aliases.iter() {
-            if let Ok(relative) = path.strip_prefix(alias) {
-                return self.snapshot_file_spelling(lexical_normalize(&canonical.join(relative)));
-            }
-        }
-        self.snapshot_file_spelling(path)
+        Cow::Owned(self.snapshot_file_spelling(self.root_aliases.resolve(&path).unwrap_or(path)))
     }
 
     fn snapshot_file_spelling(&self, path: PathBuf) -> PathBuf {
@@ -584,39 +876,24 @@ impl SourceStore {
         !Path::new(&swapped).exists()
     }
 
-    /// Return the startup-captured text content of a source file.
-    pub fn read_text(&self, path: &std::path::Path) -> Result<Arc<str>, std::io::Error> {
-        let path = self.lookup_path(path);
-        match self.files.get(&path).and_then(SourceFile::cached_content) {
-            Some(SourceContent::Text(content)) => Ok(Arc::clone(content)),
-            Some(SourceContent::Bytes(_)) => Err(Error::new(
-                ErrorKind::InvalidData,
-                format!("source is not UTF-8 text: {}", path.display()),
-            )),
-            None => Err(Error::new(
-                ErrorKind::NotFound,
-                format!(
-                    "source was not captured at session startup: {}",
-                    path.display()
-                ),
-            )),
-        }
+    /// Read fingerprint-frozen text, verifying a reload when evicted. A released
+    /// source is a typed error; it never falls back to disk.
+    pub fn read_text(&self, path: &Path) -> Result<Arc<str>, SourceReadError> {
+        let file = self
+            .source_by_path(path)
+            .ok_or_else(|| SourceReadError::NotCaptured { path: path.into() })?;
+        arkdown_core::SourceTextHandle::read_text(file)
     }
 
-    /// Read the raw bytes of a source file.
-    pub fn read_bytes(&self, path: &std::path::Path) -> Result<Arc<Vec<u8>>, std::io::Error> {
-        let path = self.lookup_path(path);
-        match self.files.get(&path).and_then(SourceFile::cached_content) {
-            Some(SourceContent::Bytes(content)) => Ok(Arc::clone(content)),
-            Some(SourceContent::Text(content)) => Ok(Arc::new(content.as_bytes().to_vec())),
-            None => Err(Error::new(
-                ErrorKind::NotFound,
-                format!(
-                    "source was not captured at session startup: {}",
-                    path.display()
-                ),
-            )),
-        }
+    /// Read fingerprint-frozen bytes; eviction and retirement follow read_text.
+    pub fn read_bytes(&self, path: &Path) -> Result<Arc<Vec<u8>>, SourceReadError> {
+        let file = self
+            .source_by_path(path)
+            .ok_or_else(|| SourceReadError::NotCaptured { path: path.into() })?;
+        Ok(match file.cached_content()? {
+            SourceContent::Bytes(content) => content,
+            SourceContent::Text(content) => Arc::new(content.as_bytes().to_vec()),
+        })
     }
 
     /// Return the fingerprint for a source file.
@@ -624,7 +901,7 @@ impl SourceStore {
     /// Returns `None` if the file is not in the store.
     pub fn fingerprint(&self, path: &std::path::Path) -> Option<&SourceFingerprint> {
         self.files
-            .get(&self.lookup_path(path))
+            .get(self.lookup_path(path).as_ref())
             .map(|f| &f.fingerprint)
     }
 
@@ -716,7 +993,7 @@ mod tests {
     }
 
     #[test]
-    fn source_content_and_hash_are_frozen_at_session_startup() {
+    fn evicted_source_restores_identical_bytes_and_startup_metadata() {
         let temp = tempfile::tempdir().expect("tempdir");
         let source_dir = temp.path().join("entry/src/main/ets");
         std::fs::create_dir_all(&source_dir).expect("create source dir");
@@ -724,20 +1001,22 @@ mod tests {
         std::fs::write(&source, "export const value = 1;").expect("write source");
 
         let store = SourceStore::discover(std::slice::from_ref(&source_dir)).expect("discover");
-        let frozen_hash = store
-            .fingerprint(&source)
-            .expect("fingerprint")
-            .content_hash
-            .clone();
-        std::fs::write(&source, "export const value = 2;").expect("mutate source after startup");
+        let metadata = store.source_by_path(&source).unwrap().clone();
+        assert_eq!(store.evict_unleased_texts().files, 1);
 
         assert_eq!(
             store.read_text(&source).expect("cached source").as_ref(),
             "export const value = 1;"
         );
+        assert_eq!(store.evict_unleased_texts().files, 1);
+        assert_eq!(store.restore_evicted_texts().unwrap().files, 1);
+        let restored = store.source_by_path(&source).unwrap();
+        assert_eq!(restored.id, metadata.id);
+        assert_eq!(restored.modified_millis, metadata.modified_millis);
+        assert_eq!(restored.fingerprint, metadata.fingerprint);
         assert_eq!(
-            frozen_hash,
-            format!("{:016x}", arkdown_core::fnv1a64(b"export const value = 1;"))
+            store.read_text(&source).unwrap().as_ref(),
+            "export const value = 1;"
         );
     }
 
@@ -753,7 +1032,10 @@ mod tests {
 
         let store = SourceStore::discover_with_preinventoried_roots(
             &[],
-            &[(dependency_root.clone(), Arc::from([captured.clone()]))],
+            &[(
+                dependency_root.clone(),
+                Arc::from([canonicalize_or_owned(&captured)]),
+            )],
         )
         .unwrap();
 
@@ -799,5 +1081,138 @@ mod tests {
                 .path,
             store.source_by_path(&actual).expect("actual path").path
         );
+    }
+    #[test]
+    fn alias_trie_matches_longest_prefix_scan() {
+        let mut aliases = vec![(PathBuf::new(), PathBuf::from("fallback"))];
+        for n in 0..128 {
+            aliases.push((
+                PathBuf::from(format!("/root/pkg{n}")),
+                PathBuf::from(format!("/physical/{n}")),
+            ));
+            aliases.push((
+                PathBuf::from(format!("/root/pkg{n}/nested")),
+                PathBuf::from(format!("/nested/{n}")),
+            ));
+        }
+        aliases.sort_by_key(|(alias, _)| std::cmp::Reverse(alias.components().count()));
+        let trie = SourceRootAliases::new(aliases.clone());
+        for path in [
+            "/root/pkg12/a.ets",
+            "/root/pkg12/nested/a.ets",
+            "/root/pkg1234/a.ets",
+            "/outside/a.ets",
+            "relative.ets",
+            "",
+        ] {
+            let path = Path::new(path);
+            let scanned = aliases.iter().find_map(|(alias, canonical)| {
+                path.strip_prefix(alias)
+                    .ok()
+                    .map(|relative| canonical.join(relative))
+            });
+            assert_eq!(trie.resolve(path), scanned, "{}", path.display());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nested_root_aliases_choose_longest_component_prefix_without_disk_reads() {
+        use arkdown_core::SourceInventory;
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let outer = temp.path().join("Outer");
+        let inner = temp.path().join("Inner");
+        std::fs::create_dir(&outer).unwrap();
+        std::fs::create_dir(&inner).unwrap();
+        std::fs::write(outer.join("Same.ets"), "outer").unwrap();
+        std::fs::write(inner.join("Same.ets"), "inner").unwrap();
+        symlink(&inner, outer.join("nested")).unwrap();
+        let alias = temp.path().join("Alias");
+        symlink(&outer, &alias).unwrap();
+        let store = SourceStore::discover(&[alias.clone(), alias.join("nested")]).unwrap();
+        let expected = std::fs::canonicalize(inner.join("Same.ets")).unwrap();
+        std::fs::remove_file(&alias).unwrap();
+        assert_eq!(
+            store.read_text(&alias.join("Same.ets")).unwrap().as_ref(),
+            "outer"
+        );
+        assert_eq!(
+            store
+                .read_text(&alias.join("nested/Same.ets"))
+                .unwrap()
+                .as_ref(),
+            "inner"
+        );
+        assert_eq!(
+            store.canonical_path(&alias.join("nested/Same.ets")),
+            Some(expected.as_path())
+        );
+        assert!(store
+            .source_by_path(&temp.path().join("AliasOther/Same.ets"))
+            .is_none());
+        assert!(store
+            .canonical_path(&alias.join("nested/../Same.ets"))
+            .is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_identity_matches_realpath_for_roots_files_and_symlinks() {
+        use arkdown_core::SourceInventory;
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("ActualPackage");
+        std::fs::create_dir(&root).unwrap();
+        let file = root.join("MixedCase.ets");
+        std::fs::write(&file, "export const value = 1;\r\n").unwrap();
+        symlink(&file, root.join("linked.ets")).unwrap();
+        let alias = temp.path().join("alias");
+        symlink(&root, &alias).unwrap();
+        let mut paths = SourceInventoryPaths::default();
+        for entry in walkdir::WalkDir::new(&alias).follow_links(false) {
+            let entry = entry.unwrap();
+            assert_eq!(
+                paths.canonical_file(&entry),
+                canonicalize_or_owned(entry.path())
+            );
+        }
+        let store = SourceStore::discover(std::slice::from_ref(&alias)).unwrap();
+        let canonical = std::fs::canonicalize(&file).unwrap();
+        assert_eq!(
+            store.files.len(),
+            1,
+            "nested links remain excluded from discovery"
+        );
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(
+            store.canonical_path(&alias.join("MixedCase.ets")),
+            Some(canonical.as_path())
+        );
+        assert_eq!(
+            store.source_text(&canonical).unwrap().unwrap().as_ref(),
+            "export const value = 1;\r\n"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn directory_walk_preserves_realpath_case_from_case_insensitive_root() {
+        if SourceStore::compiler_uses_case_sensitive_file_names() {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("ActualPackage");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("MixedCase.ets"), "export {};").unwrap();
+        let mut paths = SourceInventoryPaths::default();
+        let wrong_case_root = temp.path().join("actualpackage");
+        for entry in walkdir::WalkDir::new(wrong_case_root) {
+            let entry = entry.unwrap();
+            assert_eq!(
+                paths.canonical_file(&entry),
+                canonicalize_or_owned(entry.path())
+            );
+        }
     }
 }

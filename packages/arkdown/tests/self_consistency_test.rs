@@ -22,6 +22,10 @@
 //! ARKDOWN_UPDATE_FINGERPRINTS=1 cargo test -p arkdown-napi self_consistency
 //! ```
 
+// Laying out `BuildService::execute_inner`'s future from this crate exceeds
+// rustc's default query depth (128); the production entry boxes it instead.
+#![recursion_limit = "256"]
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -183,11 +187,11 @@ pub struct SelfConsistencyOracle;
 struct UnavailableTestSdkPluginHost;
 
 impl NativeOhSdkPluginHost for UnavailableTestSdkPluginHost {
-  fn invoke(
+  fn invoke_batch(
     &self,
-    _request: NativeOhSdkPluginRequest,
-  ) -> Result<NativeOhSdkPluginResponse, NativeCheckError> {
-    Ok(NativeOhSdkPluginResponse::default())
+    requests: Vec<NativeOhSdkPluginRequest>,
+  ) -> Result<Vec<NativeOhSdkPluginResponse>, NativeCheckError> {
+    Ok(vec![NativeOhSdkPluginResponse::default(); requests.len()])
   }
 }
 
@@ -252,8 +256,8 @@ impl SelfConsistencyOracle {
         parameter_file_override: None,
         build_version: None,
         node_executable: None,
-        typescript_executable: Some(packaged_typescript_executable()),
         sdk_plugin_host: Some(Arc::new(UnavailableTestSdkPluginHost)),
+        heap_reclaimer: None,
         hvigor_cache_dir: None,
         hvigor_properties: Default::default(),
       })
@@ -513,25 +517,6 @@ fn repo_root() -> PathBuf {
     .parent()
     .expect("packages/ -> workspace root")
     .to_path_buf()
-}
-
-fn packaged_typescript_executable() -> PathBuf {
-  let (platform, executable) = match (std::env::consts::OS, std::env::consts::ARCH) {
-    ("macos", "aarch64") => ("darwin-arm64", "tsc"),
-    ("linux", "x86_64") => ("linux-x64-gnu", "tsc"),
-    ("windows", "x86_64") => ("win32-x64-msvc", "tsc.exe"),
-    (os, arch) => panic!("arkdown has no native TypeScript platform package for {os}/{arch}"),
-  };
-  let path = repo_root()
-    .join("packages/arkdown/npm")
-    .join(platform)
-    .join(executable);
-  assert!(
-    path.is_file(),
-    "native TypeScript platform artifact is missing: {}",
-    path.display()
-  );
-  path
 }
 
 /// Copy the fixture at `src` into a fresh temporary directory, skipping

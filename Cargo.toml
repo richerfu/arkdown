@@ -27,6 +27,9 @@ members = [
 ]
 
 [workspace.dependencies]
+tsrs_api = { git = "https://github.com/ohos-rs/tsrs.git", rev = "4d7e69df3847b5e0e5708b22a3f713082e5e6d02" }
+tsrs_core = { git = "https://github.com/ohos-rs/tsrs.git", rev = "4d7e69df3847b5e0e5708b22a3f713082e5e6d02" }
+tsrs_vfs = { git = "https://github.com/ohos-rs/tsrs.git", rev = "4d7e69df3847b5e0e5708b22a3f713082e5e6d02" }
 # Workspace crates
 arkdown = { path = "crates/arkdown" }
 arkdown-abc = { path = "crates/arkdown-abc" }
@@ -71,13 +74,13 @@ oxc_minifier = { git = "https://github.com/ohos-rs/oxc", rev = "3f2b4b7d5338c100
 oxc_resolver = "11.21.3"
 
 # Rolldown
-rolldown = { git = "https://github.com/ohos-rs/rolldown", rev = "3aac1451ad00e255acfaaecb5c94fc2d52c31c03", default-features = false, features = ["experimental"] }
-rolldown_common = { git = "https://github.com/ohos-rs/rolldown", rev = "3aac1451ad00e255acfaaecb5c94fc2d52c31c03" }
-rolldown_plugin = { git = "https://github.com/ohos-rs/rolldown", rev = "3aac1451ad00e255acfaaecb5c94fc2d52c31c03" }
-rolldown_sourcemap = { git = "https://github.com/ohos-rs/rolldown", rev = "3aac1451ad00e255acfaaecb5c94fc2d52c31c03" }
-rolldown_utils = { git = "https://github.com/ohos-rs/rolldown", rev = "3aac1451ad00e255acfaaecb5c94fc2d52c31c03" }
-rolldown_error = { git = "https://github.com/ohos-rs/rolldown", rev = "3aac1451ad00e255acfaaecb5c94fc2d52c31c03" }
-string_wizard = { git = "https://github.com/ohos-rs/rolldown", rev = "3aac1451ad00e255acfaaecb5c94fc2d52c31c03", features = ["sourcemap"] }
+rolldown = { git = "https://github.com/ohos-rs/rolldown", rev = "63112ceaa35eb24750a09d0ce3ae6f2f8074ed42", default-features = false, features = ["experimental"] }
+rolldown_common = { git = "https://github.com/ohos-rs/rolldown", rev = "63112ceaa35eb24750a09d0ce3ae6f2f8074ed42" }
+rolldown_plugin = { git = "https://github.com/ohos-rs/rolldown", rev = "63112ceaa35eb24750a09d0ce3ae6f2f8074ed42" }
+rolldown_sourcemap = { git = "https://github.com/ohos-rs/rolldown", rev = "63112ceaa35eb24750a09d0ce3ae6f2f8074ed42" }
+rolldown_utils = { git = "https://github.com/ohos-rs/rolldown", rev = "63112ceaa35eb24750a09d0ce3ae6f2f8074ed42" }
+rolldown_error = { git = "https://github.com/ohos-rs/rolldown", rev = "63112ceaa35eb24750a09d0ce3ae6f2f8074ed42" }
+string_wizard = { git = "https://github.com/ohos-rs/rolldown", rev = "63112ceaa35eb24750a09d0ce3ae6f2f8074ed42", features = ["sourcemap"] }
 
 # NAPI-RS (Node.js native addon bridge — used by packages/arkdown)
 napi = { version = "3.9.1", features = [
@@ -153,7 +156,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 dhat = "0.3.3"
 memory-stats = "1.2.0"
+libc = "0.2"
 mimalloc-safe = "0.1.62"
+# Use the same sys crate as mimalloc-safe; its header defines the option IDs.
+libmimalloc-sys2 = { version = "=0.1.60", default-features = false, features = ["extended"] }
 
 # Filesystem watching
 notify = "6"
@@ -183,3 +189,7 @@ opt-level = 3
 
 [profile.dev.package.sha2]
 opt-level = 3
+
+# Parallel native-entry fs-verity preparation, pending a hapsigner release.
+[patch.crates-io]
+hapsigner = { git = "https://github.com/harmony-contrib/hapsigner-rs.git", rev = "0b4a16ad812d679c28e9d5602f0b0a239f28c719" }

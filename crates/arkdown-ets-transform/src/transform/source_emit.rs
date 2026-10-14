@@ -5,7 +5,8 @@
 //! source text boundaries here while generated expression text is printed by OXC
 //! codegen.
 
-use std::collections::{HashMap, VecDeque};
+use std::cell::RefCell;
+use std::collections::VecDeque;
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
@@ -30,9 +31,83 @@ use string_wizard::{Hires, MagicString, SourceMapOptions};
 
 use crate::source_map::SourceMapLineOffsets;
 
+// Capacity-only scratch, never a semantic cache: no source strings or AST
+// references survive a print. Each worker borrows its own buffers and resets
+// the arena between reparses. Outlier files do not pin unbounded worker memory.
+thread_local! {
+    static PRINT_SCRATCH: RefCell<PrintScratch> = RefCell::new(PrintScratch::default());
+}
+
+#[derive(Default)]
+struct PrintScratch {
+    allocator: Allocator,
+    tokens: Vec<HvigorSourceMapToken>,
+    codegen_positions: FxHashSet<(u32, u32)>,
+    supplemental: TypeScriptSourceBoundaryMappings,
+    generated_by_kind: FxHashMap<TypeScriptSourceBoundaryKind, VecDeque<TypeScriptSourceBoundary>>,
+}
+
+impl PrintScratch {
+    fn with<R>(print: impl FnOnce(&mut Self) -> R) -> R {
+        // Taking rather than holding a RefCell borrow also permits reentrancy.
+        let mut scratch = PRINT_SCRATCH.take();
+        let result = print(&mut scratch);
+        scratch.allocator.reset();
+        scratch.tokens.clear();
+        scratch.codegen_positions.clear();
+        scratch.supplemental.entries.clear();
+        scratch.supplemental.suppressed_generated_positions.clear();
+        scratch.generated_by_kind.clear();
+        // At most 8 MiB of parser arena and 2 MiB per scratch collection per
+        // worker. These are retention limits only, never limits on a file.
+        const BUFFER_BYTES: usize = 2 * 1024 * 1024;
+        if scratch.allocator.capacity() > 8 * 1024 * 1024 {
+            scratch.allocator = Allocator::default();
+        }
+        if scratch.tokens.capacity() * size_of::<HvigorSourceMapToken>() > BUFFER_BYTES {
+            scratch.tokens = Vec::new();
+        }
+        if scratch.codegen_positions.capacity() * size_of::<(u32, u32)>() > BUFFER_BYTES {
+            scratch.codegen_positions = FxHashSet::default();
+        }
+        if scratch.supplemental.entries.capacity() * size_of::<TypeScriptSourceMapEntry>()
+            > BUFFER_BYTES
+        {
+            scratch.supplemental.entries = Vec::new();
+        }
+        if scratch
+            .supplemental
+            .suppressed_generated_positions
+            .capacity()
+            * size_of::<(u32, u32)>()
+            > BUFFER_BYTES
+        {
+            scratch.supplemental.suppressed_generated_positions = FxHashSet::default();
+        }
+        if scratch.generated_by_kind.capacity()
+            * size_of::<(
+                TypeScriptSourceBoundaryKind,
+                VecDeque<TypeScriptSourceBoundary>,
+            )>()
+            > BUFFER_BYTES
+        {
+            scratch.generated_by_kind = FxHashMap::default();
+        }
+        PRINT_SCRATCH.set(scratch);
+        result
+    }
+}
+
 pub struct HvigorTypescriptPrinter;
 
 impl HvigorTypescriptPrinter {
+    /// Release capacity-only buffers on the calling worker once a transform
+    /// stage has finished. Existing prints own their scratch locally, so this
+    /// cannot invalidate live ASTs or another worker's print.
+    pub fn release_thread_scratch() {
+        PRINT_SCRATCH.with(|scratch| *scratch.borrow_mut() = PrintScratch::default());
+    }
+
     pub(crate) fn print(program: &Program<'_>, options: CodegenOptions) -> String {
         Self::print_internal(
             program,
@@ -95,6 +170,26 @@ impl HvigorTypescriptPrinter {
         scoping: Option<Scoping>,
         source_tree_kind: TypeScriptSourceTreeKind,
     ) -> HvigorTypescriptPrintOutput {
+        PrintScratch::with(|scratch| {
+            Self::print_with_scratch(
+                program,
+                options,
+                source_text,
+                scoping,
+                source_tree_kind,
+                scratch,
+            )
+        })
+    }
+
+    fn print_with_scratch(
+        program: &Program<'_>,
+        options: CodegenOptions,
+        source_text: Option<&str>,
+        scoping: Option<Scoping>,
+        source_tree_kind: TypeScriptSourceTreeKind,
+        scratch: &mut PrintScratch,
+    ) -> HvigorTypescriptPrintOutput {
         let mut numeric_literals = NumericLiteralInventory::default();
         numeric_literals.visit_program(program);
         let mut string_literals = StringLiteralInventory::new(program.source_text);
@@ -109,7 +204,9 @@ impl HvigorTypescriptPrinter {
         } else {
             TypeScriptSourceCommentSnapshot::from_program(program)
         };
-        let mut source_layouts = TypeScriptSourceLayoutInventory::from_program_source(program);
+        let mut source_layouts =
+            TypeScriptSourceLayoutInventory::from_program_source(program, &scratch.allocator);
+        scratch.allocator.reset();
         source_layouts.record_explicit_same_name_import_aliases(program);
         let generated = Codegen::new()
             .with_options(options)
@@ -122,7 +219,8 @@ impl HvigorTypescriptPrinter {
             source_layouts,
             &source_comments,
         )
-        .format();
+        .format(&scratch.allocator);
+        scratch.allocator.reset();
         let source_map = generated.map.map(|source_map| {
             let source_map = match layout.source_map.as_ref() {
                 Some(layout_map) => {
@@ -130,10 +228,13 @@ impl HvigorTypescriptPrinter {
                     // OXC codegen never emitted. Keep only anchors that trace
                     // an actual OXC token; otherwise the layout pass would
                     // increase map granularity and change debugger behavior.
-                    let codegen_positions = source_map
-                        .get_tokens()
-                        .map(|token| (token.get_dst_line(), token.get_dst_col()))
-                        .collect::<FxHashSet<_>>();
+                    let codegen_positions = &mut scratch.codegen_positions;
+                    codegen_positions.reserve(source_map.get_tokens().len());
+                    codegen_positions.extend(
+                        source_map
+                            .get_tokens()
+                            .map(|token| (token.get_dst_line(), token.get_dst_col())),
+                    );
                     let mut filtered = SourceMapBuilder::default();
                     filtered.set_source_and_content("", "");
                     for token in layout_map.get_tokens().filter(|token| {
@@ -151,51 +252,58 @@ impl HvigorTypescriptPrinter {
                     let filtered = filtered.into_sourcemap();
                     collapse_sourcemaps(&[&source_map, &filtered])
                 }
-                None => source_map.into_owned(),
+                None => source_map,
             };
-            let supplemental = source_text
-                .map(|source_text| {
-                    TypeScriptSourceBoundaryMapper::new(
-                        source_text,
-                        &layout.code,
-                        original_boundaries.boundaries.as_slice(),
-                        &source_comments,
-                        source_tree_kind,
-                    )
-                    .mappings()
-                })
-                .unwrap_or_default();
-            let mut tokens = source_map
-                .get_tokens()
-                .map(|token| HvigorSourceMapToken {
-                    dst_line: token.get_dst_line(),
-                    dst_col: token.get_dst_col(),
-                    src_line: token.get_src_line(),
-                    src_col: token.get_src_col(),
-                    source_id: token.get_source_id(),
-                    name_id: token.get_name_id(),
-                    supplemental: false,
-                })
-                .filter(|token| {
-                    !supplemental
-                        .suppressed_generated_positions
-                        .contains(&(token.dst_line, token.dst_col))
-                })
-                .chain(
-                    supplemental
-                        .entries
-                        .into_iter()
-                        .map(|entry| HvigorSourceMapToken {
-                            dst_line: entry.generated_line,
-                            dst_col: entry.generated_col,
-                            src_line: entry.source_line,
-                            src_col: entry.source_col,
-                            source_id: Some(0),
-                            name_id: None,
-                            supplemental: true,
-                        }),
+            if let Some(source_text) = source_text {
+                TypeScriptSourceBoundaryMapper::new(
+                    source_text,
+                    &layout.code,
+                    original_boundaries.boundaries.as_slice(),
+                    &source_comments,
+                    source_tree_kind,
                 )
-                .collect::<Vec<_>>();
+                .mappings(
+                    &scratch.allocator,
+                    &mut scratch.supplemental,
+                    &mut scratch.generated_by_kind,
+                );
+                scratch.allocator.reset();
+            }
+            let supplemental = &scratch.supplemental;
+            let tokens = &mut scratch.tokens;
+            tokens.reserve(source_map.get_tokens().len() + supplemental.entries.len());
+            tokens.extend(
+                source_map
+                    .get_tokens()
+                    .map(|token| HvigorSourceMapToken {
+                        dst_line: token.get_dst_line(),
+                        dst_col: token.get_dst_col(),
+                        src_line: token.get_src_line(),
+                        src_col: token.get_src_col(),
+                        source_id: token.get_source_id(),
+                        name_id: token.get_name_id(),
+                        supplemental: false,
+                    })
+                    .filter(|token| {
+                        !supplemental
+                            .suppressed_generated_positions
+                            .contains(&(token.dst_line, token.dst_col))
+                    })
+                    .chain(
+                        supplemental
+                            .entries
+                            .iter()
+                            .map(|entry| HvigorSourceMapToken {
+                                dst_line: entry.generated_line,
+                                dst_col: entry.generated_col,
+                                src_line: entry.source_line,
+                                src_col: entry.source_col,
+                                source_id: Some(0),
+                                name_id: None,
+                                supplemental: true,
+                            }),
+                    ),
+            );
             tokens.sort_by_key(|token| (token.dst_line, token.dst_col, !token.supplemental));
             tokens.dedup_by(|right, left| {
                 right.dst_line == left.dst_line && right.dst_col == left.dst_col
@@ -211,23 +319,24 @@ impl HvigorTypescriptPrinter {
             for source in source_map.get_sources() {
                 builder.set_source_and_content(source, "");
             }
-            for token in tokens {
-                builder.add_token(
-                    token.dst_line,
-                    token.dst_col,
-                    token.src_line,
-                    token.src_col,
-                    token.source_id,
-                    token.name_id,
-                );
-            }
-            let mut source_map = builder.into_sourcemap();
-            source_map.set_source_contents(
-                source_map
-                    .get_sources()
-                    .map(|_| None)
-                    .collect::<Vec<Option<&str>>>(),
-            );
+            // Exact-size collection avoids geometric growth and the builder's
+            // shrink-to-fit copy for the final (already sorted) token buffer.
+            let mut parts = builder.into_sourcemap().into_parts();
+            parts.tokens = tokens
+                .iter()
+                .map(|token| {
+                    oxc_sourcemap::Token::new(
+                        token.dst_line,
+                        token.dst_col,
+                        token.src_line,
+                        token.src_col,
+                        token.source_id,
+                        token.name_id,
+                    )
+                })
+                .collect();
+            parts.source_contents.fill(None);
+            let source_map = oxc_sourcemap::SourceMap::from(parts);
             source_map.to_json_string()
         });
         HvigorTypescriptPrintOutput {
@@ -987,36 +1096,46 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
         )
     }
 
-    fn mappings(&self) -> TypeScriptSourceBoundaryMappings {
-        let allocator = Allocator::default();
-        let parsed = Parser::new(&allocator, self.generated, SourceType::ets()).parse();
+    fn mappings(
+        &self,
+        allocator: &Allocator,
+        mappings: &mut TypeScriptSourceBoundaryMappings,
+        generated_by_kind: &mut FxHashMap<
+            TypeScriptSourceBoundaryKind,
+            VecDeque<TypeScriptSourceBoundary>,
+        >,
+    ) {
+        let parsed = Parser::new(allocator, self.generated, SourceType::ets()).parse();
         // Generated ArkTS can carry recoverable parser diagnostics for
         // platform-specific type constructs. OXC still returns the complete
         // recoverable AST in that case; only a parser panic makes boundary
         // reconstruction unsafe.
         if parsed.panicked {
-            return TypeScriptSourceBoundaryMappings::default();
+            return;
         }
         let mut generated = TypeScriptSourceBoundaryInventory::with_source_text(
             parsed.program.source_text,
             self.source_tree_kind,
         );
         generated.visit_program(&parsed.program);
-        let mut suppressed_generated_positions = generated
-            .accessor_prefixes
-            .iter()
-            .map(|span| self.generated_position(span.start))
-            .collect::<FxHashSet<_>>();
-        let mut generated_by_kind =
-            HashMap::<TypeScriptSourceBoundaryKind, VecDeque<TypeScriptSourceBoundary>>::new();
+        let suppressed_generated_positions = &mut mappings.suppressed_generated_positions;
+        suppressed_generated_positions.reserve(generated.accessor_prefixes.len());
+        suppressed_generated_positions.extend(
+            generated
+                .accessor_prefixes
+                .iter()
+                .map(|span| self.generated_position(span.start)),
+        );
+        generated_by_kind.reserve(generated.boundaries.len());
         for boundary in generated.boundaries {
             generated_by_kind
                 .entry(boundary.kind.clone())
                 .or_default()
                 .push_back(boundary);
         }
-        let mut entries = Vec::new();
-        self.map_comment_boundaries(&parsed.program.comments, &mut entries);
+        let entries = &mut mappings.entries;
+        entries.reserve(self.original.len().saturating_mul(2));
+        self.map_comment_boundaries(&parsed.program.comments, entries);
         for original in self.original {
             let generated_boundary = match &original.kind {
                 // Component closures close in pop order (LIFO).
@@ -1056,8 +1175,8 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
                     self.map_arrow_boundaries(
                         original,
                         &generated_boundary,
-                        &mut entries,
-                        &mut suppressed_generated_positions,
+                        entries,
+                        suppressed_generated_positions,
                     );
                     continue;
                 }
@@ -1065,8 +1184,8 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
                     self.map_call_closure(
                         original,
                         &generated_boundary,
-                        &mut entries,
-                        &mut suppressed_generated_positions,
+                        entries,
+                        suppressed_generated_positions,
                     );
                     continue;
                 }
@@ -1085,8 +1204,8 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
                     self.map_export_default_function(
                         original,
                         &generated_boundary,
-                        &mut entries,
-                        &mut suppressed_generated_positions,
+                        entries,
+                        suppressed_generated_positions,
                     );
                     continue;
                 }
@@ -1094,8 +1213,8 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
                     self.map_export_default_class(
                         original,
                         &generated_boundary,
-                        &mut entries,
-                        &mut suppressed_generated_positions,
+                        entries,
+                        suppressed_generated_positions,
                     );
                     continue;
                 }
@@ -1103,8 +1222,8 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
                     self.map_function_boundaries(
                         original,
                         &generated_boundary,
-                        &mut entries,
-                        &mut suppressed_generated_positions,
+                        entries,
+                        suppressed_generated_positions,
                     );
                     continue;
                 }
@@ -1179,7 +1298,7 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
                     continue;
                 }
                 TypeScriptSourceBoundaryKind::ReturnStatement { has_argument: true } => {
-                    self.map_statement_closure(original, &generated_boundary, &mut entries);
+                    self.map_statement_closure(original, &generated_boundary, entries);
                     continue;
                 }
                 _ => {}
@@ -1203,15 +1322,15 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
                 original.kind,
                 TypeScriptSourceBoundaryKind::ExpressionStatementClosure
             ) {
-                self.map_statement_closure(original, &generated_boundary, &mut entries);
+                self.map_statement_closure(original, &generated_boundary, entries);
                 continue;
             }
             if matches!(original.kind, TypeScriptSourceBoundaryKind::Property(_)) {
                 self.map_updated_property_name(
                     original,
                     &generated_boundary,
-                    &mut entries,
-                    &mut suppressed_generated_positions,
+                    entries,
+                    suppressed_generated_positions,
                 );
             }
             if matches!(original.kind, TypeScriptSourceBoundaryKind::Method { .. }) {
@@ -1223,12 +1342,12 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
                 original.kind,
                 TypeScriptSourceBoundaryKind::VariableDeclaration
             ) {
-                self.map_declare_prefix(original, &generated_boundary, &mut entries);
+                self.map_declare_prefix(original, &generated_boundary, entries);
                 self.map_variable_closure(
                     original,
                     &generated_boundary,
-                    &mut entries,
-                    &mut suppressed_generated_positions,
+                    entries,
+                    suppressed_generated_positions,
                 );
             }
             let source_offset = original.span.start;
@@ -1250,11 +1369,6 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
             if !suppressed_generated_positions.contains(&generated_end) {
                 entries.push(self.source_map_entry(generated_span.end, original.span.end));
             }
-        }
-
-        TypeScriptSourceBoundaryMappings {
-            entries,
-            suppressed_generated_positions,
         }
     }
 
@@ -1966,9 +2080,11 @@ impl<'a> TypeScriptSourceLayoutInventory<'a> {
         }
     }
 
-    fn from_program_source(program: &Program<'a>) -> HvigorSourceLayoutSnapshot {
-        let allocator = Allocator::default();
-        let parsed = Parser::new(&allocator, program.source_text, program.source_type).parse();
+    fn from_program_source(
+        program: &Program<'a>,
+        allocator: &Allocator,
+    ) -> HvigorSourceLayoutSnapshot {
+        let parsed = Parser::new(allocator, program.source_text, program.source_type).parse();
         if parsed.panicked || !parsed.diagnostics.is_empty() {
             return HvigorSourceLayoutSnapshot::default();
         }
@@ -2305,9 +2421,8 @@ impl<'a> HvigorTypescriptLayout<'a> {
         }
     }
 
-    fn format(self) -> HvigorTypescriptLayoutOutput {
-        let allocator = Allocator::default();
-        let parsed = Parser::new(&allocator, &self.code, SourceType::ets()).parse();
+    fn format(self, allocator: &Allocator) -> HvigorTypescriptLayoutOutput {
+        let parsed = Parser::new(allocator, &self.code, SourceType::ets()).parse();
         if parsed.panicked || !parsed.diagnostics.is_empty() {
             return HvigorTypescriptLayoutOutput {
                 code: self.code,

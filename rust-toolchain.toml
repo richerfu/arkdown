@@ -1,6 +1,5 @@
 [toolchain]
-# Rust 1.95.0: first stable release with `if_let_guards` stabilized
-# (required by the workspace's pinned ohos-rs/oxc dependencies)
-channel = "1.95.0"
+# Match the pinned tsrs compiler toolchain for in-process crate integration.
+channel = "1.99.0"
 components = ["clippy", "rustfmt"]
 profile = "minimal"

@@ -66,6 +66,7 @@ pub struct OhosResolver {
     require_fs_resolver: OxcResolver,
     package_roots: FxHashMap<String, Arc<PackageRoot>>,
     package_roots_by_path: FxHashMap<PathBuf, Arc<PackageRoot>>,
+    source_inventory: Option<Arc<dyn arkdown_core::SourceInventory>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,7 +138,10 @@ impl<'a> ResolverSpecifier<'a> {
 
 impl OhosResolver {
     /// Create a new resolver with the given configuration.
-    pub fn new(config: ResolverConfig) -> Self {
+    pub fn new(mut config: ResolverConfig) -> Self {
+        for (base, _) in &mut config.source_set_overlays {
+            *base = arkdown_path::canonicalize_or_owned(base);
+        }
         let fs_resolver = OxcResolver::new(Self::oxc_resolve_options(
             &config,
             ResolveImportKind::Import,
@@ -153,7 +157,34 @@ impl OhosResolver {
             require_fs_resolver,
             package_roots,
             package_roots_by_path,
+            source_inventory: None,
         }
+    }
+
+    pub fn with_source_inventory(
+        mut self,
+        inventory: Option<Arc<dyn arkdown_core::SourceInventory>>,
+    ) -> Self {
+        self.source_inventory = inventory;
+        self
+    }
+
+    fn canonical_resolved_path(&self, path: PathBuf) -> PathBuf {
+        // OXC resolve_impl/load_realpath already resolves symlinks. Its cached
+        // path can retain import casing on macOS; restore the startup spelling.
+        if let Some(canonical) = self
+            .source_inventory
+            .as_ref()
+            .and_then(|sources| sources.canonical_path(&path))
+        {
+            return if canonical == path {
+                path
+            } else {
+                canonical.to_path_buf()
+            };
+        }
+        // Files outside the snapshot retain the existing realpath fallback.
+        arkdown_path::canonicalize_or_owned(&path)
     }
 
     /// Resolve `specifier` imported from `importer`.
@@ -277,7 +308,7 @@ impl OhosResolver {
                 .resolve_file(importer, specifier.as_str())
             {
                 let resolved_buf = resolution.into_path_buf();
-                let resolved = arkdown_path::canonicalize_or_owned(&resolved_buf);
+                let resolved = self.canonical_resolved_path(resolved_buf);
 
                 // Source-set overlay: check if a target-specific file shadows this path.
                 //
@@ -324,7 +355,7 @@ impl OhosResolver {
             let Some(resolution) = resolution else {
                 continue;
             };
-            let resolved = arkdown_path::canonicalize_or_owned(&resolution.into_path_buf());
+            let resolved = self.canonical_resolved_path(resolution.into_path_buf());
             let resolved = self.apply_source_set_overlay(resolved);
             return Some(OhosResolvedModule::LocalSource {
                 module_type: ModuleType::infer(&resolved),
@@ -418,6 +449,21 @@ impl OhosResolver {
         import_kind: ResolveImportKind,
     ) -> Option<OhosResolvedModule> {
         let package_root = importer_package.path.join("oh_modules").join(package_name);
+        if let Some(root) = self
+            .source_inventory
+            .as_ref()
+            .and_then(|inventory| inventory.canonical_path(&package_root))
+            .and_then(|path| self.package_roots_by_path.get(path))
+        {
+            // Installed importer-local packages keep the remote classification,
+            // even when the same physical package is also a workspace source.
+            let installed = PackageRoot {
+                local_source: false,
+                source_roots: Vec::new(),
+                ..root.as_ref().clone()
+            };
+            return self.resolve_package_entry(package_name, subpath, &installed, import_kind);
+        }
         if !package_root.is_dir() {
             return None;
         }
@@ -485,7 +531,7 @@ impl OhosResolver {
             .resolve(importer, specifier.as_str())
             .ok()?;
         let resolved_buf = resolution.into_path_buf();
-        let resolved = arkdown_path::canonicalize_or_owned(&resolved_buf);
+        let resolved = self.canonical_resolved_path(resolved_buf);
         let package_root = PhysicalPackageRoot::new(&resolved).find()?;
         let package = OhPackage::load_from_root(&package_root);
         let package_name = package
@@ -569,7 +615,7 @@ impl OhosResolver {
             .ok()
             .map(|resolution| {
                 let buf = resolution.into_path_buf();
-                arkdown_path::canonicalize_or_owned(&buf)
+                self.canonical_resolved_path(buf)
             })
     }
 
@@ -583,10 +629,15 @@ impl OhosResolver {
     /// override pass through unchanged.
     fn apply_source_set_overlay(&self, resolved: PathBuf) -> PathBuf {
         for (base_root, target_root) in &self.config.source_set_overlays {
-            // Canonicalize the base root to match the already-canonicalized resolved path.
-            let canonical_base = arkdown_path::canonicalize_or_owned(base_root);
-            if let Ok(relative) = resolved.strip_prefix(&canonical_base) {
+            if let Ok(relative) = resolved.strip_prefix(base_root) {
                 let candidate = target_root.join(relative);
+                if let Some(path) = self
+                    .source_inventory
+                    .as_ref()
+                    .and_then(|inventory| inventory.canonical_path(&candidate))
+                {
+                    return path.to_path_buf();
+                }
                 if candidate.is_file() {
                     return arkdown_path::canonicalize_or_owned(&candidate);
                 }
@@ -1806,5 +1857,74 @@ mod tests {
             }
             _ => panic!("expected LocalSource"),
         }
+    }
+    #[derive(Debug)]
+    struct CapturedPaths(FxHashMap<PathBuf, PathBuf>);
+    impl arkdown_core::SourceInventory for CapturedPaths {
+        fn canonical_path(&self, path: &Path) -> Option<&Path> {
+            self.0.get(path).map(PathBuf::as_path)
+        }
+        fn source_text(
+            &self,
+            _path: &Path,
+        ) -> Result<Option<Arc<str>>, arkdown_core::SourceReadError> {
+            Ok(None)
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_resolution_keeps_physical_symlink_identity_and_outside_fallback() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("Package");
+        fs::create_dir(&root).unwrap();
+        let file = root.join("MixedCase.ts");
+        fs::write(&file, "export {};").unwrap();
+        let link = temp.path().join("package-link");
+        std::os::unix::fs::symlink(&root, &link).unwrap();
+        let file_link = root.join("alias.ts");
+        std::os::unix::fs::symlink(&file, &file_link).unwrap();
+        let canonical = fs::canonicalize(&file).unwrap();
+        let inventory = CapturedPaths(
+            [(canonical.clone(), canonical.clone())]
+                .into_iter()
+                .collect(),
+        );
+        let resolver = make_resolver(temp.path().into(), vec![], vec![], FxHashMap::default())
+            .with_source_inventory(Some(Arc::new(inventory)));
+        for request in ["../package-link/MixedCase.ts", "./alias.ts"] {
+            let OhosResolvedModule::LocalSource { path: resolved, .. } =
+                resolver.resolve(request, &root.join("main.ts")).unwrap()
+            else {
+                panic!("local source")
+            };
+            assert_eq!(resolved, canonical);
+        }
+        let outside = temp.path().join("Outside.ts");
+        fs::write(&outside, "export {};").unwrap();
+        let outside_link = temp.path().join("OutsideAlias.ts");
+        std::os::unix::fs::symlink(&outside, &outside_link).unwrap();
+        assert_eq!(
+            resolver.canonical_resolved_path(outside_link),
+            fs::canonicalize(outside).unwrap()
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn snapshot_restores_case_without_recanonicalizing_known_output() {
+        let temp = TempDir::new().unwrap();
+        let actual = temp.path().join("MixedCase.ts");
+        fs::write(&actual, "export {};").unwrap();
+        let alias = temp.path().join("mixedcase.ts");
+        if !alias.exists() {
+            return;
+        }
+        let canonical = fs::canonicalize(&actual).unwrap();
+        let inventory = CapturedPaths([(alias.clone(), canonical.clone())].into_iter().collect());
+        let resolver = make_resolver(temp.path().into(), vec![], vec![], FxHashMap::default())
+            .with_source_inventory(Some(Arc::new(inventory)));
+        fs::remove_file(actual).unwrap();
+        assert_eq!(resolver.canonical_resolved_path(alias), canonical);
     }
 }

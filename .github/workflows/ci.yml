@@ -29,7 +29,7 @@ env:
   CARGO_TERM_COLOR: always
   OHOS_SDK_VERSION: "6.0"
   RUST_BACKTRACE: 1
-  RUST_TOOLCHAIN: "1.95.0"
+  RUST_TOOLCHAIN: "1.99.0"
   LINUX_BUILD_DEPENDENCIES: >-
     build-essential ca-certificates clang cmake libssl-dev ninja-build perl
     pkg-config python3
@@ -54,6 +54,7 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@v4
+        with:
 
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
@@ -149,7 +150,7 @@ jobs:
             ${{ runner.os }}-rust-${{ env.RUST_TOOLCHAIN }}-cargo-
 
       - name: Check formatting
-        run: cargo fmt --all -- --check
+        run: cargo fmt --check
 
       - name: Check workspace
         run: cargo check --locked --workspace --all-targets
@@ -181,8 +182,8 @@ jobs:
           cargo test --locked -p arkdown-napi --test golden_test test_loader_json_golden_minimal_hap
           cargo test --locked -p arkdown-napi --test self_consistency_test test_minimal_hap_build_is_deterministic
 
-      - name: Build arkdown CLI
-        run: cargo build --locked -p arkdown-napi --bin arkdown
+      - name: Build native binding library
+        run: cargo build --locked -p arkdown-napi --lib
 
   hvigor-parity:
     name: Hvigor Parity
@@ -194,6 +195,7 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -229,14 +231,35 @@ jobs:
           ARKDOWN_PARITY_HVIGORW: ${{ secrets.HVIGORW_PATH }}
           OHOS_SDK_HOME: ${{ secrets.OHOS_SDK_PATH }}
 
-      - name: Build arkdown CLI
-        run: cargo build --locked --release -p arkdown-napi --bin arkdown
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: "10.12.1"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Build binding for the JavaScript CLI
+        working-directory: packages/arkdown
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Test embedded compiler and build through Node
+        working-directory: packages/arkdown
+        run: node --test __test__/native-checker.e2e.cjs __test__/native-plugin.e2e.cjs
+        env:
+          ARKDOWN_NATIVE_CHECKER_E2E: "1"
+          ARKDOWN_NATIVE_PLUGIN_E2E: "1"
+          OHOS_SDK_HOME: ${{ secrets.OHOS_SDK_PATH }}
 
       - name: Run hvigor parity tests
         run: cargo test --locked -p arkdown-napi --test hvigor_parity -- --nocapture
         env:
           ARKDOWN_PARITY_HVIGORW: ${{ secrets.HVIGORW_PATH }}
-          ARKDOWN_PARITY_ARKDOWN_BIN: target/release/arkdown
+          ARKDOWN_PARITY_ARKDOWN_CLI: ${{ github.workspace }}/packages/arkdown/js/arkdown-cli.js
           ARKDOWN_PARITY_RUN: "1"
           ARKDOWN_PARITY_STRICT: "1"
           ARKDOWN_PARITY_ALLOWLIST: tests/parity_allowlist.json

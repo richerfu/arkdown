@@ -19,7 +19,7 @@ if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
   exit 1
 fi
 
-for command_name in cargo cargo-zigbuild cargo-xwin file git go node npm pnpm rustup tar zip; do
+for command_name in cargo cargo-zigbuild cargo-xwin file git node npm pnpm rustup tar zip; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
     echo "Required command is missing: $command_name" >&2
     exit 1
@@ -80,10 +80,6 @@ if [[ $DRY_RUN -eq 0 ]]; then
   npm whoami --registry "$REGISTRY" >/dev/null
 fi
 
-echo "Building the pinned native TypeScript distribution..."
-TYPESCRIPT_DIST="$(node "$PACKAGE_DIR/scripts/build-typescript-dist.mjs")"
-echo "Using native TypeScript distribution: $TYPESCRIPT_DIST"
-
 export XWIN_CACHE_DIR="${XWIN_CACHE_DIR:-$PACKAGE_DIR/.cache/cargo-xwin}"
 mkdir -p "$XWIN_CACHE_DIR"
 
@@ -107,10 +103,10 @@ rm -rf \
   "$PACKAGE_DIR/arkdown.win32-x64-msvc.node"
 
 echo "Building macOS arm64 package..."
-pnpm --dir "$PACKAGE_DIR" run build --target aarch64-apple-darwin
+pnpm --dir "$PACKAGE_DIR" exec napi build --platform --release --target aarch64-apple-darwin -- --locked
 
 echo "Building Linux x64 GNU package with cargo-zigbuild..."
-pnpm --dir "$PACKAGE_DIR" run build --target x86_64-unknown-linux-gnu --cross-compile
+pnpm --dir "$PACKAGE_DIR" exec napi build --platform --release --target x86_64-unknown-linux-gnu --cross-compile -- --locked
 
 echo "Building Windows x64 MSVC package with cargo-xwin..."
 cargo xwin build \
@@ -170,9 +166,6 @@ fi
 
 cd "$PACKAGE_DIR"
 pnpm exec napi pre-publish --no-gh-release -t npm --skip-optional-publish
-node "$PACKAGE_DIR/scripts/attach-typescript-dist.mjs" \
-  "$TYPESCRIPT_DIST" \
-  "$PACKAGE_DIR/npm"
 
 VERSION="$(node -p "require('./package.json').version")"
 if [[ "$VERSION" == *-* ]]; then

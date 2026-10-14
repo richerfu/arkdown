@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use arkdown_core::ArktsLanguageVersion;
 use arkdown_path::{canonicalize_or_owned, lexical_normalize, ModuleSpecifierText, SourceFileName};
@@ -198,6 +198,10 @@ impl<'a> ArktsSourceLanguageDetector<'a> {
 
 #[derive(Debug, Clone, Default)]
 pub struct TransformSourceSnapshot {
+    /// Shared only by clones of this immutable resolution snapshot. Builders
+    /// that change resolution inputs give the new snapshot an empty cache.
+    declaration_resolutions: Arc<DeclarationResolutionCache>,
+    source_inventory: Option<Arc<dyn arkdown_core::SourceInventory>>,
     files: Arc<FxHashMap<PathBuf, Arc<str>>>,
     lookup_paths: Arc<FxHashMap<PathBuf, PathBuf>>,
     runtime_source_paths: Arc<FxHashSet<PathBuf>>,
@@ -206,6 +210,11 @@ pub struct TransformSourceSnapshot {
     sdk_declaration_roots: Arc<Vec<PathBuf>>,
     visual_sources: Arc<FxHashMap<PathBuf, VisualGeneratedSource>>,
     visual_lookup_paths: Arc<FxHashMap<PathBuf, PathBuf>>,
+}
+
+#[derive(Debug, Default)]
+struct DeclarationResolutionCache {
+    entries: RwLock<FxHashMap<PathBuf, FxHashMap<String, Option<TransformSourceFile>>>>,
 }
 
 impl TransformSourceSnapshot {
@@ -231,13 +240,43 @@ impl TransformSourceSnapshot {
         runtime_source_paths: FxHashSet<PathBuf>,
     ) -> Self {
         let indexed_files = TransformSourceFileIndex::new(files);
-        let package_roots = SourcePackageRootCollector::new(indexed_files.files.keys()).collect();
-        let resolved_static_modules = TransformResolvedStaticModuleIndex::new(modules).build();
         let runtime_source_paths = runtime_source_paths
             .into_iter()
             .map(|path| canonicalize_or_owned(&lexical_normalize(&path)))
             .collect();
+        Self::from_index(indexed_files, modules, runtime_source_paths)
+    }
+
+    /// Inputs already captured with physical identities by the startup builder.
+    pub fn from_canonical_sources(
+        files: FxHashMap<PathBuf, Arc<str>>,
+        modules: Vec<TransformResolvedStaticModule>,
+        runtime_source_paths: FxHashSet<PathBuf>,
+    ) -> Self {
+        let lookup_paths = files
+            .keys()
+            .map(|path| (path.clone(), path.clone()))
+            .collect();
+        Self::from_index(
+            TransformSourceFileIndex {
+                files,
+                lookup_paths,
+            },
+            modules,
+            runtime_source_paths,
+        )
+    }
+
+    fn from_index(
+        indexed_files: TransformSourceFileIndex,
+        modules: Vec<TransformResolvedStaticModule>,
+        runtime_source_paths: FxHashSet<PathBuf>,
+    ) -> Self {
+        let package_roots = SourcePackageRootCollector::new(indexed_files.files.keys()).collect();
+        let resolved_static_modules = TransformResolvedStaticModuleIndex::new(modules).build();
         Self {
+            declaration_resolutions: Arc::default(),
+            source_inventory: None,
             files: Arc::new(indexed_files.files),
             lookup_paths: Arc::new(indexed_files.lookup_paths),
             runtime_source_paths: Arc::new(runtime_source_paths),
@@ -246,6 +285,45 @@ impl TransformSourceSnapshot {
             sdk_declaration_roots: Arc::default(),
             visual_sources: Arc::default(),
             visual_lookup_paths: Arc::default(),
+        }
+    }
+
+    pub fn with_source_inventory(
+        mut self,
+        inventory: Arc<dyn arkdown_core::SourceInventory>,
+    ) -> Self {
+        self.source_inventory = Some(inventory);
+        self.declaration_resolutions = Arc::default();
+        self
+    }
+
+    pub fn source_inventory(&self) -> Option<&Arc<dyn arkdown_core::SourceInventory>> {
+        self.source_inventory.as_ref()
+    }
+
+    /// Physical startup identity, including root aliases and filesystem spelling.
+    pub fn canonical_source_path(&self, path: &Path) -> Option<&Path> {
+        // Keep realpath semantics when `..` may cross an uncaptured symlink.
+        if path
+            .components()
+            .any(|part| part == std::path::Component::ParentDir)
+        {
+            return None;
+        }
+        self.source_inventory
+            .as_ref()
+            .and_then(|inventory| inventory.canonical_path(path))
+            .or_else(|| self.indexed_path(path).map(PathBuf::as_path))
+    }
+
+    /// Original module bytes, before any checker preprocessing or transform overlay.
+    pub fn module_source_text(
+        &self,
+        path: &Path,
+    ) -> Result<Option<Arc<str>>, arkdown_core::SourceReadError> {
+        match &self.source_inventory {
+            Some(inventory) => inventory.source_text(path),
+            None => Ok(None),
         }
     }
 
@@ -272,6 +350,7 @@ impl TransformSourceSnapshot {
             }
         }
         self.lookup_paths = Arc::new(lookup_paths);
+        self.declaration_resolutions = Arc::default();
         self
     }
 
@@ -318,6 +397,7 @@ impl TransformSourceSnapshot {
             .filter(|root| seen.insert(root.clone()))
             .collect();
         self.sdk_declaration_roots = Arc::new(roots);
+        self.declaration_resolutions = Arc::default();
         self
     }
 
@@ -333,6 +413,7 @@ impl TransformSourceSnapshot {
             package_roots.insert(name, lexical_normalize(&root));
         }
         self.package_roots = Arc::new(package_roots);
+        self.declaration_resolutions = Arc::default();
         self
     }
 
@@ -349,6 +430,31 @@ impl TransformSourceSnapshot {
     }
 
     pub(crate) fn resolve_static_with_declarations(
+        &self,
+        importer: &Path,
+        specifier: &str,
+    ) -> Option<TransformSourceFile> {
+        if let Some(cached) = self
+            .declaration_resolutions
+            .entries
+            .read()
+            .ok()
+            .and_then(|entries| entries.get(importer)?.get(specifier).cloned())
+        {
+            return cached;
+        }
+        let resolved = self.resolve_static_declaration(importer, specifier);
+        if let Ok(mut entries) = self.declaration_resolutions.entries.write() {
+            entries
+                .entry(importer.to_path_buf())
+                .or_default()
+                .entry(specifier.to_owned())
+                .or_insert_with(|| resolved.clone());
+        }
+        resolved
+    }
+
+    fn resolve_static_declaration(
         &self,
         importer: &Path,
         specifier: &str,
@@ -830,7 +936,7 @@ impl<'a> PackageSpecifier<'a> {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub(crate) struct TransformSourceFile {
     pub(crate) path: PathBuf,
     pub(crate) source: Arc<str>,
@@ -1087,6 +1193,102 @@ mod tests {
         assert_eq!(
             resolved.path,
             arkdown_path::canonicalize_or_owned(&declaration_path)
+        );
+    }
+
+    #[test]
+    fn declaration_resolution_cache_is_snapshot_scoped_including_misses() {
+        let importer = Path::new("/project/Index.ets");
+        let first = PathBuf::from("/first/Index.d.ts");
+        let second = PathBuf::from("/second/Index.d.ts");
+        let sdk = PathBuf::from("/sdk/@ohos.demo.d.ts");
+        let sources = TransformSourceSnapshot::from_canonical_sources(
+            FxHashMap::from_iter([
+                (first.clone(), Arc::from("export interface First {}")),
+                (second.clone(), Arc::from("export interface Second {}")),
+                (sdk.clone(), Arc::from("export interface Demo {}")),
+            ]),
+            Vec::new(),
+            FxHashSet::default(),
+        )
+        .with_package_roots(FxHashMap::from_iter([(
+            "pkg".into(),
+            PathBuf::from("/first"),
+        )]));
+        assert!(sources
+            .resolve_static_with_declarations(importer, "@ohos.demo")
+            .is_none());
+        for _ in 0..2 {
+            let cached = sources
+                .resolve_static_with_declarations(importer, "pkg/Index")
+                .unwrap();
+            let uncached = sources
+                .resolve_static_declaration(importer, "pkg/Index")
+                .unwrap();
+            assert_eq!(cached.path, first);
+            assert_eq!(cached.path, uncached.path);
+            assert!(Arc::ptr_eq(&cached.source, &uncached.source));
+        }
+        let changed = sources
+            .clone()
+            .with_package_roots(FxHashMap::from_iter([(
+                "pkg".into(),
+                PathBuf::from("/second"),
+            )]))
+            .with_sdk_declaration_roots(vec![PathBuf::from("/sdk")]);
+        assert_eq!(
+            changed
+                .resolve_static_with_declarations(importer, "pkg/Index")
+                .unwrap()
+                .path,
+            second
+        );
+        assert_eq!(
+            changed
+                .resolve_static_with_declarations(importer, "@ohos.demo")
+                .unwrap()
+                .path,
+            sdk
+        );
+        assert!(sources
+            .resolve_static_with_declarations(importer, "@ohos.demo")
+            .is_none());
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                let sources = &sources;
+                let first = &first;
+                scope.spawn(move || {
+                    for _ in 0..32 {
+                        assert_eq!(
+                            &sources
+                                .resolve_static_with_declarations(importer, "pkg/Index")
+                                .unwrap()
+                                .path,
+                            first
+                        );
+                        assert!(sources
+                            .resolve_static_with_declarations(importer, "missing")
+                            .is_none());
+                    }
+                });
+            }
+        });
+        let updated = TransformSourceSnapshot::from_canonical_sources(
+            FxHashMap::from_iter([(first.clone(), Arc::from("export interface Updated {}"))]),
+            Vec::new(),
+            FxHashSet::default(),
+        )
+        .with_package_roots(FxHashMap::from_iter([(
+            "pkg".into(),
+            PathBuf::from("/first"),
+        )]));
+        assert_eq!(
+            updated
+                .resolve_static_with_declarations(importer, "pkg/Index")
+                .unwrap()
+                .source
+                .as_ref(),
+            "export interface Updated {}"
         );
     }
 

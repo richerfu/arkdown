@@ -62,8 +62,8 @@ Minimum implementations are forbidden. Do not land placeholder behavior, stub pa
 ## Hvigor Parity Rules
 
 For ArkTS 1.1, OpenHarmony source is authoritative when OXC extensions differ.
-Do not port OXC-only syntax or semantics into the native TypeScript checker.
-TypeScript (the adapted Go backend) is used only for type checking and inference,
+Do not port OXC-only syntax or semantics into the native tsrs checker.
+tsrs (the native Rust checker) is used only for type checking and inference,
 including parsing/binding needed for those queries and declaration diagnostics.
 Keep its service programs in `noEmit` mode. Rust/OXC/Rolldown own transformations,
 JavaScript/declaration generation and runtime annotation metadata; consume typed
@@ -100,7 +100,7 @@ than inventing or preserving speculative logic.
 
 Do not invent fallback behavior to make a sample pass. Do not hardcode project
 paths, package layouts, native library declaration directories, cache paths, or
-Example-specific locations. Paths and specifiers must come from manifests,
+project-specific locations. Paths and specifiers must come from manifests,
 lockfiles, resolver APIs, hvigor task metadata, SDK metadata, or generated
 module records. When hvigor delegates to a resolver or compiler service,
 arkdown should use the corresponding structured Rust dependency or typed

@@ -1,29 +1,101 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
 use arkdown_ets_checker::{
     NativeArktsTransformTypeQuery, NativeCheckError, NativeCompilerOptions, NativeDiagnostic,
-    NativeOhSdkCheckPlugin, NativeOhSdkClassCheckPlugin, NativeOhSdkPluginHost,
-    NativeOhSdkPluginRequest, NativeOhSdkPluginResponse, NativeProgramFileChanges,
-    NativeTypeQueryRange, NativeTypeSession,
+    NativeOhSdkCheckPlugin, NativeOhSdkClassCheckPlugin, NativeOhSdkPluginCompletion,
+    NativeOhSdkPluginHost, NativeOhSdkPluginRequest, NativeOhSdkPluginResponse,
+    NativeProgramFileChanges, NativeTypeQueryRange, NativeTypeSession,
 };
 use serde_json::json;
 
+#[derive(Debug)]
+struct DeferredSource {
+    text: &'static str,
+    reads: std::sync::atomic::AtomicUsize,
+    fail_path: Option<PathBuf>,
+}
+
+impl arkdown_core::SourceTextHandle for DeferredSource {
+    fn size_bytes(&self) -> u64 {
+        self.text.len() as u64
+    }
+
+    fn read_text(&self) -> Result<Arc<str>, arkdown_core::SourceReadError> {
+        self.reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Some(path) = &self.fail_path {
+            return Err(arkdown_core::SourceReadError::ReloadIo {
+                path: path.clone(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "snapshot reload denied",
+                ),
+            });
+        }
+        Ok(Arc::from(self.text))
+    }
+}
+
 #[test]
-fn native_typescript_uses_packaged_service_without_mandatory_environment_configuration() {
-    let package = tempfile::tempdir().unwrap();
-    let packaged = package.path().join("tsc");
-    std::fs::write(&packaged, b"native compiler fixture").unwrap();
-    let resolved = NativeTypeSession::resolve_executable(Some(&packaged)).unwrap();
-    let expected = std::env::var_os("ARKDOWN_TYPESCRIPT_PATH")
-        .filter(|value| !value.is_empty())
-        .map(std::path::PathBuf::from)
-        .unwrap_or(packaged)
-        .canonicalize()
+fn source_handles_materialize_only_program_reads_and_do_not_fall_back_on_error() {
+    use arkdown_core::SourceTextHandle;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let project = tempfile::tempdir().unwrap();
+    let app = project.path().join("entry.ets");
+    let unused = project.path().join("unused.ets");
+    // An unchecked disk fallback would suppress the captured-text type error.
+    std::fs::write(&app, "export {}; const n: number = 1;").unwrap();
+    let make = |text, fail_path| {
+        Arc::new(DeferredSource {
+            text,
+            reads: AtomicUsize::new(0),
+            fail_path,
+        })
+    };
+    let used = make("export {}; const n: number = 'wrong';", None);
+    let unneeded = make("invalid unused source", None);
+    let mut session = NativeTypeSession::start(project.path(), BTreeMap::new(), None)
+        .unwrap()
+        .with_source_handles(BTreeMap::from([
+            (app.clone(), used.clone() as Arc<dyn SourceTextHandle>),
+            (unused, unneeded.clone() as Arc<dyn SourceTextHandle>),
+        ]));
+    let options = NativeCompilerOptions::arkts11(project.path());
+    let program = session
+        .create_program(std::slice::from_ref(&app), &options)
         .unwrap();
-    assert_eq!(resolved, expected);
+    for _ in 0..2 {
+        assert!(
+            session
+                .diagnostics(&program)
+                .unwrap()
+                .iter()
+                .any(|diagnostic| diagnostic.code == 2322)
+        );
+    }
+    assert_eq!(used.reads.load(Ordering::Relaxed), 1);
+    assert_eq!(unneeded.reads.load(Ordering::Relaxed), 0);
+
+    let failed = make("", Some(app.clone()));
+    let mut session = NativeTypeSession::start(project.path(), BTreeMap::new(), None)
+        .unwrap()
+        .with_source_handles(BTreeMap::from([(
+            app.clone(),
+            failed as Arc<dyn SourceTextHandle>,
+        )]));
+    let error = match session.create_program(std::slice::from_ref(&app), &options) {
+        Err(error) => error,
+        Ok(_) => panic!(
+            "a failed captured read must not turn into missing-source diagnostics or disk content"
+        ),
+    };
+    assert!(
+        matches!(error, NativeCheckError::Source(error) if matches!(&*error, arkdown_core::SourceReadError::ReloadIo { path, .. } if path == &app))
+    );
 }
 
 #[test]
@@ -56,13 +128,13 @@ fn compiler_options_preserve_oh_acronym_wire_names_and_checker_mode() {
     ]));
     let value = serde_json::to_value(options).unwrap();
     // ets2bundle/compiler/src/ets_checker.ts::setCompilerOptions fixes
-    // `noEmit`; Arkdown must never turn TSGO into its code generator.
+    // `noEmit`; Arkdown must never turn tsrs into its code generator.
     assert_eq!(value["noEmit"], true);
     assert_eq!(
         value["checkers"],
         std::thread::available_parallelism()
             .map_or(4, |count| count.get())
-            .min(6)
+            .min(4)
     );
     assert_eq!(value["module"], 1);
     assert_eq!(value["ohRuntimeOS"], "OpenHarmony");
@@ -126,7 +198,6 @@ fn native_diagnostic_preserves_source_less_signed_ranges() {
 }
 
 #[test]
-#[ignore = "requires ARKDOWN_TYPESCRIPT_PATH native compiler"]
 fn native_api_applies_openharmony_parse_and_inference_semantics() {
     let project = tempfile::tempdir().unwrap();
     let source_path = project.path().join("entry.ets");
@@ -148,7 +219,6 @@ const methods: Map<string, CanvasMethod<any>> = new Map([
 ]);
 "#;
     let mut session = NativeTypeSession::start(
-        &NativeTypeSession::executable().unwrap(),
         project.path(),
         BTreeMap::from([
             (source_path.clone(), Arc::from(source)),
@@ -168,11 +238,10 @@ const methods: Map<string, CanvasMethod<any>> = new Map([
         "{source_graph:#?}"
     );
     assert!(diagnostics.is_empty(), "{diagnostics:#?}");
-    session.release(program).unwrap();
+    drop(program);
 }
 
 #[test]
-#[ignore = "requires ARKDOWN_TYPESCRIPT_PATH native compiler"]
 fn native_build_diagnostics_preserve_linter_and_typescript_channels() {
     let project = tempfile::tempdir().unwrap();
     let source_path = project.path().join("entry.ets");
@@ -180,7 +249,6 @@ fn native_build_diagnostics_preserve_linter_and_typescript_channels() {
         "var value: string | undefined;\nconst copy: string = value;\nconst wrong: number = 'text';\n",
     );
     let mut session = NativeTypeSession::start(
-        &NativeTypeSession::executable().unwrap(),
         project.path(),
         BTreeMap::from([(source_path.clone(), source)]),
         None,
@@ -206,35 +274,46 @@ fn native_build_diagnostics_preserve_linter_and_typescript_channels() {
             .iter()
             .any(|diagnostic| diagnostic.code == 2322)
     );
-    session.release(program).unwrap();
+    drop(program);
 }
 
 #[derive(Debug)]
 struct SincePluginHost;
 
 impl NativeOhSdkPluginHost for SincePluginHost {
-    fn invoke(
+    fn invoke_batch(
         &self,
-        request: NativeOhSdkPluginRequest,
-    ) -> Result<NativeOhSdkPluginResponse, NativeCheckError> {
-        assert_eq!(request.operation, "value");
-        assert_eq!(request.function_name, "checkSinceValue");
-        let required = request.args[0].as_str().unwrap().parse::<u32>().unwrap();
-        assert_eq!(request.args[1], "5.0.5(17)");
-        assert_eq!(request.args[2], 0);
-        Ok(NativeOhSdkPluginResponse {
-            found: true,
-            result: required <= 17,
-            ..NativeOhSdkPluginResponse::default()
-        })
+        requests: Vec<NativeOhSdkPluginRequest>,
+    ) -> Result<Vec<NativeOhSdkPluginResponse>, NativeCheckError> {
+        requests
+            .into_iter()
+            .map(|request| {
+                if request.operation == "releaseSession" {
+                    assert!(request.args.is_empty());
+                    return Ok(NativeOhSdkPluginResponse::default());
+                }
+                assert_eq!(request.operation, "value");
+                if let Some(function) = request.function_name {
+                    assert_eq!(function, "checkSinceValue");
+                }
+                assert!(request.plugin_id > 0);
+                let required = request.args[0].as_str().unwrap().parse::<u32>().unwrap();
+                assert_eq!(request.args[1], "5.0.5(17)");
+                assert_eq!(request.args[2], 0);
+                Ok(NativeOhSdkPluginResponse {
+                    found: true,
+                    result: required <= 17,
+                    ..NativeOhSdkPluginResponse::default()
+                })
+            })
+            .collect()
     }
 }
 
 /// `main.js::collectExternalApiCheckPlugin` loads the SDK-owned synchronous
-/// JavaScript callback. TSGO owns selection and diagnostics but must delegate
+/// JavaScript callback. tsrs owns selection and diagnostics but must delegate
 /// that JavaScript ABI through its API client.
 #[test]
-#[ignore = "requires ARKDOWN_TYPESCRIPT_PATH native compiler"]
 fn native_delegates_sdk_since_callback_to_the_api_host() {
     let project = tempfile::tempdir().unwrap();
     let sdk_path = project.path().join("@ohos.sample.d.ts");
@@ -258,7 +337,7 @@ fn native_delegates_sdk_since_callback_to_the_api_host() {
         function_name: "checkSinceValue".into(),
     }];
     let mut session = NativeTypeSession::start(
-        &NativeTypeSession::executable().unwrap(),
+
         project.path(),
         BTreeMap::from([
             (
@@ -291,34 +370,223 @@ fn native_delegates_sdk_since_callback_to_the_api_host() {
         .filter(|diagnostic| diagnostic.code == 28007)
         .collect::<Vec<_>>();
     assert!(sdk_linter.is_empty(), "{linter:#?}");
-    session.release(program).unwrap();
+    drop(program);
+}
+
+#[derive(Default)]
+struct CompactingPluginHost {
+    operations: Mutex<Vec<String>>,
+    compaction: Mutex<Option<NativeOhSdkPluginCompletion>>,
+}
+
+impl std::fmt::Debug for CompactingPluginHost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompactingPluginHost")
+            .finish_non_exhaustive()
+    }
+}
+
+impl NativeOhSdkPluginHost for CompactingPluginHost {
+    fn invoke_batch(
+        &self,
+        requests: Vec<NativeOhSdkPluginRequest>,
+    ) -> Result<Vec<NativeOhSdkPluginResponse>, NativeCheckError> {
+        Ok(requests
+            .into_iter()
+            .map(|request| {
+                assert_ne!(
+                    request.operation, "compactSession",
+                    "compaction must not wait on JS"
+                );
+                self.operations
+                    .lock()
+                    .unwrap()
+                    .push(request.operation.clone());
+                NativeOhSdkPluginResponse {
+                    found: true,
+                    // Missing plugins are nonfatal and uncached: strict must retry.
+                    error: if request.operation == "syscap" {
+                        "plugin unavailable".into()
+                    } else {
+                        String::new()
+                    },
+                    phase: "load".into(),
+                    ..Default::default()
+                }
+            })
+            .collect())
+    }
+
+    fn submit_batch(
+        &self,
+        requests: Vec<NativeOhSdkPluginRequest>,
+        complete: NativeOhSdkPluginCompletion,
+    ) {
+        if requests.len() == 1 && requests[0].operation == "compactSession" {
+            let request = &requests[0];
+            assert!(request.session_id > 0);
+            assert!(request.args.is_empty());
+            self.operations
+                .lock()
+                .unwrap()
+                .push(request.operation.clone());
+            assert!(self.compaction.lock().unwrap().replace(complete).is_none());
+        } else {
+            complete(self.invoke_batch(requests));
+        }
+    }
+}
+
+#[test]
+fn native_compacts_sdk_session_immediately_after_normal_without_waiting() {
+    let project = tempfile::tempdir().unwrap();
+    let sdk = project.path().join("api.d.ets");
+    let app = project.path().join("entry.ets");
+    let normal_app = project.path().join("normal.ts");
+    let sources = BTreeMap::from([
+        (
+            sdk.clone(),
+            Arc::from("/** @syscap base */ declare function sdkCall(): void;"),
+        ),
+        (
+            app.clone(),
+            Arc::from("export {}; sdkCall(); const bad: number = 'bad';"),
+        ),
+        (
+            normal_app.clone(),
+            Arc::from("export {}; sdkCall(); const bad: number = 'bad';"),
+        ),
+    ]);
+    let mut options = NativeCompilerOptions::arkts11(project.path());
+    // tsrs enables strict SDK callbacks in strict-checker-only mode. TS files
+    // still run in normal, while ETS files run in strict, exercising both sides.
+    options.strict_checker_only = true;
+    options.ets_loader_path = project.path().join("ets-loader");
+    options.oh_compile_mode = "moduleJson".into();
+    options.oh_device_types = vec!["phone".into()];
+    options.oh_syscap_intersection = vec!["base".into()];
+    options.oh_all_module_paths = vec![sdk.clone()];
+    options.oh_sdk_class_check_plugins = vec![NativeOhSdkClassCheckPlugin {
+        tag_name: "syscap".into(),
+        path: project.path().join("check.cjs"),
+        class_name: "Checker".into(),
+    }];
+    let roots = [sdk, app, normal_app];
+    let baseline_host = Arc::new(CompactingPluginHost::default());
+    let mut baseline_session =
+        NativeTypeSession::start(project.path(), sources.clone(), Some(baseline_host)).unwrap();
+    let baseline_program = baseline_session.create_program(&roots, &options).unwrap();
+    let baseline = baseline_session
+        .arkts_build_diagnostics(&baseline_program)
+        .unwrap();
+    assert!(!baseline.semantic_diagnostics.is_empty());
+
+    let host = Arc::new(CompactingPluginHost::default());
+    let mut session =
+        NativeTypeSession::start(project.path(), sources, Some(host.clone())).unwrap();
+    let program = session.create_program(&roots, &options).unwrap();
+    let normal = session.arkts_normal_diagnostics(&program).unwrap();
+    let normal_end = host.operations.lock().unwrap().len();
+    assert_eq!(
+        host.operations.lock().unwrap().last().unwrap(),
+        "compactSession"
+    );
+    assert!(
+        host.compaction.lock().unwrap().is_some(),
+        "normal must enqueue without waiting"
+    );
+    assert!(
+        host.operations
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|op| op == "syscap")
+    );
+    let diagnostics = session.arkts_strict_diagnostics(&program, normal).unwrap();
+    let operations = host.operations.lock().unwrap().clone();
+    assert_eq!(
+        operations
+            .iter()
+            .filter(|op| *op == "compactSession")
+            .count(),
+        1
+    );
+    assert_eq!(operations[normal_end - 1], "compactSession");
+    assert!(
+        operations[normal_end..].iter().any(|op| op == "syscap"),
+        "{operations:?}"
+    );
+    assert_eq!(format!("{diagnostics:#?}"), format!("{baseline:#?}"));
+    // The entire strict pass completes while JS compaction is still pending.
+    let complete = host.compaction.lock().unwrap().take().unwrap();
+    complete(Err(NativeCheckError::Compiler(
+        "compaction unavailable".into(),
+    )));
+    drop(program);
+    drop(session);
+    assert_eq!(
+        host.operations.lock().unwrap().last().unwrap(),
+        "releaseSession"
+    );
+}
+
+#[test]
+fn native_skips_sdk_compaction_if_no_callback_initialized_the_session() {
+    let project = tempfile::tempdir().unwrap();
+    let app = project.path().join("entry.ets");
+    let host = Arc::new(CompactingPluginHost::default());
+    let mut session = NativeTypeSession::start(
+        project.path(),
+        BTreeMap::from([(app.clone(), Arc::from("export {}; const n: number = 1;"))]),
+        Some(host.clone()),
+    )
+    .unwrap();
+    let program = session
+        .create_program(&[app], &NativeCompilerOptions::arkts11(project.path()))
+        .unwrap();
+    let normal = session.arkts_normal_diagnostics(&program).unwrap();
+    session.release_sdk_sources_before_strict(&NativeCompilerOptions::arkts11(project.path()));
+    session.arkts_strict_diagnostics(&program, normal).unwrap();
+    drop(program);
+    drop(session);
+    assert!(host.operations.lock().unwrap().is_empty());
+    assert!(host.compaction.lock().unwrap().is_none());
 }
 
 #[derive(Debug, Default)]
 struct SessionRecordingPluginHost {
     session_ids: Mutex<Vec<u64>>,
+    released: Mutex<Vec<u64>>,
 }
 
 impl NativeOhSdkPluginHost for SessionRecordingPluginHost {
-    fn invoke(
+    fn invoke_batch(
         &self,
-        request: NativeOhSdkPluginRequest,
-    ) -> Result<NativeOhSdkPluginResponse, NativeCheckError> {
-        self.session_ids.lock().unwrap().push(request.session_id);
-        Ok(NativeOhSdkPluginResponse {
-            found: true,
-            result: true,
-            ..NativeOhSdkPluginResponse::default()
-        })
+        requests: Vec<NativeOhSdkPluginRequest>,
+    ) -> Result<Vec<NativeOhSdkPluginResponse>, NativeCheckError> {
+        requests
+            .into_iter()
+            .map(|request| {
+                if request.operation == "releaseSession" {
+                    self.released.lock().unwrap().push(request.session_id);
+                    return Ok(NativeOhSdkPluginResponse::default());
+                }
+                self.session_ids.lock().unwrap().push(request.session_id);
+                Ok(NativeOhSdkPluginResponse {
+                    found: true,
+                    result: true,
+                    ..NativeOhSdkPluginResponse::default()
+                })
+            })
+            .collect()
     }
 }
 
-/// Separate TSGO children restart their process-local session counters. The
+/// Separate tsrs children restart their process-local session counters. The
 /// Rust service boundary must still keep their JS source/config intern tables
 /// disjoint when a build-scoped plugin host is shared by multiple modules.
 #[test]
-#[ignore = "requires ARKDOWN_TYPESCRIPT_PATH native compiler"]
-fn native_scopes_sdk_plugin_sessions_across_compiler_processes() {
+fn native_scopes_sdk_plugin_sessions_across_compiler_instances() {
     let project = tempfile::tempdir().unwrap();
     let sdk_path = project.path().join("@ohos.sample.d.ts");
     let source_path = project.path().join("entry.ets");
@@ -349,22 +617,41 @@ fn native_scopes_sdk_plugin_sessions_across_compiler_processes() {
         ),
         (source_path.clone(), Arc::from("current(); future();")),
     ]);
-    let executable = NativeTypeSession::executable().unwrap();
+
     let host = Arc::new(SessionRecordingPluginHost::default());
 
     for _ in 0..2 {
-        let mut session = NativeTypeSession::start(
-            &executable,
-            project.path(),
-            sources.clone(),
-            Some(host.clone()),
-        )
-        .unwrap();
+        let mut session =
+            NativeTypeSession::start(project.path(), sources.clone(), Some(host.clone())).unwrap();
         let program = session
             .create_program(&[sdk_path.clone(), source_path.clone()], &options)
             .unwrap();
-        assert!(session.diagnostics(&program).unwrap().is_empty());
-        session.release(program).unwrap();
+        assert!(
+            session
+                .arkts_build_diagnostics(&program)
+                .unwrap()
+                .semantic_diagnostics
+                .is_empty()
+        );
+        let lease = program.clone();
+        drop(program);
+        drop(session);
+        let before = host.released.lock().unwrap().len();
+        assert_eq!(
+            before,
+            host.session_ids
+                .lock()
+                .unwrap()
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>()
+                .len()
+                - 1,
+            "SDK state must remain live while a snapshot lease exists"
+        );
+        assert!(!lease.source_graph().unwrap().files.is_empty());
+        drop(lease);
+        assert_eq!(host.released.lock().unwrap().len(), before + 1);
     }
 
     let session_ids = host
@@ -379,10 +666,9 @@ fn native_scopes_sdk_plugin_sessions_across_compiler_processes() {
 
 /// `apiAvailable_validate_utils.ts::validateApiAvailableArgument` is a
 /// declaration-identity/type-checker contract. OXC lowers the runtime call,
-/// while TSGO must publish the source-owned 11706013 diagnostic through the
+/// while tsrs must publish the source-owned 11706013 diagnostic through the
 /// TS28007 SDK diagnostic carrier.
 #[test]
-#[ignore = "requires ARKDOWN_TYPESCRIPT_PATH native compiler"]
 fn native_validates_api_available_against_the_resolved_sdk_declaration() {
     let project = tempfile::tempdir().unwrap();
     let sdk_path = project.path().join("@ohos.deviceInfo.d.ts");
@@ -396,7 +682,7 @@ fn native_validates_api_available_against_the_resolved_sdk_declaration() {
     options.oh_all_module_paths = vec![sdk_path.clone()];
     options.oh_global_module_paths = vec![project.path().to_path_buf()];
     let mut session = NativeTypeSession::start(
-        &NativeTypeSession::executable().unwrap(),
+
         project.path(),
         BTreeMap::from([
             (
@@ -428,15 +714,14 @@ fn native_validates_api_available_against_the_resolved_sdk_declaration() {
         sdk_diagnostics[0].text.starts_with("11706013#"),
         "{diagnostics:#?}"
     );
-    session.release(program).unwrap();
+    drop(program);
 }
 
 /// `api_check_utils.ts::isSourceRetentionAnnotationContentValid` and
 /// `checkFormatResult` resolve the SDK `Available` annotation before checking
-/// OpenHarmony version format and runtime OS. This remains a TSGO diagnostic
+/// OpenHarmony version format and runtime OS. This remains a tsrs diagnostic
 /// contract rather than an OXC transform-time rule.
 #[test]
-#[ignore = "requires ARKDOWN_TYPESCRIPT_PATH native compiler"]
 fn native_validates_available_annotation_format_and_runtime_os() {
     let project = tempfile::tempdir().unwrap();
     let sdk_path = project.path().join("@ohos.annotation.d.ets");
@@ -445,7 +730,7 @@ fn native_validates_available_annotation_format_and_runtime_os() {
     options.oh_runtime_os = "OpenHarmony".into();
     options.oh_all_module_paths = vec![sdk_path.clone()];
     let mut session = NativeTypeSession::start(
-        &NativeTypeSession::executable().unwrap(),
+
         project.path(),
         BTreeMap::from([
             (
@@ -480,13 +765,12 @@ fn native_validates_available_annotation_format_and_runtime_os() {
         sdk_texts.iter().any(|text| text.starts_with("11706017#")),
         "{diagnostics:#?}"
     );
-    session.release(program).unwrap();
+    drop(program);
 }
 
 /// OH parser/binder/checker annotation declarations and resolveAnnotation:
 /// keep real type checking after accepting @interface, rather than erasing it.
 #[test]
-#[ignore = "requires ARKDOWN_TYPESCRIPT_PATH native compiler"]
 fn native_checks_annotations_without_erasing_their_type_rules() {
     let project = tempfile::tempdir().unwrap();
     let source_path = project.path().join("entry.ets");
@@ -500,7 +784,6 @@ const wrongValue = Options;
 "#,
     );
     let mut session = NativeTypeSession::start(
-        &NativeTypeSession::executable().unwrap(),
         project.path(),
         BTreeMap::from([(source_path.clone(), Arc::clone(&source))]),
         None,
@@ -520,11 +803,10 @@ const wrongValue = Options;
         .collect();
     codes.sort_unstable();
     assert_eq!(codes, [2322, 28027, 28028], "{diagnostics:#?}");
-    session.release(program).unwrap();
+    drop(program);
 }
 
 #[test]
-#[ignore = "requires ARKDOWN_TYPESCRIPT_PATH native compiler"]
 fn native_batches_annotation_and_transform_type_facts() {
     let project = tempfile::tempdir().unwrap();
     let source_path = project.path().join("facts.ets");
@@ -550,7 +832,6 @@ class Facts {
 "#,
     );
     let mut session = NativeTypeSession::start(
-        &NativeTypeSession::executable().unwrap(),
         project.path(),
         BTreeMap::from([(source_path.clone(), Arc::clone(&source))]),
         None,
@@ -642,7 +923,7 @@ class Facts {
     );
     assert_eq!(facts[0].member_accesses.len(), 1);
     assert!(facts[0].member_accesses[0].r#type.is_enum);
-    session.release(program).unwrap();
+    drop(program);
 }
 
 /// ets2bundle
@@ -650,7 +931,6 @@ class Facts {
 /// the declaration identities after TypeScript has resolved namespace,
 /// factory-return, and member declarations.
 #[test]
-#[ignore = "requires ARKDOWN_TYPESCRIPT_PATH native compiler"]
 fn native_collects_resolved_sdk_dependency_uses() {
     let project = tempfile::tempdir().unwrap();
     let source_path = project.path().join("entry.ets");
@@ -659,7 +939,6 @@ fn native_collects_resolved_sdk_dependency_uses() {
     options.oh_crossplatform = true;
     options.oh_all_module_paths = vec![sdk_path.clone()];
     let mut session = NativeTypeSession::start(
-        &NativeTypeSession::executable().unwrap(),
         project.path(),
         BTreeMap::from([
             (
@@ -689,13 +968,12 @@ fn native_collects_resolved_sdk_dependency_uses() {
     assert_eq!(uses[0].function, "Client#run");
     assert_eq!(uses[1].function, "create");
     assert_eq!(uses[2].function, "sample");
-    session.release(program).unwrap();
+    drop(program);
 }
 
 /// TypeScript API: api/session_createprogram_test.go and
 /// api/callbackfs.go. Real compiler test, with no fabricated diagnostics.
 #[test]
-#[ignore = "requires ARKDOWN_TYPESCRIPT_PATH native compiler"]
 fn native_checks_complex_types_and_snapshot_sources() {
     let project = tempfile::tempdir().unwrap();
     let source_path = project.path().join("entry.ets");
@@ -708,9 +986,8 @@ const conditional: PickType<string> = false;
 const unicode = "中文😀"; const wrong: number = "bad";
 "#,
     );
-    let executable = NativeTypeSession::executable().unwrap();
+
     let mut session = NativeTypeSession::start(
-        &executable,
         project.path(),
         BTreeMap::from([(source_path.clone(), source.clone())]),
         None,
@@ -743,11 +1020,10 @@ const unicode = "中文😀"; const wrong: number = "bad";
             .encode_utf16()
             .count() as u32
     );
-    session.release(program).unwrap();
+    drop(program);
 }
 
 #[test]
-#[ignore = "requires ARKDOWN_TYPESCRIPT_PATH native compiler"]
 fn native_checks_struct_members_and_exact_sdk_aliases() {
     let project = tempfile::tempdir().unwrap();
     let file = project.path().join("Index.ets");
@@ -757,7 +1033,7 @@ fn native_checks_struct_members_and_exact_sdk_aliases() {
         .paths
         .insert("@kit.TestKit".into(), vec![sdk.clone()]);
     let mut session = NativeTypeSession::start(
-        &NativeTypeSession::executable().unwrap(), project.path(),
+ project.path(),
         BTreeMap::from([
             (sdk, Arc::from("export declare const sdkValue: number;")),
             (file.clone(), Arc::from("import { sdkValue } from '@kit.TestKit';\ndeclare const Component: ClassDecorator; @Component struct Demo { count: number = 'bad'; value(): string { return 1; } }\nconst bad: string = sdkValue;")),
@@ -768,11 +1044,10 @@ fn native_checks_struct_members_and_exact_sdk_aliases() {
     let diagnostics = session.diagnostics(&program).unwrap();
     assert_eq!(diagnostics.len(), 3, "{diagnostics:#?}");
     assert!(diagnostics.iter().all(|d| d.code == 2322));
-    session.release(program).unwrap();
+    drop(program);
 }
 
 #[test]
-#[ignore = "requires ARKDOWN_TYPESCRIPT_PATH native compiler"]
 fn native_updates_program_and_resolves_aliased_factory_types() {
     let project = tempfile::tempdir().unwrap();
     let file = project.path().join("builder.ts");
@@ -784,7 +1059,6 @@ fn native_updates_program_and_resolves_aliased_factory_types() {
         .count() as u32;
     let options = NativeCompilerOptions::arkts11(project.path());
     let mut session = NativeTypeSession::start(
-        &NativeTypeSession::executable().unwrap(),
         project.path(),
         BTreeMap::from([(file.clone(), source.clone())]),
         None,
@@ -814,11 +1088,10 @@ fn native_updates_program_and_resolves_aliased_factory_types() {
         )
         .unwrap();
     assert!(session.diagnostics(&program).unwrap().is_empty());
-    session.release(program).unwrap();
+    drop(program);
 }
 
 #[test]
-#[ignore = "requires ARKDOWN_TYPESCRIPT_PATH native compiler"]
 fn native_incremental_program_tracks_created_and_deleted_modules() {
     let project = tempfile::tempdir().unwrap();
     let entry = project.path().join("index.ts");
@@ -827,13 +1100,8 @@ fn native_incremental_program_tracks_created_and_deleted_modules() {
         Arc::from("import { value } from './dependency'; export const result: number = value;");
     let options = NativeCompilerOptions::arkts11(project.path());
     let initial_sources = BTreeMap::from([(entry.clone(), entry_source.clone())]);
-    let mut session = NativeTypeSession::start(
-        &NativeTypeSession::executable().unwrap(),
-        project.path(),
-        initial_sources.clone(),
-        None,
-    )
-    .unwrap();
+    let mut session =
+        NativeTypeSession::start(project.path(), initial_sources.clone(), None).unwrap();
     let program = session
         .create_program(std::slice::from_ref(&entry), &options)
         .unwrap();
@@ -883,5 +1151,194 @@ fn native_incremental_program_tracks_created_and_deleted_modules() {
             .iter()
             .any(|diagnostic| { diagnostic.code == 2307 })
     );
-    session.release(program).unwrap();
+    drop(program);
+}
+
+#[derive(Default)]
+struct RecordingPreprocessor {
+    calls: Mutex<BTreeMap<PathBuf, usize>>,
+}
+impl arkdown_ets_checker::NativeSourcePreprocessor for RecordingPreprocessor {
+    fn preprocess(
+        &self,
+        path: &Path,
+        source: Arc<str>,
+    ) -> arkdown_ets_checker::NativeProcessedSource {
+        *self
+            .calls
+            .lock()
+            .unwrap()
+            .entry(path.to_path_buf())
+            .or_default() += 1;
+        arkdown_ets_checker::NativeProcessedSource {
+            text: Arc::from(source.replace("'replaceMe'", "1")),
+            legacy_extend_names: BTreeSet::from(["used".into()]),
+            ..Default::default()
+        }
+    }
+}
+
+#[test]
+fn native_preprocesses_only_read_implementation_versions_and_keeps_incremental_diffs_raw() {
+    let project = tempfile::tempdir().unwrap();
+    let app = project.path().join("app.ts");
+    let dependency = project.path().join("dependency.ts");
+    let unused = project.path().join("unused.ets");
+    let declaration = project.path().join("global.d.ts");
+    let initial_sources = BTreeMap::from([
+        (
+            app.clone(),
+            Arc::from("// 😀\nimport { value } from './dependency'; const actual: number = value;"),
+        ),
+        (
+            dependency.clone(),
+            Arc::from("export const value: number = 'replaceMe';"),
+        ),
+        (unused.clone(), Arc::from("@Extend Text.unused() {}")),
+        (
+            declaration.clone(),
+            Arc::from("declare const declared: number;"),
+        ),
+    ]);
+    let processor = Arc::new(RecordingPreprocessor::default());
+    let mut session = NativeTypeSession::start(project.path(), initial_sources.clone(), None)
+        .unwrap()
+        .with_source_preprocessor(processor.clone());
+    let options = NativeCompilerOptions::arkts11(project.path());
+    let roots = [app.clone(), declaration.clone()];
+    let old = session.create_program(&roots, &options).unwrap();
+    assert!(session.diagnostics(&old).unwrap().is_empty());
+    session.arkts_build_diagnostics(&old).unwrap();
+    let read = session.read_sources();
+    assert!(
+        !read.contains_key(&unused),
+        "Program must not preprocess unreferenced inventory files"
+    );
+    assert_eq!(
+        read[&dependency].text.as_ref(),
+        "export const value: number = 1;"
+    );
+    assert!(read[&declaration].legacy_extend_names.is_empty());
+    assert_eq!(processor.calls.lock().unwrap().get(&app), Some(&1));
+    assert_eq!(processor.calls.lock().unwrap().get(&dependency), Some(&1));
+    assert!(!processor.calls.lock().unwrap().contains_key(&declaration));
+
+    let mut changed = initial_sources.clone();
+    changed.insert(
+        app.clone(),
+        Arc::from("// 😀\nimport { value } from './dependency'; const actual: string = value;"),
+    );
+    let next = session
+        .update_program_snapshot(
+            old.clone(),
+            &roots,
+            &options,
+            changed.clone(),
+            &NativeProgramFileChanges::default(),
+        )
+        .unwrap();
+    assert!(
+        session
+            .diagnostics(&next)
+            .unwrap()
+            .iter()
+            .any(|d| d.code == 2322)
+    );
+    assert!(
+        session.diagnostics(&old).unwrap().is_empty(),
+        "old Program retains its processed version"
+    );
+    assert_eq!(processor.calls.lock().unwrap().get(&app), Some(&2));
+    assert_eq!(processor.calls.lock().unwrap().get(&dependency), Some(&1));
+
+    changed.insert(
+        dependency.clone(),
+        Arc::from("export const value: string = 'new';"),
+    );
+    let updated = session
+        .update_program_snapshot(
+            next,
+            &roots,
+            &options,
+            changed.clone(),
+            &NativeProgramFileChanges::default(),
+        )
+        .unwrap();
+    assert!(session.diagnostics(&updated).unwrap().is_empty());
+    assert_eq!(
+        session.read_sources()[&dependency].text.as_ref(),
+        "export const value: string = 'new';"
+    );
+    assert_eq!(processor.calls.lock().unwrap().get(&app), Some(&2));
+    assert_eq!(processor.calls.lock().unwrap().get(&dependency), Some(&2));
+    let mut fresh = NativeTypeSession::start(project.path(), changed, None)
+        .unwrap()
+        .with_source_preprocessor(Arc::new(RecordingPreprocessor::default()));
+    let rebuilt = fresh.create_program(&roots, &options).unwrap();
+    assert_eq!(
+        session.source_graph(&updated).unwrap().files.len(),
+        fresh.source_graph(&rebuilt).unwrap().files.len()
+    );
+    assert!(fresh.diagnostics(&rebuilt).unwrap().is_empty());
+}
+
+#[test]
+fn native_disk_preprocessing_reuses_versions_and_invalidates_observed_changes() {
+    let project = tempfile::tempdir().unwrap();
+    let app = project.path().join("app.ts");
+    let dependency = project.path().join("dependency.ts");
+    std::fs::write(&dependency, "export const value: number = 'replaceMe';").unwrap();
+    let sources = BTreeMap::from([(
+        app.clone(),
+        Arc::from("import { value } from './dependency'; const actual: number = value;"),
+    )]);
+    let processor = Arc::new(RecordingPreprocessor::default());
+    let mut session = NativeTypeSession::start(project.path(), sources.clone(), None)
+        .unwrap()
+        .with_source_preprocessor(processor.clone());
+    let options = NativeCompilerOptions::arkts11(project.path());
+    let roots = [app];
+    let old = session.create_program(&roots, &options).unwrap();
+    assert!(session.diagnostics(&old).unwrap().is_empty());
+    assert_eq!(
+        session.read_sources()[&dependency].text.as_ref(),
+        "export const value: number = 1;"
+    );
+    let unchanged = session
+        .update_program_snapshot(
+            old.clone(),
+            &roots,
+            &options,
+            sources.clone(),
+            &NativeProgramFileChanges::default(),
+        )
+        .unwrap();
+    assert!(session.diagnostics(&unchanged).unwrap().is_empty());
+    assert_eq!(processor.calls.lock().unwrap().get(&dependency), Some(&1));
+    std::fs::write(&dependency, "export const value: string = 'new';").unwrap();
+    let next = session
+        .update_program_snapshot(
+            unchanged,
+            &roots,
+            &options,
+            sources,
+            &NativeProgramFileChanges {
+                changed: vec![dependency.clone()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(
+        session
+            .diagnostics(&next)
+            .unwrap()
+            .iter()
+            .any(|d| d.code == 2322)
+    );
+    assert!(session.diagnostics(&old).unwrap().is_empty());
+    assert_eq!(processor.calls.lock().unwrap().get(&dependency), Some(&2));
+    assert_eq!(
+        session.read_sources()[&dependency].text.as_ref(),
+        "export const value: string = 'new';"
+    );
 }

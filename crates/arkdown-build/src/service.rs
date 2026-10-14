@@ -44,10 +44,9 @@ impl BuildService {
                 self.execute_inner(Some(&mut bundle_runtime), Some(&mut semantic_runtime)),
             )
             .await;
-            let semantic_close_result = semantic_runtime.close();
+            semantic_runtime.close();
             let bundle_close_result = bundle_runtime.close().await;
             let output = result?;
-            semantic_close_result?;
             bundle_close_result?;
             Ok(output)
         } else {

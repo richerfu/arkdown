@@ -1,5 +1,10 @@
 # OXC/Rolldown 替换 Hvigor：当前架构与剩余工作
 
+2026-10-12 更新：当前 checker 已迁移为 tsrs 原生 snapshot API，依赖为 Cargo Git dependency，以完整 `rev` 固定到 `ohos-rs/tsrs` 的 `ohos` 分支，
+旧 Go 编译器和分发路径已删除。当前迁移验证见 [迁移记录](ARKTS11-NATIVE-TYPESCRIPT.md)。
+以下 TSGO/Go 提交、真实工程耗时和产物对照属于迁移前历史记录，不代表 tsrs 已通过同样的整包验证。
+
+
 状态：ArkTS 1.1 源码定义主链与 TSGO 能力已接入，strict 37/37 零差异；HAR 原生签名迁移等待 hapsigner-rs，其余为性能收口
 更新日期：2026-09-10
 
@@ -135,7 +140,7 @@ crossplatform dependency 等类型事实已批量接入 OXC。SDK dependency 身
 source graph、声明诊断和源码定义的诊断筛选已经贯通。TypeScript 以
 `third_party/typescript` gitlink 固定，发布链先从该 clean revision 构建三平台
 TSGO，再组装并校验 N-API 平台包；不接受外部 dist。正常安装无需环境变量，
-`ARKDOWN_TYPESCRIPT_PATH` 只用于开发覆盖。watch 已按 ets2bundle 生命周期长驻复用 Program，并保留原有诊断、
+`ARKDOWN_TSRS_PATH` 只用于开发覆盖。watch 已按 ets2bundle 生命周期长驻复用 Program，并保留原有诊断、
 linter、type-facts 和 source-graph 刷新顺序。源码合同和验证说明见
 [`crates/arkdown-ets-checker/DESIGN.md`](../../crates/arkdown-ets-checker/DESIGN.md)。
 

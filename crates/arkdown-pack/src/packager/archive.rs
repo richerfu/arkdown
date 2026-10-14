@@ -91,20 +91,20 @@ impl Packager {
 /// This deliberately starts from an available `abc_path`; it never
 /// reverse-engineers a module root from the final output filename or embeds a
 /// product/build path.
-struct PackAuxiliaryArtifacts<'a> {
+pub(super) struct PackAuxiliaryArtifacts<'a> {
     input: &'a PackInput,
 }
 
 impl<'a> PackAuxiliaryArtifacts<'a> {
-    fn new(input: &'a PackInput) -> Self {
+    pub(super) fn new(input: &'a PackInput) -> Self {
         Self { input }
     }
 
-    fn an_dir(&self) -> Option<PathBuf> {
+    pub(super) fn an_dir(&self) -> Option<PathBuf> {
         self.loader_target_dir().map(|path| path.join("an"))
     }
 
-    fn ap_dir(&self) -> Option<PathBuf> {
+    pub(super) fn ap_dir(&self) -> Option<PathBuf> {
         self.intermediates_dir().map(|path| path.join("ap"))
     }
 
@@ -124,7 +124,7 @@ impl<'a> PackAuxiliaryArtifacts<'a> {
     }
 }
 
-struct LoaderOutEtsAsset<'a> {
+pub(super) struct LoaderOutEtsAsset<'a> {
     path: &'a Path,
     rel: &'a Path,
     output_path: &'a Path,
@@ -132,7 +132,7 @@ struct LoaderOutEtsAsset<'a> {
 }
 
 impl<'a> LoaderOutEtsAsset<'a> {
-    fn new(
+    pub(super) fn new(
         path: &'a Path,
         rel: &'a Path,
         output_path: &'a Path,
@@ -146,7 +146,7 @@ impl<'a> LoaderOutEtsAsset<'a> {
         }
     }
 
-    fn is_generated_artifact(&self) -> bool {
+    pub(super) fn is_generated_artifact(&self) -> bool {
         self.rel == Path::new("modules.abc")
             || self.rel == Path::new("modules_static.abc")
             || self.rel == Path::new("sourceMaps.map")

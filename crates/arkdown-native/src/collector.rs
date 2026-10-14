@@ -461,7 +461,8 @@ impl<'a> NativeLibCollector<'a> {
             let node = self.deps.nodes.get(&edge.package_name).or_else(|| {
                 self.deps.nodes.values().find(|node| {
                     node.package_root.as_deref().is_some_and(|root| {
-                        canonicalize_or_owned(root) == canonicalize_or_owned(&edge.package_root)
+                        self.deps.canonical_package_root(root)
+                            == self.deps.canonical_package_root(&edge.package_root)
                     })
                 })
             });
@@ -469,19 +470,19 @@ impl<'a> NativeLibCollector<'a> {
                 continue;
             };
             let root = node.package_root.as_deref().unwrap_or(&edge.package_root);
+            let canonical_root = self.deps.canonical_package_root(root);
             if self
                 .excluded_dependency_roots
-                .contains(&arkdown_path::canonicalize_or_owned(root))
+                .contains(canonical_root.as_ref())
             {
                 continue;
             }
             let package = NativeLibPackageInfo::dependency(node);
-            let canonical_root = canonicalize_or_owned(root);
             if let Some(local) = self
                 .policy
                 .cmake_local_dependencies
                 .iter()
-                .find(|dependency| dependency.package_root() == canonical_root)
+                .find(|dependency| dependency.package_root() == canonical_root.as_ref())
             {
                 // Hvigor `ProcessLibs.collectLocalHarLibs()` registers the local
                 // module's ProcessLibs output before its source-tree `libs/` fallback.
@@ -496,19 +497,19 @@ impl<'a> NativeLibCollector<'a> {
             let Some(root) = node.package_root.as_deref() else {
                 continue;
             };
+            let canonical_root = self.deps.canonical_package_root(root);
             if self
                 .excluded_dependency_roots
-                .contains(&arkdown_path::canonicalize_or_owned(root))
+                .contains(canonical_root.as_ref())
             {
                 continue;
             }
             let package = NativeLibPackageInfo::dependency(node);
-            let canonical_root = canonicalize_or_owned(root);
             if let Some(local) = self
                 .policy
                 .cmake_local_dependencies
                 .iter()
-                .find(|dependency| dependency.package_root() == canonical_root)
+                .find(|dependency| dependency.package_root() == canonical_root.as_ref())
             {
                 push_libs_dir(local.process_libs_dir(), package.clone());
             }

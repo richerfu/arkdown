@@ -23,10 +23,10 @@ test('public JavaScript is limited to entry, CLI, and plugin compatibility', () 
   assert.equal(manifest.dependencies, undefined)
   assert.ok(Buffer.byteLength(sources['runtime-entry.js']) < 500)
   // The adapter owns the complete TS/JS plugin ABI, including SDK CommonJS
-  // checkers and V8 structured clone for plugin caches. Build I/O,
-  // transformations, type semantics, and orchestration stay native; keep the
-  // complete source-owned compatibility boundary below 44 KiB.
-  assert.ok(Buffer.byteLength(sources['plugin-adapter.js']) < 44 * 1024)
+  // checkers, session-release GC, and V8 structured clone for plugin caches.
+  // Build I/O, transformations, type semantics, and orchestration stay native; keep the
+  // complete source-owned compatibility boundary below 45 KiB.
+  assert.ok(Buffer.byteLength(sources['plugin-adapter.js']) < 45 * 1024)
 
   for (const removed of [
     'runtime.js',
@@ -40,31 +40,53 @@ test('public JavaScript is limited to entry, CLI, and plugin compatibility', () 
   }
 })
 
-test('npm release packages the pinned TypeScript submodule before native platform packages', () => {
-  const workspaceRoot = path.resolve(__dirname, '../../..')
+test('compiler crates are embedded and executable integration stays deleted', () => {
+  const root = path.resolve(__dirname, '../../..')
   const packageRoot = path.resolve(__dirname, '..')
-  const gitmodules = fs.readFileSync(path.join(workspaceRoot, '.gitmodules'), 'utf8')
   const manifest = JSON.parse(fs.readFileSync(path.join(packageRoot, 'package.json'), 'utf8'))
-  const builder = fs.readFileSync(path.join(packageRoot, 'scripts/build-typescript-dist.mjs'), 'utf8')
-  const localPublish = fs.readFileSync(path.join(packageRoot, 'scripts/publish-local.sh'), 'utf8')
-  const workflow = fs.readFileSync(path.join(workspaceRoot, '.github/workflows/publish.yml'), 'utf8')
-
-  assert.match(gitmodules, /path = third_party\/typescript/)
-  assert.match(gitmodules, /url = https:\/\/github\.com\/ohos-rs\/TypeScript\.git/)
-  assert.equal(manifest.scripts['build:typescript'], 'node scripts/build-typescript-dist.mjs')
-  assert.match(builder, /gitlink/)
-  assert.match(builder, /tools\/scripts\/package-arkts\.mjs/)
-  assert.doesNotMatch(localPublish, /ARKDOWN_TYPESCRIPT_DIST/)
-  assert.ok(localPublish.indexOf('build-typescript-dist.mjs') < localPublish.indexOf('cargo clean'))
-  assert.match(workflow, /submodules: recursive/)
-  assert.match(workflow, /go-version-file: third_party\/typescript\/tsc\/go\.mod/)
-  assert.ok(workflow.indexOf('Build pinned native TypeScript distribution') < workflow.indexOf('Download all bindings'))
-  assert.match(workflow, /attach-typescript-dist\.mjs/)
-  assert.match(workflow, /napi pre-publish --no-gh-release -t npm --skip-optional-publish/)
-  assert.doesNotMatch(workflow, /for child_directory in npm\//)
-  for (const platform of ['darwin-arm64', 'linux-x64-gnu', 'win32-x64-msvc']) {
-    assert.match(workflow, new RegExp(`\\./npm/${platform}`))
+  const workspace = fs.readFileSync(path.join(root, 'Cargo.toml'), 'utf8')
+  const checker = fs.readFileSync(path.join(root, 'crates/arkdown-ets-checker/src/native.rs'), 'utf8')
+  const workflow = fs.readFileSync(path.join(root, '.github/workflows/publish.yml'), 'utf8')
+  const pins = [
+    ...workspace.matchAll(
+      /tsrs_(?:api|core|vfs) = \{ git = "https:\/\/github\.com\/ohos-rs\/tsrs\.git", rev = "([0-9a-f]{40})" \}/g,
+    ),
+  ]
+  assert.equal(pins.length, 3)
+  assert.equal(new Set(pins.map((pin) => pin[1])).size, 1)
+  assert.doesNotMatch(workspace, /third_party\/tsrs/)
+  assert.equal(fs.existsSync(path.join(root, 'third_party/tsrs')), false)
+  assert.match(checker, /tsrs_api::embedded::Compiler/)
+  assert.doesNotMatch(
+    checker,
+    /Command::new|ChildStdin|Content-Length|handle_request|serde_json::from_value|ARKDOWN_TSRS_PATH/,
+  )
+  assert.equal(manifest.scripts['build:tsrs'], undefined)
+  for (const script of [
+    'build-tsrs-dist.mjs',
+    'attach-tsrs-dist.mjs',
+    'build-typescript-dist.mjs',
+    'attach-typescript-dist.mjs',
+    'compiler-source.mjs',
+  ]) {
+    assert.equal(fs.existsSync(path.join(packageRoot, 'scripts', script)), false)
   }
+  assert.equal(fs.existsSync(path.join(packageRoot, 'src/package_layout.rs')), false)
+  assert.doesNotMatch(workflow, /submodules:/)
+  assert.doesNotMatch(workflow, /compiler-source/)
+  assert.match(workflow, /napi build .*-- --locked/)
+  const lockfile = fs.readFileSync(path.join(root, 'Cargo.lock'), 'utf8')
+  assert.ok(lockfile.includes(`git+https://github.com/ohos-rs/tsrs.git?rev=${pins[0][1]}#${pins[0][1]}`))
+  for (const notice of ['tsrs-LICENSE.txt', 'tsrs-NOTICE.txt']) {
+    assert.ok(manifest.files.includes(notice))
+    assert.ok(fs.statSync(path.join(packageRoot, notice)).size > 0)
+    assert.ok(manifest.scripts.artifacts.includes(notice))
+  }
+  assert.match(workflow, /cargo test --locked -p arkdown-ets-checker --test native/)
+  assert.doesNotMatch(
+    workflow,
+    /setup-go|go-version-file|build-tsrs-dist|attach-tsrs-dist|ARKDOWN_TSRS_PATH|tsrs-artifacts/,
+  )
 })
 
 test('plugin adapter exposes the complete supported lifecycle through one typed dispatcher', () => {

@@ -1,6 +1,7 @@
 //! Package and sign stage implementation.
 
 use super::*;
+use crate::request::BuildAction;
 
 pub(super) struct PackageSignStageInput<'a> {
     pub(super) args: &'a BuildRequest,
@@ -191,11 +192,16 @@ impl BuildCoordinator {
             .zip(module_pack_info_plans.iter())
         {
             let module_build_option = &module_config.product.build_option;
-            let packager = Packager::new(module_config.clone()).with_compress_level(
-                args.pack_compress_level
-                    .filter(|_| module_config.sdk_config.sdk_component_api_version >= 12)
-                    .unwrap_or(1),
-            );
+            let packager = Packager::new(module_config.clone())
+                .with_compress_level(
+                    args.pack_compress_level
+                        .filter(|_| module_config.sdk_config.sdk_component_api_version >= 12)
+                        .unwrap_or(1),
+                )
+                .with_cache_directory(
+                    (args.cache && !args.fast_build_app && args.action == BuildAction::Assemble)
+                        .then(|| PathBuf::from(&loader_json.cache_path).join("artifacts")),
+                );
             let module_layout = ModuleBuildLayout::for_output_target_product(
                 &config.output_target,
                 &module.src_path,
@@ -928,19 +934,16 @@ impl BuildCoordinator {
                                 std::fs::write(&resources_index, [])?;
                             }
                             {
-                                let raw_source_maps_path = package_out
-                                    .source_maps_path
-                                    .clone()
-                                    .filter(|path| path.is_file())
-                                    .or_else(|| {
-                                        let candidate = module_layout.loader_out_source_maps();
-                                        candidate.is_file().then_some(candidate)
-                                    });
+                                // BasePackHapTask.getSourceMapSourcePath reads
+                                // loader_out/ets in debug, including when
+                                // CompileArkTS was skipped. Use that same
+                                // typed handoff for cold and cached builds.
                                 let source_maps_path =
                                     if matches!(config.build_mode, BuildMode::Release) {
                                         None
                                     } else {
-                                        raw_source_maps_path.clone()
+                                        let path = module_layout.loader_out_source_maps();
+                                        path.is_file().then_some(path)
                                     };
                                 let delivery_with_install = module_context
                                     .module
@@ -1155,9 +1158,7 @@ impl BuildCoordinator {
                         };
                     // Hvigor SignHap/SignHsp/SignApp remove stale signed outputs even
                     // when `enableSignTask=false`, while keeping the task in the graph.
-                    if !matches!(module_config.output_target, OutputTarget::Har)
-                        || is_package_signed
-                    {
+                    if !is_package_signed || package_sign_har.is_some() {
                         for artifact in &package_artifacts {
                             if artifact.signed_path.is_file() {
                                 fs_err::remove_file(&artifact.signed_path)?;
@@ -1171,20 +1172,20 @@ impl BuildCoordinator {
                             "build:before-sign",
                             format_args!("module={} artifacts={}", module.name, out.len()),
                         );
-                        let signed_paths = if let Some(package_sign_har) = package_sign_har.as_ref()
-                        {
-                            let signed_path = &package_artifacts[0].signed_path;
-                            let signing_root =
-                                module_layout.package_sign_har_cache_dir(artifact_target_label);
-                            packager
-                                .stage_har_signing_directory(
-                                    &module_layout.package_har_cache_dir(artifact_target_label),
-                                    &signing_root,
-                                )
-                                .map_err(|error| {
-                                    anyhow::anyhow!("PackageSignHar staging failed: {error}")
-                                })?;
-                            HarSignBackendRunner::new()
+                        let signed_paths =
+                            if let Some(package_sign_har) = package_sign_har.as_ref() {
+                                let signed_path = &package_artifacts[0].signed_path;
+                                let signing_root =
+                                    module_layout.package_sign_har_cache_dir(artifact_target_label);
+                                packager
+                                    .stage_har_signing_directory(
+                                        &module_layout.package_har_cache_dir(artifact_target_label),
+                                        &signing_root,
+                                    )
+                                    .map_err(|error| {
+                                        anyhow::anyhow!("PackageSignHar staging failed: {error}")
+                                    })?;
+                                HarSignBackendRunner::new()
                                 .sign_directory(
                                     &signing_root,
                                     &package_sign_har.sdk_sign_tool,
@@ -1195,26 +1196,33 @@ impl BuildCoordinator {
                                 .map_err(|error| {
                                     anyhow::anyhow!("PackageSignHar failed: {error}")
                                 })?;
-                            packager
-                                .pack_signed_har_directory(&signing_root, signed_path)
-                                .map_err(|error| {
-                                    anyhow::anyhow!("PackageSignHar repack failed: {error}")
-                                })?;
-                            vec![signed_path.clone()]
-                        } else {
-                            let mut signed_paths = Vec::with_capacity(out.len());
-                            for (path, artifact) in out.iter().zip(&package_artifacts) {
-                                SignBackendRunner::new()
-                                    .sign_or_skip(
-                                        path,
-                                        &artifact.signed_path,
-                                        config.product.signing_config.as_ref(),
-                                    )
-                                    .map_err(|e| anyhow::anyhow!("Sign failed: {}", e))?;
-                                signed_paths.push(artifact.signed_path.clone());
-                            }
-                            signed_paths
-                        };
+                                packager
+                                    .pack_signed_har_directory(&signing_root, signed_path)
+                                    .map_err(|error| {
+                                        anyhow::anyhow!("PackageSignHar repack failed: {error}")
+                                    })?;
+                                vec![signed_path.clone()]
+                            } else {
+                                let mut signed_paths = Vec::with_capacity(out.len());
+                                for (path, artifact) in out.iter().zip(&package_artifacts) {
+                                    SignBackendRunner::new()
+                                        .with_cache_directory(
+                                            (args.cache && args.action == BuildAction::Assemble)
+                                                .then(|| {
+                                                    PathBuf::from(&loader_json.cache_path)
+                                                        .join("artifacts")
+                                                }),
+                                        )
+                                        .sign_or_skip(
+                                            path,
+                                            &artifact.signed_path,
+                                            config.product.signing_config.as_ref(),
+                                        )
+                                        .map_err(|e| anyhow::anyhow!("Sign failed: {}", e))?;
+                                    signed_paths.push(artifact.signed_path.clone());
+                                }
+                                signed_paths
+                            };
                         tracing::info!(
                           module = %module.name,
                           elapsed_ms = sign_start.elapsed().as_millis(),

@@ -14,6 +14,15 @@ const enabled = process.env.ARKDOWN_NATIVE_PLUGIN_E2E === '1'
 
 function prepareCompilePluginProject(project) {
   fs.cpSync(path.join(workspaceRoot, 'tests', 'fixtures', 'minimal-hap'), project, { recursive: true })
+  // The current SDK declares fontWeight since API 7; use an actual API 20
+  // attribute to exercise the compatibility callback for this API 17 project.
+  const entrySource = path.join(project, 'entry/src/main/ets/pages/Index.ets')
+  fs.writeFileSync(
+    entrySource,
+    fs
+      .readFileSync(entrySource, 'utf8')
+      .replace('.fontWeight(FontWeight.Bold)', '.fontWeight(FontWeight.Bold).enableAutoSpacing(true)'),
+  )
   const buildProfile = path.join(project, 'entry', 'build-profile.json5')
   fs.writeFileSync(
     buildProfile,
@@ -70,13 +79,7 @@ test('TypeScript compile plugin executes its complete source-module lifecycle', 
   const firstTrace = JSON.parse(fs.readFileSync(tracePath, 'utf8'))
   assert.deepEqual(firstTrace.events, ['buildStart', 'beforeBuildEnd', 'buildEnd'])
   assert.equal(firstTrace.buildStartArgumentCount, 0)
-  assert.deepEqual(firstTrace.contextKeys, [
-    'getFileName',
-    'getModuleIds',
-    'getModuleInfo',
-    'parse',
-    'share',
-  ])
+  assert.deepEqual(firstTrace.contextKeys, ['getFileName', 'getModuleIds', 'getModuleInfo', 'parse', 'share'])
   assert.equal(firstTrace.beforeBuildEndArgumentCount, 1)
   assert.equal(firstTrace.buildEndArgumentCount, 1)
   assert.equal(firstTrace.buildEndError, undefined)
@@ -96,10 +99,7 @@ test('TypeScript compile plugin executes its complete source-module lifecycle', 
   assert.equal(typeof firstTrace.projectConfig.compileSdkVersion, 'number')
   assert.equal(typeof firstTrace.projectConfig.compatibleSdkVersion, 'number')
   const canonicalProject = fs.realpathSync(project)
-  assert.equal(
-    firstTrace.projectConfig.modulePath,
-    path.join(canonicalProject, 'entry').replaceAll(path.sep, '/'),
-  )
+  assert.equal(firstTrace.projectConfig.modulePath, path.join(canonicalProject, 'entry').replaceAll(path.sep, '/'))
   assert.equal(
     firstTrace.projectConfig.projectPath,
     path.join(canonicalProject, 'entry', 'src', 'main', 'ets').replaceAll(path.sep, '/'),
@@ -152,7 +152,7 @@ test('TypeScript compile plugin executes its complete source-module lifecycle', 
   )
   assert.match(
     child.stderr,
-    /The 'fontWeight' API is supported since SDK version 20/,
+    /The 'enableAutoSpacing' API is supported since SDK version 20/,
     `the HarmonyOS SDK callback must reject API 20 for 5.0.5(17):\n${child.stderr}`,
   )
   const childTrace = JSON.parse(fs.readFileSync(tracePath, 'utf8'))

@@ -142,21 +142,19 @@ impl<'a> TransformSourceSnapshotBuilder<'a> {
             )?;
         }
         let resolved_static_modules = self.collect_resolved_static_modules();
-        Ok(
-            TransformSourceSnapshot::with_resolved_static_modules_and_runtime_sources(
-                files,
-                resolved_static_modules,
-                runtime_source_paths,
-            )
-            .with_path_aliases(self.source_path_aliases())
-            .with_sdk_declaration_roots(self.sdk_declaration_roots.to_vec())
-            .with_package_roots(
-                self.package_roots
-                    .iter()
-                    .map(|(name, root)| (name.clone(), root.clone()))
-                    .collect(),
-            ),
+        Ok(TransformSourceSnapshot::from_canonical_sources(
+            files,
+            resolved_static_modules,
+            runtime_source_paths,
         )
+        .with_path_aliases(self.source_path_aliases())
+        .with_sdk_declaration_roots(self.sdk_declaration_roots.to_vec())
+        .with_package_roots(
+            self.package_roots
+                .iter()
+                .map(|(name, root)| (name.clone(), root.clone()))
+                .collect(),
+        ))
     }
 
     fn source_path_aliases(&self) -> Vec<(PathBuf, PathBuf)> {
@@ -278,7 +276,7 @@ impl<'a> TransformSourceSnapshotBuilder<'a> {
         }
 
         if let Some(source_store) = self.source_store.filter(|store| store.covers(&root)) {
-            for (path, source) in source_store.text_sources_under(&root) {
+            for (path, source) in source_store.text_sources_under(&root)? {
                 let kind = SourceClassifier::classify_path(path);
                 if matches!(mode, SourceRootMode::TransformAndDeclarations)
                     && kind.is_javascript_runtime()

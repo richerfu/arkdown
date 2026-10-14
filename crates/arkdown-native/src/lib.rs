@@ -1536,6 +1536,32 @@ mod tests {
         assert_eq!(libs[0].file_name().unwrap(), "libexpat.so.1");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn native_lib_dirs_keep_captured_package_identity_after_alias_removal() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("ActualPackage");
+        fs::create_dir(&real).unwrap();
+        let canonical = fs::canonicalize(&real).unwrap();
+        let alias = tmp.path().join("Alias");
+        symlink(&real, &alias).unwrap();
+        let mut deps = DependencyGraphSnapshot::default();
+        add_dependency_node(&mut deps, "native", "native", "1.0.0", alias.clone());
+        deps.canonical_package_roots
+            .insert(alias.clone(), canonical.clone());
+        fs::remove_file(&alias).unwrap();
+        let module = ModuleConfig {
+            name: "entry".into(),
+            src_path: tmp.path().to_path_buf(),
+            module_type: OhosModuleType::Entry,
+        };
+        let collector = NativeLibCollector::new(&module, &[], &deps);
+        let dirs = collector.dependency_default_lib_dirs();
+        assert_eq!(dirs.len(), 1);
+        assert_eq!(dirs[0].libs_dir, canonical.join("libs"));
+    }
+
     #[test]
     fn test_native_collector_scans_dependency_get_default_libs_dir_like_hvigor() {
         let tmp = tempfile::tempdir().unwrap();
