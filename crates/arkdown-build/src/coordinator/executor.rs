@@ -6,17 +6,20 @@ use super::package_sign_stage::PackageSignStageInput;
 use super::*;
 
 impl BuildCoordinator {
-    fn release_source_texts(&self, boundary: crate::request::BuildHeapBoundary, incremental: bool) {
-        use crate::request::BuildHeapBoundary;
+    pub(super) fn owns_source_text_lifecycle(&self, incremental: bool) -> bool {
         // APP children and multiple targets share their parent's startup snapshot.
         // Watch/hot-reload owners also retain their source leases across builds.
-        if !self.owns_task_cycle
-            || incremental
-            || self.args.watch
-            || self.args.preview
-            || self.args.action.is_hot_reload()
-            || self.args.watch_invalidation.is_some()
-        {
+        self.owns_task_cycle
+            && !incremental
+            && !self.args.watch
+            && !self.args.preview
+            && !self.args.action.is_hot_reload()
+            && self.args.watch_invalidation.is_none()
+    }
+
+    fn release_source_texts(&self, boundary: crate::request::BuildHeapBoundary, incremental: bool) {
+        use crate::request::BuildHeapBoundary;
+        if !self.owns_source_text_lifecycle(incremental) {
             return;
         }
         let last_reader = if self.session.arkts_language_version.is_static() {
