@@ -15,6 +15,7 @@ pub trait BuildHeapReclaimer: std::fmt::Debug + Send + Sync {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuildHeapBoundary {
+    NormalCheckerReleased,
     CheckerReleased,
     BundleCompleted,
     BeforeBytecode,

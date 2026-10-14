@@ -74,6 +74,12 @@ impl ProjectSemanticMode {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SemanticProgramLifetime {
+    OneShot,
+    Runtime,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct ProjectSemanticRuntimeKey {
     project_root: PathBuf,
@@ -678,7 +684,13 @@ impl<'a> ProjectSemanticChecker<'a> {
             let changes = ProjectSemanticRuntime::file_changes(invalidation);
             let (session, program) =
                 runtime.program(key, self.project_root, &prepared, &changes)?;
-            return self.check_program(session, &program, &prepared, mode);
+            return self.check_program(
+                session,
+                &program,
+                &prepared,
+                mode,
+                SemanticProgramLifetime::Runtime,
+            );
         }
         let mut session = NativeTypeSession::start(
             self.project_root,
@@ -708,7 +720,13 @@ impl<'a> ProjectSemanticChecker<'a> {
                 store.evict_unleased_texts();
             }
         }
-        let report = self.check_program(&mut session, &program, &prepared, mode);
+        let report = self.check_program(
+            &mut session,
+            &program,
+            &prepared,
+            mode,
+            SemanticProgramLifetime::OneShot,
+        );
         drop(program);
         drop(session);
         drop(prepared);
@@ -770,6 +788,7 @@ impl<'a> ProjectSemanticChecker<'a> {
         program: &NativeProgram,
         prepared: &PreparedSemanticCheck,
         mode: ProjectSemanticMode,
+        lifetime: SemanticProgramLifetime,
     ) -> Result<ProjectSemanticCheckReport> {
         let source_graph = session.source_graph(program)?;
         let read_sources = session.read_sources();
@@ -864,6 +883,13 @@ impl<'a> ProjectSemanticChecker<'a> {
         // strict linter is initialized; preserve linter/syntactic/semantic order.
         let (mut linter, mut result) = if let Some(normal) = normal {
             let strict_started = Instant::now();
+            session.release_arkts_build_checkers(program)?;
+            if lifetime == SemanticProgramLifetime::OneShot {
+                session.release_sdk_sources_before_strict(&prepared.options);
+            }
+            if let Some(reclaimer) = &self.heap_reclaimer {
+                reclaimer.reclaim(crate::request::BuildHeapBoundary::NormalCheckerReleased);
+            }
             let diagnostics = session.arkts_strict_diagnostics(program, normal)?;
             let mut result = diagnostics.syntactic_diagnostics;
             result.extend(diagnostics.semantic_diagnostics);
@@ -1676,6 +1702,9 @@ mod tests {
 
     impl crate::request::BuildHeapReclaimer for SourceLeaseReclaimer {
         fn reclaim(&self, boundary: crate::request::BuildHeapBoundary) {
+            if boundary == crate::request::BuildHeapBoundary::NormalCheckerReleased {
+                return;
+            }
             assert_eq!(boundary, crate::request::BuildHeapBoundary::CheckerReleased);
             assert!(
                 self.used.upgrade().is_some(),
