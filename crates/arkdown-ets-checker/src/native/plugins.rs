@@ -14,6 +14,39 @@ impl PluginHost {
             session: OnceLock::new(),
         }
     }
+
+    pub(super) fn compact_session(&self) {
+        let Some(&session_id) = self.session.get() else {
+            return;
+        };
+        // Enqueue before strict callbacks without waiting on the JS event loop.
+        self.host.submit_batch(
+            vec![NativeOhSdkPluginRequest {
+                session_id,
+                plugin_id: 0,
+                path: None,
+                function_name: None,
+                class_name: None,
+                operation: "compactSession".into(),
+                after: None,
+                args: Vec::new(),
+            }],
+            Box::new(move |result| match result {
+                Ok(responses) => match responses.as_slice() {
+                    [response] if response.error.is_empty() => {
+                        tracing::info!(session_id, stats = ?response.stats, "SDK callback session compacted");
+                    }
+                    [response] => tracing::warn!(
+                        session_id, error = %response.error, "SDK callback session compaction failed"
+                    ),
+                    _ => tracing::warn!(
+                        session_id, responses = responses.len(), "Invalid SDK session compaction response count"
+                    ),
+                },
+                Err(error) => tracing::warn!(%error, session_id, "SDK callback session compaction failed"),
+            }),
+        );
+    }
 }
 impl Drop for PluginHost {
     fn drop(&mut self) {

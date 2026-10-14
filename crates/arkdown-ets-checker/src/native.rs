@@ -184,7 +184,7 @@ pub struct NativeOhSdkPluginRequest {
 }
 
 /// Session-local JS parser counters and V8 committed heap samples after node
-/// preparation, plus the retained committed heap after session release/GC.
+/// preparation, plus committed heap before/after session compaction or release.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct NativeOhSdkPluginStats {
@@ -192,6 +192,7 @@ pub struct NativeOhSdkPluginStats {
     pub reparses: u64,
     pub batches: u64,
     pub peak_committed: u64,
+    pub committed_before: u64,
     pub retained_committed: u64,
 }
 
@@ -469,6 +470,7 @@ pub struct NativeTypeSession {
     base: Arc<dyn FS>,
     sources: BTreeMap<PathBuf, Arc<str>>,
     deleted: BTreeSet<PathBuf>,
+    sdk_plugin_host: Option<Arc<plugins::PluginHost>>,
     sdk_plugin_executor: Option<Arc<dyn tsrs_core::OhSdkPluginExecutor>>,
     preprocessor: Option<Arc<dyn NativeSourcePreprocessor>>,
     snapshot: Option<Arc<SourceSnapshot>>,
@@ -487,16 +489,17 @@ impl NativeTypeSession {
             Arc::clone(&base),
             false,
         ))?;
-        let sdk_plugin_executor = sdk_plugin_host.map(|host| {
-            Arc::new(tsrs_api::embedded::SdkPluginExecutor::new(Arc::new(
-                plugins::PluginHost::new(host),
-            ))) as Arc<dyn tsrs_core::OhSdkPluginExecutor>
+        let sdk_plugin_host = sdk_plugin_host.map(|host| Arc::new(plugins::PluginHost::new(host)));
+        let sdk_plugin_executor = sdk_plugin_host.as_ref().map(|host| {
+            Arc::new(tsrs_api::embedded::SdkPluginExecutor::new(host.clone()))
+                as Arc<dyn tsrs_core::OhSdkPluginExecutor>
         });
         Ok(Self {
             compiler,
             base,
             sources,
             deleted: BTreeSet::new(),
+            sdk_plugin_host,
             sdk_plugin_executor,
             preprocessor: None,
             snapshot: None,
@@ -687,6 +690,11 @@ impl NativeTypeSession {
         program: &NativeProgram,
         normal: NativeArktsNormalDiagnostics,
     ) -> Result<NativeArktsBuildDiagnostics, NativeCheckError> {
+        // Normal-pool diagnostics and transform facts are owned at this boundary.
+        // Strict may still query SDK plugins; keep their session and source snapshots.
+        if let Some(host) = &self.sdk_plugin_host {
+            host.compact_session();
+        }
         Ok(program.arkts_strict_diagnostics(normal)?.into())
     }
     pub fn release_arkts_build_checkers(

@@ -331,7 +331,9 @@ exports.forEachChild = (node, visit) => { if (node.child) visit(node.child) }
   fs.writeFileSync(plugin, `
 exports.calls = []
 exports.configs = []
+exports.instances = 0
 exports.Checker = class {
+  constructor() { exports.instances++ }
   check(node, declaration, config) {
     exports.configs.push(config)
     if (!node.parent || !declaration.parent) throw new Error('lost parent')
@@ -358,6 +360,39 @@ exports.Throws = class {
   })
   return { invoke, request, plugin, ts: require(tsRoot), calls: require(plugin).calls, configs: require(plugin).configs }
 }
+
+test('SDK compaction reparses application and declaration nodes from retained source IDs', (t) => {
+  const previousGc = Object.getOwnPropertyDescriptor(global, 'gc')
+  const previousVersion = Object.getOwnPropertyDescriptor(process.versions, 'node')
+  t.after(() => {
+    if (previousGc) Object.defineProperty(global, 'gc', previousGc)
+    else delete global.gc
+    Object.defineProperty(process.versions, 'node', previousVersion)
+  })
+  t.mock.method(process, 'memoryUsage', () => ({ heapUsed: 40 << 20 }))
+  for (const version of ['22.0.0', '18.17.0', '20.0.0']) {
+    Object.defineProperty(process.versions, 'node', { ...previousVersion, value: version })
+    const gcCalls = []
+    global.gc = (...args) => gcCalls.push(args)
+    const { invoke, request, plugin, ts, configs } = sdkBatchFixture(t)
+    assert.deepEqual(invoke([{ sessionId: 1, operation: 'compactSession' }]), [{ found: true }])
+    assert.deepEqual(gcCalls, [], 'an unknown session needs neither allocation nor collection')
+    const original = invoke([request(1, true)])
+    const [{ stats }] = invoke([{ sessionId: 1, operation: 'compactSession' }])
+    assert.deepEqual([stats.parses, stats.reparses, stats.batches], [2, 0, 1])
+    assert.ok(stats.committedBefore > 0 && stats.retainedCommitted > 0)
+    assert.deepEqual(gcCalls, version.startsWith('22')
+      ? [[{ type: 'major', execution: 'sync', flavor: 'last-resort' }]] : [[]])
+    assert.deepEqual(invoke([request(1)]), original, 'sourceId-only callbacks retain node identity and text')
+    assert.equal(ts.creations.get('file1.ets'), 2)
+    assert.equal(ts.creations.get('api.d.ets'), 2, 'declaration ASTs must also be rebuilt')
+    assert.strictEqual(configs[1], configs[0], 'the registered project config survives compaction')
+    assert.equal(require(plugin).instances, 1, 'the SDK class instance survives compaction')
+    const [released] = invoke([{ sessionId: 1, operation: 'releaseSession' }])
+    assert.deepEqual([released.stats.parses, released.stats.reparses, released.stats.batches], [4, 2, 2])
+    assert.deepEqual(gcCalls[1], gcCalls[0], 'release and compaction use the same reduce-memory policy')
+  }
+})
 
 test('syscap batches group source IDs, prune before getStart, and retain the 64-entry LRU', (t) => {
   const { invoke, request, ts, calls } = sdkBatchFixture(t)

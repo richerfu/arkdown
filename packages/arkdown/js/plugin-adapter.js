@@ -250,11 +250,11 @@ class SdkPluginHost {
     return prepared
   }
 
-  collectHeap({ releaseSession = false } = {}) {
+  collectHeap({ reduceMemory = false } = {}) {
     if (typeof global.gc === 'function') {
       // ets_checker.ts::serviceChecker collects after releasing compiler state.
       // Node 18/20 interpret unknown options as minor GC; use full GC there.
-      if (releaseSession && Number.parseInt(process.versions.node, 10) >= 22) {
+      if (reduceMemory && Number.parseInt(process.versions.node, 10) >= 22) {
         global.gc({ type: 'major', execution: 'sync', flavor: 'last-resort' })
       } else global.gc()
       this.heapAfterGc = process.memoryUsage().heapUsed
@@ -288,10 +288,20 @@ class SdkPluginHost {
   }
 
   dispatch(request, prepared) {
-    if (request.operation === 'releaseSession') {
-      const stats = this.sessions.get(request.sessionId)?.stats
-      if (this.sessions.delete(request.sessionId)) this.collectHeap({ releaseSession: true })
-      return { found: true, stats: stats && { ...stats, retainedCommitted: v8.getHeapStatistics().total_physical_size } }
+    if (['compactSession', 'releaseSession'].includes(request.operation)) {
+      let session = this.sessions.get(request.sessionId)
+      if (!session) return { found: true }
+      const stats = session.stats
+      const committedBefore = v8.getHeapStatistics().total_physical_size
+      if (request.operation === 'releaseSession') this.sessions.delete(request.sessionId)
+      else {
+        // tsrs sends source text once; rebuild ASTs from retained snapshots.
+        session.sourceFiles = new WeakMap()
+        session.sourceLru.clear()
+      }
+      session = null
+      this.collectHeap({ reduceMemory: true })
+      return { found: true, stats: { ...stats, committedBefore, retainedCommitted: v8.getHeapStatistics().total_physical_size } }
     }
     let callback
     const classCall = ['prepareClass', 'syscap'].includes(request.operation)
