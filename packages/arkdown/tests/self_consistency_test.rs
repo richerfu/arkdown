@@ -22,6 +22,10 @@
 //! ARKDOWN_UPDATE_FINGERPRINTS=1 cargo test -p arkdown-napi self_consistency
 //! ```
 
+// Laying out `BuildService::execute_inner`'s future from this crate exceeds
+// rustc's default query depth (128); the production entry boxes it instead.
+#![recursion_limit = "256"]
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -183,11 +187,11 @@ pub struct SelfConsistencyOracle;
 struct UnavailableTestSdkPluginHost;
 
 impl NativeOhSdkPluginHost for UnavailableTestSdkPluginHost {
-  fn invoke(
+  fn invoke_batch(
     &self,
-    _request: NativeOhSdkPluginRequest,
-  ) -> Result<NativeOhSdkPluginResponse, NativeCheckError> {
-    Ok(NativeOhSdkPluginResponse::default())
+    requests: Vec<NativeOhSdkPluginRequest>,
+  ) -> Result<Vec<NativeOhSdkPluginResponse>, NativeCheckError> {
+    Ok(vec![NativeOhSdkPluginResponse::default(); requests.len()])
   }
 }
 

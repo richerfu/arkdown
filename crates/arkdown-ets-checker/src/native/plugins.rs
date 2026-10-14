@@ -1,6 +1,6 @@
 use super::{NativeOhSdkPluginHost, NativeOhSdkPluginRequest};
 use std::sync::{Arc, OnceLock};
-use tsrs_api::embedded::{SdkPluginHost, SdkPluginRequest};
+use tsrs_api::embedded::{SdkPluginCompletion, SdkPluginHost, SdkPluginRequest};
 use tsrs_core::OhSdkPluginResponse;
 
 pub(super) struct PluginHost {
@@ -22,25 +22,31 @@ impl Drop for PluginHost {
         };
         // Compiler options/snapshot leases retain this host. Its last drop is
         // the point when no SDK query can still refer to this session's ASTs.
-        if let Err(error) = self.host.invoke_batch(vec![NativeOhSdkPluginRequest {
+        match self.host.invoke_batch(vec![NativeOhSdkPluginRequest {
             session_id,
-            path: Default::default(),
-            function_name: String::new(),
-            class_name: String::new(),
+            plugin_id: 0,
+            path: None,
+            function_name: None,
+            class_name: None,
             operation: "releaseSession".into(),
+            after: None,
             args: Vec::new(),
         }]) {
-            tracing::warn!(%error, session_id, "SDK callback session cleanup failed");
-        } else {
-            tracing::info!(session_id, "SDK callback session released");
+            Err(error) => tracing::warn!(%error, session_id, "SDK callback session cleanup failed"),
+            Ok(responses) => {
+                let stats = responses
+                    .first()
+                    .and_then(|response| response.stats.as_ref());
+                tracing::info!(session_id, ?stats, "SDK callback session released");
+            }
         }
     }
 }
-impl SdkPluginHost for PluginHost {
-    fn invoke_batch(
+impl PluginHost {
+    fn requests(
         &self,
         requests: Vec<SdkPluginRequest>,
-    ) -> Result<Vec<OhSdkPluginResponse>, String> {
+    ) -> Result<Vec<NativeOhSdkPluginRequest>, String> {
         if let Some(request) = requests.first() {
             let session_id = *self.session.get_or_init(|| request.session_id);
             if requests
@@ -50,20 +56,24 @@ impl SdkPluginHost for PluginHost {
                 return Err("SDK callback batch belongs to a different compiler session".into());
             }
         }
-        self.host
-            .invoke_batch(
-                requests
-                    .into_iter()
-                    .map(|r| NativeOhSdkPluginRequest {
-                        session_id: r.session_id,
-                        path: r.path.into(),
-                        function_name: r.function_name,
-                        class_name: r.class_name,
-                        operation: r.operation,
-                        args: r.args,
-                    })
-                    .collect(),
-            )
+        Ok(requests
+            .into_iter()
+            .map(|r| NativeOhSdkPluginRequest {
+                session_id: r.session_id,
+                plugin_id: r.plugin_id,
+                path: r.path.map(Into::into),
+                function_name: r.function_name,
+                class_name: r.class_name,
+                operation: r.operation,
+                after: r.after,
+                args: r.args,
+            })
+            .collect())
+    }
+    fn responses(
+        responses: Result<Vec<super::NativeOhSdkPluginResponse>, super::NativeCheckError>,
+    ) -> Result<Vec<OhSdkPluginResponse>, String> {
+        responses
             .map(|responses| {
                 responses
                     .into_iter()
@@ -79,9 +89,27 @@ impl SdkPluginHost for PluginHost {
                         error: r.error,
                         check_result: r.check_result,
                         check_message: r.check_message,
+                        skipped: r.skipped,
                     })
                     .collect()
             })
             .map_err(|e| e.to_string())
+    }
+}
+impl SdkPluginHost for PluginHost {
+    fn invoke_batch(
+        &self,
+        requests: Vec<SdkPluginRequest>,
+    ) -> Result<Vec<OhSdkPluginResponse>, String> {
+        Self::responses(self.host.invoke_batch(self.requests(requests)?))
+    }
+    fn submit_batch(&self, requests: Vec<SdkPluginRequest>, complete: SdkPluginCompletion) {
+        match self.requests(requests) {
+            Ok(requests) => self.host.submit_batch(
+                requests,
+                Box::new(move |responses| complete(Self::responses(responses))),
+            ),
+            Err(error) => complete(Err(error)),
+        }
     }
 }

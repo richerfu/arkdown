@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
@@ -194,24 +195,32 @@ fn native_build_diagnostics_preserve_linter_and_typescript_channels() {
 struct SincePluginHost;
 
 impl NativeOhSdkPluginHost for SincePluginHost {
-    fn invoke(
+    fn invoke_batch(
         &self,
-        request: NativeOhSdkPluginRequest,
-    ) -> Result<NativeOhSdkPluginResponse, NativeCheckError> {
-        if request.operation == "releaseSession" {
-            assert!(request.args.is_empty());
-            return Ok(NativeOhSdkPluginResponse::default());
-        }
-        assert_eq!(request.operation, "value");
-        assert_eq!(request.function_name, "checkSinceValue");
-        let required = request.args[0].as_str().unwrap().parse::<u32>().unwrap();
-        assert_eq!(request.args[1], "5.0.5(17)");
-        assert_eq!(request.args[2], 0);
-        Ok(NativeOhSdkPluginResponse {
-            found: true,
-            result: required <= 17,
-            ..NativeOhSdkPluginResponse::default()
-        })
+        requests: Vec<NativeOhSdkPluginRequest>,
+    ) -> Result<Vec<NativeOhSdkPluginResponse>, NativeCheckError> {
+        requests
+            .into_iter()
+            .map(|request| {
+                if request.operation == "releaseSession" {
+                    assert!(request.args.is_empty());
+                    return Ok(NativeOhSdkPluginResponse::default());
+                }
+                assert_eq!(request.operation, "value");
+                if let Some(function) = request.function_name {
+                    assert_eq!(function, "checkSinceValue");
+                }
+                assert!(request.plugin_id > 0);
+                let required = request.args[0].as_str().unwrap().parse::<u32>().unwrap();
+                assert_eq!(request.args[1], "5.0.5(17)");
+                assert_eq!(request.args[2], 0);
+                Ok(NativeOhSdkPluginResponse {
+                    found: true,
+                    result: required <= 17,
+                    ..NativeOhSdkPluginResponse::default()
+                })
+            })
+            .collect()
     }
 }
 
@@ -285,20 +294,25 @@ struct SessionRecordingPluginHost {
 }
 
 impl NativeOhSdkPluginHost for SessionRecordingPluginHost {
-    fn invoke(
+    fn invoke_batch(
         &self,
-        request: NativeOhSdkPluginRequest,
-    ) -> Result<NativeOhSdkPluginResponse, NativeCheckError> {
-        if request.operation == "releaseSession" {
-            self.released.lock().unwrap().push(request.session_id);
-            return Ok(NativeOhSdkPluginResponse::default());
-        }
-        self.session_ids.lock().unwrap().push(request.session_id);
-        Ok(NativeOhSdkPluginResponse {
-            found: true,
-            result: true,
-            ..NativeOhSdkPluginResponse::default()
-        })
+        requests: Vec<NativeOhSdkPluginRequest>,
+    ) -> Result<Vec<NativeOhSdkPluginResponse>, NativeCheckError> {
+        requests
+            .into_iter()
+            .map(|request| {
+                if request.operation == "releaseSession" {
+                    self.released.lock().unwrap().push(request.session_id);
+                    return Ok(NativeOhSdkPluginResponse::default());
+                }
+                self.session_ids.lock().unwrap().push(request.session_id);
+                Ok(NativeOhSdkPluginResponse {
+                    found: true,
+                    result: true,
+                    ..NativeOhSdkPluginResponse::default()
+                })
+            })
+            .collect()
     }
 }
 
@@ -872,4 +886,193 @@ fn native_incremental_program_tracks_created_and_deleted_modules() {
             .any(|diagnostic| { diagnostic.code == 2307 })
     );
     drop(program);
+}
+
+#[derive(Default)]
+struct RecordingPreprocessor {
+    calls: Mutex<BTreeMap<PathBuf, usize>>,
+}
+impl arkdown_ets_checker::NativeSourcePreprocessor for RecordingPreprocessor {
+    fn preprocess(
+        &self,
+        path: &Path,
+        source: Arc<str>,
+    ) -> arkdown_ets_checker::NativeProcessedSource {
+        *self
+            .calls
+            .lock()
+            .unwrap()
+            .entry(path.to_path_buf())
+            .or_default() += 1;
+        arkdown_ets_checker::NativeProcessedSource {
+            text: Arc::from(source.replace("'replaceMe'", "1")),
+            legacy_extend_names: BTreeSet::from(["used".into()]),
+            ..Default::default()
+        }
+    }
+}
+
+#[test]
+fn native_preprocesses_only_read_implementation_versions_and_keeps_incremental_diffs_raw() {
+    let project = tempfile::tempdir().unwrap();
+    let app = project.path().join("app.ts");
+    let dependency = project.path().join("dependency.ts");
+    let unused = project.path().join("unused.ets");
+    let declaration = project.path().join("global.d.ts");
+    let initial_sources = BTreeMap::from([
+        (
+            app.clone(),
+            Arc::from("// 😀\nimport { value } from './dependency'; const actual: number = value;"),
+        ),
+        (
+            dependency.clone(),
+            Arc::from("export const value: number = 'replaceMe';"),
+        ),
+        (unused.clone(), Arc::from("@Extend Text.unused() {}")),
+        (
+            declaration.clone(),
+            Arc::from("declare const declared: number;"),
+        ),
+    ]);
+    let processor = Arc::new(RecordingPreprocessor::default());
+    let mut session = NativeTypeSession::start(project.path(), initial_sources.clone(), None)
+        .unwrap()
+        .with_source_preprocessor(processor.clone());
+    let options = NativeCompilerOptions::arkts11(project.path());
+    let roots = [app.clone(), declaration.clone()];
+    let old = session.create_program(&roots, &options).unwrap();
+    assert!(session.diagnostics(&old).unwrap().is_empty());
+    session.arkts_build_diagnostics(&old).unwrap();
+    let read = session.read_sources();
+    assert!(
+        !read.contains_key(&unused),
+        "Program must not preprocess unreferenced inventory files"
+    );
+    assert_eq!(
+        read[&dependency].text.as_ref(),
+        "export const value: number = 1;"
+    );
+    assert!(read[&declaration].legacy_extend_names.is_empty());
+    assert_eq!(processor.calls.lock().unwrap().get(&app), Some(&1));
+    assert_eq!(processor.calls.lock().unwrap().get(&dependency), Some(&1));
+    assert!(!processor.calls.lock().unwrap().contains_key(&declaration));
+
+    let mut changed = initial_sources.clone();
+    changed.insert(
+        app.clone(),
+        Arc::from("// 😀\nimport { value } from './dependency'; const actual: string = value;"),
+    );
+    let next = session
+        .update_program_snapshot(
+            old.clone(),
+            &roots,
+            &options,
+            changed.clone(),
+            &NativeProgramFileChanges::default(),
+        )
+        .unwrap();
+    assert!(
+        session
+            .diagnostics(&next)
+            .unwrap()
+            .iter()
+            .any(|d| d.code == 2322)
+    );
+    assert!(
+        session.diagnostics(&old).unwrap().is_empty(),
+        "old Program retains its processed version"
+    );
+    assert_eq!(processor.calls.lock().unwrap().get(&app), Some(&2));
+    assert_eq!(processor.calls.lock().unwrap().get(&dependency), Some(&1));
+
+    changed.insert(
+        dependency.clone(),
+        Arc::from("export const value: string = 'new';"),
+    );
+    let updated = session
+        .update_program_snapshot(
+            next,
+            &roots,
+            &options,
+            changed.clone(),
+            &NativeProgramFileChanges::default(),
+        )
+        .unwrap();
+    assert!(session.diagnostics(&updated).unwrap().is_empty());
+    assert_eq!(
+        session.read_sources()[&dependency].text.as_ref(),
+        "export const value: string = 'new';"
+    );
+    assert_eq!(processor.calls.lock().unwrap().get(&app), Some(&2));
+    assert_eq!(processor.calls.lock().unwrap().get(&dependency), Some(&2));
+    let mut fresh = NativeTypeSession::start(project.path(), changed, None)
+        .unwrap()
+        .with_source_preprocessor(Arc::new(RecordingPreprocessor::default()));
+    let rebuilt = fresh.create_program(&roots, &options).unwrap();
+    assert_eq!(
+        session.source_graph(&updated).unwrap().files.len(),
+        fresh.source_graph(&rebuilt).unwrap().files.len()
+    );
+    assert!(fresh.diagnostics(&rebuilt).unwrap().is_empty());
+}
+
+#[test]
+fn native_disk_preprocessing_reuses_versions_and_invalidates_observed_changes() {
+    let project = tempfile::tempdir().unwrap();
+    let app = project.path().join("app.ts");
+    let dependency = project.path().join("dependency.ts");
+    std::fs::write(&dependency, "export const value: number = 'replaceMe';").unwrap();
+    let sources = BTreeMap::from([(
+        app.clone(),
+        Arc::from("import { value } from './dependency'; const actual: number = value;"),
+    )]);
+    let processor = Arc::new(RecordingPreprocessor::default());
+    let mut session = NativeTypeSession::start(project.path(), sources.clone(), None)
+        .unwrap()
+        .with_source_preprocessor(processor.clone());
+    let options = NativeCompilerOptions::arkts11(project.path());
+    let roots = [app];
+    let old = session.create_program(&roots, &options).unwrap();
+    assert!(session.diagnostics(&old).unwrap().is_empty());
+    assert_eq!(
+        session.read_sources()[&dependency].text.as_ref(),
+        "export const value: number = 1;"
+    );
+    let unchanged = session
+        .update_program_snapshot(
+            old.clone(),
+            &roots,
+            &options,
+            sources.clone(),
+            &NativeProgramFileChanges::default(),
+        )
+        .unwrap();
+    assert!(session.diagnostics(&unchanged).unwrap().is_empty());
+    assert_eq!(processor.calls.lock().unwrap().get(&dependency), Some(&1));
+    std::fs::write(&dependency, "export const value: string = 'new';").unwrap();
+    let next = session
+        .update_program_snapshot(
+            unchanged,
+            &roots,
+            &options,
+            sources,
+            &NativeProgramFileChanges {
+                changed: vec![dependency.clone()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(
+        session
+            .diagnostics(&next)
+            .unwrap()
+            .iter()
+            .any(|d| d.code == 2322)
+    );
+    assert!(session.diagnostics(&old).unwrap().is_empty());
+    assert_eq!(processor.calls.lock().unwrap().get(&dependency), Some(&2));
+    assert_eq!(
+        session.read_sources()[&dependency].text.as_ref(),
+        "export const value: string = 'new';"
+    );
 }

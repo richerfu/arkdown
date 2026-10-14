@@ -1,24 +1,67 @@
 //! Immutable input filesystem for one compiler snapshot, including deletion tombstones.
-use super::{NativeCheckError, options::CompilerPaths};
+use super::{
+    NativeCheckError, NativeProcessedSource, NativeSourcePreprocessor, options::CompilerPaths,
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex, OnceLock},
     time::SystemTime,
 };
 use tsrs_vfs::{Entries, FS, FileInfo, FileMode};
 
 pub(super) struct SourceSnapshot {
     base: Arc<dyn FS>,
-    sources: BTreeMap<String, (PathBuf, Arc<str>)>,
+    sources: BTreeMap<String, Arc<SnapshotSource>>,
+    disk_sources: Mutex<BTreeMap<String, Arc<SnapshotSource>>>,
+    preprocessor: Option<Arc<dyn NativeSourcePreprocessor>>,
     deleted: BTreeSet<String>,
     directories: BTreeMap<String, PathBuf>,
+}
+struct SnapshotSource {
+    path: PathBuf,
+    raw: Arc<str>,
+    processed: OnceLock<NativeProcessedSource>,
+}
+impl SnapshotSource {
+    fn content(
+        &self,
+        preprocessor: Option<&dyn NativeSourcePreprocessor>,
+    ) -> &NativeProcessedSource {
+        self.processed.get_or_init(|| {
+            if Self::is_preprocess_source(&self.path)
+                && let Some(preprocessor) = preprocessor
+            {
+                preprocessor.preprocess(&self.path, Arc::clone(&self.raw))
+            } else {
+                NativeProcessedSource {
+                    text: Arc::clone(&self.raw),
+                    ..Default::default()
+                }
+            }
+        })
+    }
+    fn is_preprocess_source(path: &Path) -> bool {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        !name.ends_with(".d.ts")
+            && !name.ends_with(".d.ets")
+            && matches!(
+                path.extension().and_then(|extension| extension.to_str()),
+                Some("ets" | "ts")
+            )
+    }
 }
 impl SourceSnapshot {
     pub(super) fn new(
         base: Arc<dyn FS>,
         sources: &BTreeMap<PathBuf, Arc<str>>,
         deleted: &BTreeSet<PathBuf>,
+        preprocessor: Option<Arc<dyn NativeSourcePreprocessor>>,
+        previous: Option<&Self>,
+        invalidated: &BTreeSet<PathBuf>,
     ) -> Result<Self, NativeCheckError> {
         let canonical = |path: &str| {
             tsrs_core::tspath::get_canonical_file_name(
@@ -30,7 +73,19 @@ impl SourceSnapshot {
             .iter()
             .map(|(p, text)| {
                 let path = CompilerPaths::one(p)?;
-                Ok((canonical(&path), (PathBuf::from(path), Arc::clone(text))))
+                let key = canonical(&path);
+                let source = previous
+                    .and_then(|previous| previous.sources.get(&key))
+                    .filter(|source| source.raw.as_ref() == text.as_ref())
+                    .map(Arc::clone)
+                    .unwrap_or_else(|| {
+                        Arc::new(SnapshotSource {
+                            path: PathBuf::from(path),
+                            raw: Arc::clone(text),
+                            processed: OnceLock::new(),
+                        })
+                    });
+                Ok((key, source))
             })
             .collect::<Result<BTreeMap<_, _>, NativeCheckError>>()?;
         let deleted = deleted
@@ -39,11 +94,29 @@ impl SourceSnapshot {
             .collect::<Result<BTreeSet<_>, NativeCheckError>>()?;
         let directories = sources
             .values()
-            .flat_map(|(p, _)| p.ancestors().skip(1).map(Path::to_path_buf))
+            .flat_map(|source| source.path.ancestors().skip(1).map(Path::to_path_buf))
             .map(|p| (canonical(p.to_str().expect("validated compiler path")), p))
             .collect();
+        let invalidated = invalidated
+            .iter()
+            .map(|path| Ok(canonical(&CompilerPaths::one(path)?)))
+            .collect::<Result<BTreeSet<_>, NativeCheckError>>()?;
+        let disk_sources = previous
+            .map(|previous| {
+                previous
+                    .disk_sources
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|(key, _)| !deleted.contains(*key) && !invalidated.contains(*key))
+                    .map(|(key, source)| (key.clone(), Arc::clone(source)))
+                    .collect()
+            })
+            .unwrap_or_default();
         Ok(Self {
             base,
+            disk_sources: Mutex::new(disk_sources),
+            preprocessor,
             sources,
             deleted,
             directories,
@@ -55,6 +128,35 @@ impl SourceSnapshot {
             self.base.use_case_sensitive_file_names(),
         )
     }
+    fn is_deleted(&self, path: &str) -> bool {
+        !self.deleted.is_empty()
+            && (self.deleted.contains(&self.key(path))
+                || self.deleted.contains(&self.key(&self.base.realpath(path))))
+    }
+    fn known_source(&self, path: &str) -> Option<&Arc<SnapshotSource>> {
+        self.sources
+            .get(&self.key(path))
+            .or_else(|| self.sources.get(&self.key(&self.base.realpath(path))))
+    }
+    pub(super) fn read_sources(&self) -> BTreeMap<PathBuf, NativeProcessedSource> {
+        let collect = |source: &Arc<SnapshotSource>| {
+            source
+                .processed
+                .get()
+                .map(|processed| (source.path.clone(), processed.clone()))
+        };
+        self.sources
+            .values()
+            .filter_map(collect)
+            .chain(
+                self.disk_sources
+                    .lock()
+                    .unwrap()
+                    .values()
+                    .filter_map(collect),
+            )
+            .collect()
+    }
 }
 impl FS for SourceSnapshot {
     fn use_case_sensitive_file_names(&self) -> bool {
@@ -62,17 +164,42 @@ impl FS for SourceSnapshot {
     }
     fn file_exists(&self, path: &str) -> bool {
         let p = self.key(path);
-        !self.deleted.contains(&p) && (self.sources.contains_key(&p) || self.base.file_exists(path))
+        !self.is_deleted(path) && (self.sources.contains_key(&p) || self.base.file_exists(path))
     }
     fn read_file(&self, path: &str) -> Option<String> {
+        self.read_file_shared(path).map(|text| text.to_string())
+    }
+    fn read_file_shared(&self, path: &str) -> Option<Arc<str>> {
         let p = self.key(path);
-        if self.deleted.contains(&p) {
+        if self.is_deleted(path) {
             return None;
         }
-        self.sources
-            .get(&p)
-            .map(|(_, text)| text.to_string())
-            .or_else(|| self.base.read_file(path))
+        if let Some(source) = self.known_source(path) {
+            return Some(Arc::clone(
+                &source.content(self.preprocessor.as_deref()).text,
+            ));
+        }
+        if self.preprocessor.is_none() || !SnapshotSource::is_preprocess_source(Path::new(path)) {
+            return self.base.read_file_shared(path);
+        }
+        let source = {
+            let mut sources = self.disk_sources.lock().unwrap();
+            if let Some(source) = sources.get(&p) {
+                Arc::clone(source)
+            } else {
+                let raw = self.base.read_file_shared(path)?;
+                let source = Arc::new(SnapshotSource {
+                    path: PathBuf::from(path),
+                    raw,
+                    processed: OnceLock::new(),
+                });
+                sources.insert(p, Arc::clone(&source));
+                source
+            }
+        };
+        Some(Arc::clone(
+            &source.content(self.preprocessor.as_deref()).text,
+        ))
     }
     fn directory_exists(&self, path: &str) -> bool {
         self.directories.contains_key(&self.key(path)) || self.base.directory_exists(path)
@@ -85,11 +212,13 @@ impl FS for SourceSnapshot {
                 .deleted
                 .contains(&self.key(parent.join(name).to_str().expect("validated compiler path")))
         });
-        for (file, _) in self.sources.values().filter(|(p, _)| {
-            p.parent()
+        for source in self.sources.values().filter(|source| {
+            source
+                .path
+                .parent()
                 .is_some_and(|p| self.key(p.to_str().unwrap()) == self.key(path))
         }) {
-            if let Some(name) = file.file_name().and_then(|n| n.to_str()) {
+            if let Some(name) = source.path.file_name().and_then(|n| n.to_str()) {
                 entries.files.push(name.into());
             }
         }
@@ -109,13 +238,13 @@ impl FS for SourceSnapshot {
     }
     fn stat(&self, path: &str) -> Option<FileInfo> {
         let p = self.key(path);
-        if self.deleted.contains(&p) {
+        if self.is_deleted(path) {
             return None;
         }
-        if let Some((original, text)) = self.sources.get(&p) {
+        if let Some(source) = self.sources.get(&p) {
             return Some(FileInfo {
-                name: original.file_name()?.to_str()?.into(),
-                size: text.len() as i64,
+                name: source.path.file_name()?.to_str()?.into(),
+                size: source.raw.len() as i64,
                 mode: FileMode::None,
                 mod_time: None,
             });
@@ -136,9 +265,13 @@ impl FS for SourceSnapshot {
     }
     fn realpath(&self, path: &str) -> String {
         if !self.base.file_exists(path)
-            && let Some((original, _)) = self.sources.get(&self.key(path))
+            && let Some(source) = self.sources.get(&self.key(path))
         {
-            return original.to_str().expect("validated compiler path").into();
+            return source
+                .path
+                .to_str()
+                .expect("validated compiler path")
+                .into();
         }
         self.base.realpath(path)
     }
@@ -161,6 +294,113 @@ mod tests {
     use super::*;
 
     #[test]
+    fn embedded_snapshots_retain_shared_text_and_detect_changed_versions() {
+        use tsrs_api::{
+            SessionOptions,
+            embedded::{Compiler, FileChanges},
+        };
+        use tsrs_core::{CompilerOptions, Tristate};
+        let base: Arc<dyn FS> = Arc::new(tsrs_vfs::vfstest::from_map(
+            std::iter::empty::<(&str, &str)>(),
+            true,
+        ));
+        let compiler = Compiler::new(SessionOptions::new(
+            "/".into(),
+            String::new(),
+            Arc::clone(&base),
+            false,
+        ))
+        .unwrap();
+        let path = PathBuf::from("/entry.ts");
+        let text: Arc<str> = Arc::from("export const value: number = 'wrong';");
+        let sources = BTreeMap::from([(path.clone(), Arc::clone(&text))]);
+        let first = Arc::new(
+            SourceSnapshot::new(
+                Arc::clone(&base),
+                &sources,
+                &BTreeSet::new(),
+                None,
+                None,
+                &BTreeSet::new(),
+            )
+            .unwrap(),
+        );
+        // Initialize the processed slot before counting: the next owner must be tsrs's file handle.
+        assert!(Arc::ptr_eq(
+            &first.read_file_shared("/entry.ts").unwrap(),
+            &text
+        ));
+        let owners = Arc::strong_count(&text);
+        let roots = vec!["/entry.ts".into()];
+        let options = CompilerOptions {
+            no_lib: Tristate::True,
+            no_emit: Tristate::True,
+            ..Default::default()
+        };
+        let old = compiler
+            .create_program(&roots, options.clone(), first.clone())
+            .unwrap();
+        assert!(
+            Arc::strong_count(&text) > owners,
+            "tsrs must retain the original Arc, not an owned copy"
+        );
+        assert!(
+            old.semantic_diagnostics()
+                .unwrap()
+                .iter()
+                .any(|d| d.code == 2322)
+        );
+        let replacement: Arc<str> = Arc::from("export const value: number = 42;");
+        let updated = BTreeMap::from([(path.clone(), Arc::clone(&replacement))]);
+        let second = Arc::new(
+            SourceSnapshot::new(
+                base,
+                &updated,
+                &BTreeSet::new(),
+                None,
+                Some(&first),
+                &BTreeSet::from([path]),
+            )
+            .unwrap(),
+        );
+        assert!(Arc::ptr_eq(
+            &second.read_file_shared("/entry.ts").unwrap(),
+            &replacement
+        ));
+        let owners = Arc::strong_count(&replacement);
+        let next = compiler
+            .update_program(
+                &old,
+                &roots,
+                options,
+                second,
+                &FileChanges {
+                    changed: roots.clone(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(Arc::strong_count(&replacement) > owners);
+        assert!(
+            !next
+                .semantic_diagnostics()
+                .unwrap()
+                .iter()
+                .any(|d| d.code == 2322)
+        );
+        assert!(
+            old.semantic_diagnostics()
+                .unwrap()
+                .iter()
+                .any(|d| d.code == 2322)
+        );
+        assert!(Arc::ptr_eq(
+            &first.read_file_shared("/entry.ts").unwrap(),
+            &text
+        ));
+    }
+
+    #[test]
     fn snapshot_overlay_respects_host_case_rules_and_deletions() {
         for sensitive in [false, true] {
             let base: Arc<dyn FS> = Arc::new(tsrs_vfs::vfstest::from_map(
@@ -177,11 +417,22 @@ mod tests {
                     Arc::from("virtual"),
                 ),
             ]);
-            let old = SourceSnapshot::new(Arc::clone(&base), &sources, &BTreeSet::new()).unwrap();
+            let old = SourceSnapshot::new(
+                Arc::clone(&base),
+                &sources,
+                &BTreeSet::new(),
+                None,
+                None,
+                &BTreeSet::new(),
+            )
+            .unwrap();
             let new = SourceSnapshot::new(
                 base,
                 &sources,
                 &BTreeSet::from([PathBuf::from("/Project/Remove.ets")]),
+                None,
+                None,
+                &BTreeSet::new(),
             )
             .unwrap();
             assert_eq!(
@@ -192,6 +443,10 @@ mod tests {
                 new.read_file("/project/KEEP.ets").as_deref(),
                 if sensitive { None } else { Some("overlay") }
             );
+            assert!(Arc::ptr_eq(
+                &new.read_file_shared("/Project/Keep.ets").unwrap(),
+                &sources[&PathBuf::from("/Project/Keep.ets")],
+            ));
             assert!(new.directory_exists("/Project/Virtual"));
             assert_eq!(new.stat("/Project/Virtual/New.ets").unwrap().size, 7);
             assert!(!new.file_exists("/Project/Remove.ets"));

@@ -21,6 +21,7 @@ pub use tsrs_api::embedded::{
     AnnotationTransformInfo as NativeAnnotationTransformInfo,
     AnnotationTransformNode as NativeAnnotationTransformNode,
     ArktsBuilderReceiverTypeFacts as NativeArktsBuilderReceiverTypeFacts,
+    ArktsNormalDiagnostics as NativeArktsNormalDiagnostics,
     ArktsPropertyTypeFacts as NativeArktsPropertyTypeFacts,
     ArktsTransformTypeFacts as NativeArktsTransformTypeFacts,
     ArktsTransformTypeQuery as NativeArktsTransformTypeQuery, ProgramSnapshot as NativeProgram,
@@ -167,13 +168,31 @@ pub struct NativeOhSdkClassCheckPlugin {
 #[serde(rename_all = "camelCase")]
 pub struct NativeOhSdkPluginRequest {
     pub session_id: u64,
-    pub path: PathBuf,
-    pub function_name: String,
     #[serde(default)]
-    pub class_name: String,
+    pub plugin_id: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub function_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub class_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after: Option<usize>,
     pub operation: String,
     #[serde(default)]
     pub args: Vec<Value>,
+}
+
+/// Session-local JS parser counters and V8 committed heap samples after node
+/// preparation, plus the retained committed heap after session release/GC.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct NativeOhSdkPluginStats {
+    pub parses: u64,
+    pub reparses: u64,
+    pub batches: u64,
+    pub peak_committed: u64,
+    pub retained_committed: u64,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -190,25 +209,30 @@ pub struct NativeOhSdkPluginResponse {
     pub error: String,
     pub check_result: bool,
     pub check_message: String,
+    pub skipped: bool,
+    pub stats: Option<NativeOhSdkPluginStats>,
 }
+
+pub type NativeOhSdkPluginCompletion =
+    Box<dyn FnOnce(Result<Vec<NativeOhSdkPluginResponse>, NativeCheckError>) + Send>;
 
 /// JavaScript owns only the source-observed SDK CommonJS plugin ABI. tsrs
 /// decides when callbacks participate in type diagnostics; Rust routes the
 /// typed request without loading or interpreting plugin code.
 pub trait NativeOhSdkPluginHost: Send + Sync + std::fmt::Debug {
-    fn invoke(
-        &self,
-        request: NativeOhSdkPluginRequest,
-    ) -> Result<NativeOhSdkPluginResponse, NativeCheckError>;
-
     fn invoke_batch(
         &self,
         requests: Vec<NativeOhSdkPluginRequest>,
-    ) -> Result<Vec<NativeOhSdkPluginResponse>, NativeCheckError> {
-        requests
-            .into_iter()
-            .map(|request| self.invoke(request))
-            .collect()
+    ) -> Result<Vec<NativeOhSdkPluginResponse>, NativeCheckError>;
+
+    /// Complete exactly once. Event-loop hosts enqueue without waiting; hosts
+    /// with a synchronous transport may finish on the submitting thread.
+    fn submit_batch(
+        &self,
+        requests: Vec<NativeOhSdkPluginRequest>,
+        complete: NativeOhSdkPluginCompletion,
+    ) {
+        complete(self.invoke_batch(requests));
     }
 }
 
@@ -399,6 +423,20 @@ pub struct NativeArktsBuildDiagnostics {
     pub semantic_diagnostics: Vec<NativeDiagnostic>,
 }
 
+impl From<tsrs_api::embedded::ArktsBuildDiagnostics> for NativeArktsBuildDiagnostics {
+    fn from(d: tsrs_api::embedded::ArktsBuildDiagnostics) -> Self {
+        Self {
+            linter_diagnostics: d.linter_diagnostics.into_iter().map(Into::into).collect(),
+            syntactic_diagnostics: d
+                .syntactic_diagnostics
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            semantic_diagnostics: d.semantic_diagnostics.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
 /// Filesystem invalidation passed to an incremental native program update.
 ///
 /// `rollup-plugin-watch-change.ts::watchChange` preserves update separately
@@ -411,6 +449,19 @@ pub struct NativeProgramFileChanges {
     pub deleted: Vec<PathBuf>,
 }
 
+/// Build-owned preprocessing is injected without a dependency on transforms.
+/// SourceSnapshot calls this once per read implementation-file version.
+pub trait NativeSourcePreprocessor: Send + Sync {
+    fn preprocess(&self, path: &Path, source: Arc<str>) -> NativeProcessedSource;
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct NativeProcessedSource {
+    pub text: Arc<str>,
+    pub legacy_extend_names: BTreeSet<String>,
+    pub new_extend_names: BTreeSet<String>,
+}
+
 /// Owns the compiler and the current immutable input inventory. Program/type
 /// leases own their snapshots independently and may safely outlive this session.
 pub struct NativeTypeSession {
@@ -419,6 +470,8 @@ pub struct NativeTypeSession {
     sources: BTreeMap<PathBuf, Arc<str>>,
     deleted: BTreeSet<PathBuf>,
     sdk_plugin_executor: Option<Arc<dyn tsrs_core::OhSdkPluginExecutor>>,
+    preprocessor: Option<Arc<dyn NativeSourcePreprocessor>>,
+    snapshot: Option<Arc<SourceSnapshot>>,
 }
 
 impl NativeTypeSession {
@@ -445,7 +498,30 @@ impl NativeTypeSession {
             sources,
             deleted: BTreeSet::new(),
             sdk_plugin_executor,
+            preprocessor: None,
+            snapshot: None,
         })
+    }
+
+    pub fn with_source_preprocessor(
+        mut self,
+        preprocessor: Arc<dyn NativeSourcePreprocessor>,
+    ) -> Self {
+        assert!(
+            self.snapshot.is_none(),
+            "set preprocessing before creating a program"
+        );
+        self.preprocessor = Some(preprocessor);
+        self
+    }
+
+    /// Initialized source versions from the current input snapshot. Callers
+    /// select the current Program graph before consuming diagnostic names/facts.
+    pub fn read_sources(&self) -> BTreeMap<PathBuf, NativeProcessedSource> {
+        self.snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.read_sources())
+            .unwrap_or_default()
     }
 
     pub fn create_program(
@@ -457,12 +533,17 @@ impl NativeTypeSession {
             Arc::clone(&self.base),
             &self.sources,
             &self.deleted,
+            self.preprocessor.clone(),
+            None,
+            &BTreeSet::new(),
         )?);
-        Ok(self.compiler.create_program(
+        let program = self.compiler.create_program(
             &options::CompilerPaths::many(roots)?,
             options.to_tsrs(self.sdk_plugin_executor.clone())?,
-            fs,
-        )?)
+            fs.clone(),
+        )?;
+        self.snapshot = Some(fs);
+        Ok(program)
     }
     /// Reconfigure the synthetic project in a new snapshot. Preserve the
     /// previous snapshot until its replacement has been created successfully.
@@ -548,6 +629,14 @@ impl NativeTypeSession {
             Arc::clone(&self.base),
             &sources,
             &tombstones,
+            self.preprocessor.clone(),
+            self.snapshot.as_deref(),
+            &changed
+                .iter()
+                .chain(&created)
+                .chain(&deleted)
+                .cloned()
+                .collect(),
         )?);
         let notifications = tsrs_api::embedded::FileChanges {
             changed: options::CompilerPaths::many(&changed.into_iter().collect::<Vec<_>>())?,
@@ -558,11 +647,12 @@ impl NativeTypeSession {
             &previous,
             &options::CompilerPaths::many(roots)?,
             options.to_tsrs(self.sdk_plugin_executor.clone())?,
-            fs,
+            fs.clone(),
             &notifications,
         )?;
         self.sources = sources;
         self.deleted = tombstones;
+        self.snapshot = Some(fs);
         Ok(next)
     }
 
@@ -584,16 +674,26 @@ impl NativeTypeSession {
         &mut self,
         program: &NativeProgram,
     ) -> Result<NativeArktsBuildDiagnostics, NativeCheckError> {
-        let d = program.arkts_build_diagnostics()?;
-        Ok(NativeArktsBuildDiagnostics {
-            linter_diagnostics: d.linter_diagnostics.into_iter().map(Into::into).collect(),
-            syntactic_diagnostics: d
-                .syntactic_diagnostics
-                .into_iter()
-                .map(Into::into)
-                .collect(),
-            semantic_diagnostics: d.semantic_diagnostics.into_iter().map(Into::into).collect(),
-        })
+        Ok(program.arkts_build_diagnostics()?.into())
+    }
+    pub fn arkts_normal_diagnostics(
+        &mut self,
+        program: &NativeProgram,
+    ) -> Result<NativeArktsNormalDiagnostics, NativeCheckError> {
+        Ok(program.arkts_normal_diagnostics()?)
+    }
+    pub fn arkts_strict_diagnostics(
+        &mut self,
+        program: &NativeProgram,
+        normal: NativeArktsNormalDiagnostics,
+    ) -> Result<NativeArktsBuildDiagnostics, NativeCheckError> {
+        Ok(program.arkts_strict_diagnostics(normal)?.into())
+    }
+    pub fn release_arkts_build_checkers(
+        &mut self,
+        program: &NativeProgram,
+    ) -> Result<(), NativeCheckError> {
+        Ok(program.release_arkts_build_checkers()?)
     }
     pub fn diagnostics(
         &mut self,

@@ -27,9 +27,9 @@ members = [
 ]
 
 [workspace.dependencies]
-tsrs_api = { git = "https://github.com/ohos-rs/tsrs.git", rev = "fb3668e6d47a695508f83a28bf05305f385deb58" }
-tsrs_core = { git = "https://github.com/ohos-rs/tsrs.git", rev = "fb3668e6d47a695508f83a28bf05305f385deb58" }
-tsrs_vfs = { git = "https://github.com/ohos-rs/tsrs.git", rev = "fb3668e6d47a695508f83a28bf05305f385deb58" }
+tsrs_api = { git = "https://github.com/ohos-rs/tsrs.git", rev = "4d7e69df3847b5e0e5708b22a3f713082e5e6d02" }
+tsrs_core = { git = "https://github.com/ohos-rs/tsrs.git", rev = "4d7e69df3847b5e0e5708b22a3f713082e5e6d02" }
+tsrs_vfs = { git = "https://github.com/ohos-rs/tsrs.git", rev = "4d7e69df3847b5e0e5708b22a3f713082e5e6d02" }
 # Workspace crates
 arkdown = { path = "crates/arkdown" }
 arkdown-abc = { path = "crates/arkdown-abc" }
@@ -157,6 +157,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 dhat = "0.3.3"
 memory-stats = "1.2.0"
 mimalloc-safe = "0.1.62"
+# Use the same sys crate as mimalloc-safe; its header defines the option IDs.
+libmimalloc-sys2 = { version = "=0.1.60", default-features = false, features = ["extended"] }
 
 # Filesystem watching
 notify = "6"
@@ -186,3 +188,7 @@ opt-level = 3
 
 [profile.dev.package.sha2]
 opt-level = 3
+
+# Parallel native-entry fs-verity preparation, pending a hapsigner release.
+[patch.crates-io]
+hapsigner = { git = "https://github.com/harmony-contrib/hapsigner-rs.git", rev = "0b4a16ad812d679c28e9d5602f0b0a239f28c719" }

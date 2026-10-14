@@ -153,7 +153,7 @@ impl NativeCompilerOptions {
                     })
                     .collect::<Result<_, NativeCheckError>>()?,
             ),
-            oh_sdk_plugin_project_config: self.oh_sdk_plugin_project_config.clone(),
+            oh_sdk_plugin_project_config: self.oh_sdk_plugin_project_config.clone().map(Arc::new),
             oh_sdk_plugin_executor: executor,
             ..Default::default()
         })

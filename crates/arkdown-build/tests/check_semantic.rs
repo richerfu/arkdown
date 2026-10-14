@@ -15,11 +15,11 @@ use walkdir::WalkDir;
 struct UnavailableSdkPluginHost;
 
 impl NativeOhSdkPluginHost for UnavailableSdkPluginHost {
-    fn invoke(
+    fn invoke_batch(
         &self,
-        _request: NativeOhSdkPluginRequest,
-    ) -> Result<NativeOhSdkPluginResponse, NativeCheckError> {
-        Ok(NativeOhSdkPluginResponse::default())
+        requests: Vec<NativeOhSdkPluginRequest>,
+    ) -> Result<Vec<NativeOhSdkPluginResponse>, NativeCheckError> {
+        Ok(vec![NativeOhSdkPluginResponse::default(); requests.len()])
     }
 }
 

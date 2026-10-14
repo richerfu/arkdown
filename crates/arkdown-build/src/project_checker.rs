@@ -17,8 +17,9 @@ use arkdown_ets_checker::{
     NativeAnnotationConstant, NativeAnnotationInfo, NativeAnnotationTransformInfo,
     NativeArktsTransformTypeFacts, NativeArktsTransformTypeQuery, NativeCompilerOptions,
     NativeDiagnostic, NativeOhSdkCheckPlugin, NativeOhSdkClassCheckPlugin, NativeOhSdkConfig,
-    NativeOhSdkPluginHost, NativeProgram, NativeProgramFileChanges, NativeProgramSourceGraph,
-    NativeResolvedTypeIdentity, NativeTypeQueryRange, NativeTypeSession,
+    NativeOhSdkPluginHost, NativeProcessedSource, NativeProgram, NativeProgramFileChanges,
+    NativeProgramSourceGraph, NativeResolvedTypeIdentity, NativeSourcePreprocessor,
+    NativeTypeQueryRange, NativeTypeSession,
 };
 use arkdown_ets_transform::{
     transform::component_meta::ComponentMetadata, AnnotationConstant, AnnotationImportDisposition,
@@ -142,7 +143,8 @@ impl ProjectSemanticRuntime {
                     project_root,
                     prepared.sources.clone(),
                     prepared.sdk_plugin_host.clone(),
-                )?;
+                )?
+                .with_source_preprocessor(Arc::new(ArktsCheckerSourcePreprocessor));
                 let program = session.create_program(&prepared.roots, &prepared.options)?;
                 ProjectSemanticRuntimeEntry {
                     sdk_plugin_callbacks,
@@ -168,10 +170,32 @@ struct PreparedSemanticCheck {
     roots: Vec<PathBuf>,
     options: NativeCompilerOptions,
     sdk_plugin_host: Option<Arc<dyn NativeOhSdkPluginHost>>,
+    sources: BTreeMap<PathBuf, Arc<str>>,
+}
+
+struct SemanticSourceInputs {
     ui_props: BTreeSet<String>,
     new_extend_names: BTreeSet<String>,
     sources: BTreeMap<PathBuf, Arc<str>>,
     semantic_inventories: BTreeMap<PathBuf, ArktsSourceSemanticInventory>,
+}
+
+// ets_checker.ts::getScriptSnapshot calls processContent only when the
+// Program reads an implementation file. SourceSnapshot owns version caching.
+struct ArktsCheckerSourcePreprocessor;
+impl NativeSourcePreprocessor for ArktsCheckerSourcePreprocessor {
+    fn preprocess(&self, _path: &Path, source: Arc<str>) -> NativeProcessedSource {
+        let processed = ArktsExtendSource::new(&source, arkdown_core::ArktsLanguageVersion::V1_1);
+        NativeProcessedSource {
+            text: if processed.as_str() == source.as_ref() {
+                Arc::clone(&source)
+            } else {
+                Arc::from(processed.as_str())
+            },
+            legacy_extend_names: processed.legacy_names().clone(),
+            new_extend_names: processed.modern_names().clone(),
+        }
+    }
 }
 
 /// One compiler-owned file identity paired with the canonical startup
@@ -342,7 +366,9 @@ impl<'a> ProjectSemanticChecker<'a> {
             .and_then(|options| options.tsc_config.max_flow_depth)
         {
             Some(value) if value < 2000.0 || value > 65535.0 => {
-                tracing::warn!("ArkTS: Invalid maxFlowDepth for control flow analysis.The value of maxFlowDepth ranges from 2000 to 65535.\nIf the modification does not take effect, set maxFlowDepth to the default value.");
+                tracing::warn!(
+                    "ArkTS: Invalid maxFlowDepth for control flow analysis.The value of maxFlowDepth ranges from 2000 to 65535.\nIf the modification does not take effect, set maxFlowDepth to the default value."
+                );
                 2000.0
             }
             Some(value) => value,
@@ -607,71 +633,27 @@ impl<'a> ProjectSemanticChecker<'a> {
         roots.extend(self.builtin_declarations.iter().cloned());
         roots.sort();
         roots.dedup();
-        let mut ui_props = BTreeSet::new();
-        let mut new_extend_names = BTreeSet::new();
-        let mut sources = BTreeMap::new();
-        let mut semantic_inventories = BTreeMap::new();
-        if let Some(store) = self.source_store {
-            let semantic_collector = ArktsSourceSemanticCollector::new(self.component_metadata);
-            let prepared = store
-                .source_files()
-                .into_par_iter()
-                .filter_map(|file| {
-                    let Some(SourceContent::Text(text)) = file.cached_content() else {
-                        return None;
-                    };
-                    let processed = if Self::is_type_script_preprocess_source(&file.path) {
-                        Some(ArktsExtendSource::new(
-                            text.as_ref(),
-                            arkdown_core::ArktsLanguageVersion::V1_1,
-                        ))
-                    } else {
-                        None
-                    };
-                    let legacy_names = processed
-                        .as_ref()
-                        .map(|source| source.legacy_names().iter().cloned().collect::<Vec<_>>())
-                        .unwrap_or_default();
-                    let modern_names = processed
-                        .as_ref()
-                        .map(|source| source.modern_names().iter().cloned().collect::<Vec<_>>())
-                        .unwrap_or_default();
-                    let content = processed.map_or_else(
-                        || Arc::clone(text),
-                        |processed| Arc::<str>::from(processed.as_str()),
-                    );
-                    let semantic_inventory = Self::is_type_script_preprocess_source(&file.path)
-                        .then(|| {
-                            semantic_collector
-                                .collect(content.as_ref(), self.is_ui_diagnostic_source(&file.path))
-                        });
-                    Some((
-                        file.path.clone(),
-                        content,
-                        semantic_inventory,
-                        legacy_names,
-                        modern_names,
-                    ))
-                })
-                .collect::<Vec<_>>();
-            for (path, content, semantic_inventory, legacy_names, modern_names) in prepared {
-                if let Some(inventory) = semantic_inventory {
-                    ui_props.extend(inventory.diagnostic_names().iter().cloned());
-                    semantic_inventories.insert(path.clone(), inventory);
-                }
-                ui_props.extend(legacy_names);
-                new_extend_names.extend(modern_names);
-                sources.insert(path, content);
-            }
-        }
+        let sources = self
+            .source_store
+            .map(|store| {
+                store
+                    .source_files()
+                    .into_iter()
+                    .filter_map(|file| {
+                        if let Some(SourceContent::Text(text)) = file.cached_content() {
+                            Some((file.path.clone(), Arc::clone(text)))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let prepared = PreparedSemanticCheck {
             roots,
             options,
             sdk_plugin_host,
-            ui_props,
-            new_extend_names,
             sources,
-            semantic_inventories,
         };
         if let Some(runtime) = runtime {
             let key = ProjectSemanticRuntimeKey {
@@ -688,11 +670,53 @@ impl<'a> ProjectSemanticChecker<'a> {
             self.project_root,
             prepared.sources.clone(),
             prepared.sdk_plugin_host.clone(),
-        )?;
+        )?
+        .with_source_preprocessor(Arc::new(ArktsCheckerSourcePreprocessor));
         let program = session.create_program(&prepared.roots, &prepared.options)?;
         let report = self.check_program(&mut session, &program, &prepared, mode)?;
         drop(program);
         Ok(report)
+    }
+
+    fn semantic_source_inputs(
+        &self,
+        files: &[SemanticSourceIdentity],
+        read_sources: &BTreeMap<PathBuf, NativeProcessedSource>,
+    ) -> SemanticSourceInputs {
+        let selected = files
+            .iter()
+            .map(|file| file.snapshot_path.clone())
+            .collect::<BTreeSet<_>>();
+        let selected = selected.into_iter().collect::<Vec<_>>();
+        let inventories = selected
+            .par_iter()
+            .filter(|path| Self::is_type_script_preprocess_source(path))
+            .map(|path| {
+                let source = &read_sources[path];
+                let inventory = ArktsSourceSemanticCollector::new(self.component_metadata)
+                    .collect(&source.text, self.is_ui_diagnostic_source(path));
+                (path.clone(), inventory)
+            })
+            .collect::<Vec<_>>();
+        let mut ui_props = BTreeSet::new();
+        let mut new_extend_names = BTreeSet::new();
+        for (path, inventory) in &inventories {
+            ui_props.extend(inventory.diagnostic_names().iter().cloned());
+            ui_props.extend(read_sources[path].legacy_extend_names.iter().cloned());
+            new_extend_names.extend(read_sources[path].new_extend_names.iter().cloned());
+        }
+        SemanticSourceInputs {
+            ui_props,
+            new_extend_names,
+            sources: selected
+                .into_iter()
+                .map(|path| {
+                    let text = Arc::clone(&read_sources[&path].text);
+                    (path, text)
+                })
+                .collect(),
+            semantic_inventories: inventories.into_iter().collect(),
+        }
     }
 
     fn check_program(
@@ -703,10 +727,15 @@ impl<'a> ProjectSemanticChecker<'a> {
         mode: ProjectSemanticMode,
     ) -> Result<ProjectSemanticCheckReport> {
         let source_graph = session.source_graph(program)?;
+        let read_sources = session.read_sources();
+        let sources = read_sources
+            .iter()
+            .map(|(path, source)| (path.clone(), Arc::clone(&source.text)))
+            .collect();
         let mut source_identities = source_graph
             .files
             .iter()
-            .filter_map(|file| self.semantic_source_identity(&file.file_name, &prepared.sources))
+            .filter_map(|file| self.semantic_source_identity(&file.file_name, &sources))
             .collect::<Vec<_>>();
         source_identities.sort_unstable_by(|left, right| {
             left.compiler_path
@@ -714,38 +743,34 @@ impl<'a> ProjectSemanticChecker<'a> {
                 .then_with(|| left.snapshot_path.cmp(&right.snapshot_path))
         });
         source_identities.dedup_by(|left, right| left.compiler_path == right.compiler_path);
+        let inputs = self.semantic_source_inputs(&source_identities, &read_sources);
         let checked_sources = source_identities
             .iter()
             .filter(|source| Self::is_checkable_root(&source.snapshot_path))
             .map(|source| source.snapshot_path.clone())
             .collect::<Vec<_>>();
-        let (mut linter, mut result) = if mode.checks_diagnostics() {
-            let diagnostics_started = Instant::now();
-            let diagnostics = session.arkts_build_diagnostics(program)?;
-            let mut result = diagnostics.syntactic_diagnostics;
-            result.extend(diagnostics.semantic_diagnostics);
-            if self.check_declarations {
-                let declaration_sources = source_graph
-                    .files
-                    .iter()
-                    .map(|file| file.file_name.clone())
-                    .filter(|file| Self::is_declaration_diagnostic_source(file))
-                    .collect::<Vec<_>>();
-                result.extend(session.declaration_diagnostics(program, &declaration_sources)?);
-            }
-            tracing::info!(
-                elapsed_ms = diagnostics_started.elapsed().as_millis(),
-                files = source_graph.files.len(),
-                "ArkTS build diagnostics completed"
-            );
-            (diagnostics.linter_diagnostics, result)
+        let diagnostics_started = Instant::now();
+        let normal = if mode.checks_diagnostics() {
+            Some(session.arkts_normal_diagnostics(program)?)
         } else {
             tracing::info!(
                 files = source_graph.files.len(),
                 "ArkTS diagnostics skipped; retaining transform type inference"
             );
-            (Vec::new(), Vec::new())
+            None
         };
+        let mut declaration_diagnostics = Vec::new();
+        if mode.checks_diagnostics() && self.check_declarations {
+            let declaration_sources = source_graph
+                .files
+                .iter()
+                .map(|file| file.file_name.clone())
+                .filter(|file| Self::is_declaration_diagnostic_source(file))
+                .collect::<Vec<_>>();
+            declaration_diagnostics =
+                session.declaration_diagnostics(program, &declaration_sources)?;
+        }
+        let normal_elapsed = diagnostics_started.elapsed();
         let annotation_sources = source_identities
             .iter()
             .filter(|source| Self::is_type_script_preprocess_source(&source.snapshot_path))
@@ -763,8 +788,8 @@ impl<'a> ProjectSemanticChecker<'a> {
         let native_type_facts = session.annotation_transform_infos(program, &annotation_files)?;
         let transform_queries = self.native_transform_type_queries(
             &annotation_sources,
-            &prepared.sources,
-            &prepared.semantic_inventories,
+            &inputs.sources,
+            &inputs.semantic_inventories,
         )?;
         let sdk_api_use_files = if prepared.options.oh_crossplatform {
             annotation_files.as_slice()
@@ -790,24 +815,34 @@ impl<'a> ProjectSemanticChecker<'a> {
                 .sum::<usize>(),
             "ArkTS transform type facts completed"
         );
+        // All normal-pool outputs are now owned. Retire its regions before the
+        // strict linter is initialized; preserve linter/syntactic/semantic order.
+        let (mut linter, mut result) = if let Some(normal) = normal {
+            let strict_started = Instant::now();
+            let diagnostics = session.arkts_strict_diagnostics(program, normal)?;
+            let mut result = diagnostics.syntactic_diagnostics;
+            result.extend(diagnostics.semantic_diagnostics);
+            result.extend(declaration_diagnostics);
+            tracing::info!(
+                elapsed_ms = (normal_elapsed + strict_started.elapsed()).as_millis(),
+                files = source_graph.files.len(),
+                "ArkTS build diagnostics completed"
+            );
+            (diagnostics.linter_diagnostics, result)
+        } else {
+            session.release_arkts_build_checkers(program)?;
+            (Vec::new(), Vec::new())
+        };
         let type_facts = NativeAnnotationFactsConverter::new(
-            &prepared.sources,
+            &inputs.sources,
             &source_identities,
             &self.crossplatform_dependencies,
         )
         .convert(native_type_facts, native_transform_type_facts)?;
         if mode.checks_diagnostics() {
             linter = self.prepare_linter_diagnostics(linter)?;
-            self.apply_ui_diagnostic_rules(
-                &mut linter,
-                &prepared.ui_props,
-                &prepared.new_extend_names,
-            );
-            self.apply_ui_diagnostic_rules(
-                &mut result,
-                &prepared.ui_props,
-                &prepared.new_extend_names,
-            );
+            self.apply_ui_diagnostic_rules(&mut linter, &inputs.ui_props, &inputs.new_extend_names);
+            self.apply_ui_diagnostic_rules(&mut result, &inputs.ui_props, &inputs.new_extend_names);
             let ignored = self.ignored_diagnostic_files(&source_graph);
             linter.retain(|diagnostic| self.keep_diagnostic(diagnostic, &ignored));
             result.retain(|diagnostic| self.keep_diagnostic(diagnostic, &ignored));
@@ -1663,5 +1698,58 @@ mod tests {
             .expect("compiler facts must be stored under the Rolldown source identity");
         assert_eq!(fact_path, snapshot_file);
         assert_eq!(fact_source.as_ref(), source.as_ref());
+    }
+    #[test]
+    fn semantic_inputs_use_program_read_overlays_and_exclude_stale_unused_names() {
+        use super::{ArktsCheckerSourcePreprocessor, SemanticSourceIdentity, Utf16OffsetMap};
+        use arkdown_ets_checker::NativeSourcePreprocessor;
+        let project = tempfile::tempdir().unwrap();
+        let file = project.path().join("Page.ets");
+        let unused = project.path().join("Unused.ets");
+        let raw = Arc::<str>::from(
+            "// 😀\n@Extend Text.used(color: string) {}\n@Component\nstruct Page {\n  @ObjectLink model: Model\n  build() {}\n}\n",
+        );
+        let processor = ArktsCheckerSourcePreprocessor;
+        let processed = processor.preprocess(&file, Arc::clone(&raw));
+        let stale = processor.preprocess(
+            &unused,
+            Arc::from("@Extend Text.unused() {}\n@Extend(Text) function ghost() {}"),
+        );
+        let read = BTreeMap::from([(file.clone(), processed.clone()), (unused, stale)]);
+        let roots = vec![file.clone()];
+        let packages = PackageResolutionPlan::default();
+        let metadata = ComponentMetadata::default();
+        let checker = ProjectSemanticChecker::new(project.path(), &roots, &packages, &metadata);
+        let identities = vec![SemanticSourceIdentity {
+            compiler_path: file.clone(),
+            snapshot_path: file.clone(),
+        }];
+        let inputs = checker.semantic_source_inputs(&identities, &read);
+        assert_eq!(inputs.sources.len(), 1);
+        assert!(inputs.ui_props.contains("used"));
+        assert!(inputs.ui_props.contains("$model"));
+        assert!(!inputs.ui_props.contains("unused"));
+        assert!(!inputs.new_extend_names.contains("ghost"));
+        let query = checker
+            .native_transform_type_queries(
+                &identities,
+                &inputs.sources,
+                &inputs.semantic_inventories,
+            )
+            .unwrap();
+        assert_eq!(query.len(), 1);
+        let property = &query[0].properties[0];
+        let offsets = Utf16OffsetMap::new(&processed.text);
+        let span = offsets.span(property.pos, property.end, &file).unwrap();
+        assert_eq!(
+            &processed.text[span.start as usize..span.end as usize],
+            "model"
+        );
+        assert_ne!(processed.text, raw, "Extend preprocessing changes offsets");
+        let identity_map = rustc_hash::FxHashMap::from_iter([(file.clone(), file.clone())]);
+        let dependencies = rustc_hash::FxHashMap::default();
+        let converter =
+            NativeAnnotationFactsConverter::new(&inputs.sources, &identity_map, &dependencies);
+        assert_eq!(converter.source(&file).unwrap().1, &processed.text);
     }
 }

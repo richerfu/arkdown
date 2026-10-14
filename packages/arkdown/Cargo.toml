@@ -36,6 +36,9 @@ rustc-hash = { workspace = true }
 url = { workspace = true }
 dhat = { workspace = true, optional = true }
 
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+libmimalloc-sys2 = { workspace = true, optional = true }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 mimalloc-safe = { workspace = true, optional = true, features = ["skip_collect_on_exit"] }
 
@@ -54,7 +57,7 @@ mimalloc-safe = { workspace = true, optional = true, features = [
 
 [features]
 default = ["allocator"]
-allocator = ["dep:mimalloc-safe"]
+allocator = ["dep:mimalloc-safe", "dep:libmimalloc-sys2"]
 memory-diagnostics = ["arkdown/memory-diagnostics", "arkdown-build/memory-diagnostics"]
 dhat-heap = ["dep:dhat"]
 
