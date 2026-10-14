@@ -970,7 +970,10 @@ impl<'a> PluginFactory<'a> {
             case_sensitive_check: self.input.case_sensitive_check,
             source_set_overlays: self.input.source_set_overlays,
         };
-        let ohos_resolver = Arc::new(OhosResolver::new(resolver_config));
+        let ohos_resolver = Arc::new(
+            OhosResolver::new(resolver_config)
+                .with_source_inventory(self.input.transform_sources.source_inventory().cloned()),
+        );
         let ohos_resolve_plugin: SharedPluginable = Arc::new(
             OhosResolvePlugin::with_resolver(
                 ohos_resolver,

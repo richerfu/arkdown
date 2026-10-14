@@ -286,7 +286,14 @@ impl RolldownEtsTransformPlan {
     }
 
     pub fn transform_options_for(&self, id: &str) -> TransformOptions {
-        let form_entry = self.is_form_entry(id);
+        let normalized = self
+            .sources
+            .canonical_source_path(Path::new(id))
+            .and_then(Path::to_str)
+            .map(Cow::Borrowed)
+            .unwrap_or_else(|| Cow::Owned(TransformEntrySourceId::new(id).normalized()));
+        let form_entry = self.form_entry_source_ids.contains(id)
+            || self.form_entry_source_ids.contains(normalized.as_ref());
         TransformOptions {
             arkts_language_version: self.arkts_language_version,
             api_version: self.api_version,
@@ -303,9 +310,14 @@ impl RolldownEtsTransformPlan {
             module_exports: self.module_exports.clone(),
             navigation_routes: self.navigation_routes.clone(),
             form_entry,
-            insight_intent_form_binding: self.insight_intent_form_binding(id),
+            insight_intent_form_binding: self
+                .insight_intent_form_bindings
+                .get(id)
+                .or_else(|| self.insight_intent_form_bindings.get(normalized.as_ref()))
+                .cloned(),
             insight_intent_schema_catalog: self.insight_intent_schema_catalog.clone(),
-            entry_source: self.is_entry_source(id),
+            entry_source: self.entry_source_ids.contains(id)
+                || self.entry_source_ids.contains(normalized.as_ref()),
             preview_mode: self.preview_mode,
             check_entry: self.check_entry,
             partial_update: true,
@@ -318,32 +330,6 @@ impl RolldownEtsTransformPlan {
             module_source_file_stage: true,
             disable_mock_setup_decorator: self.disable_mock_setup_decorator,
         }
-    }
-
-    fn is_form_entry(&self, id: &str) -> bool {
-        if self.form_entry_source_ids.contains(id) {
-            return true;
-        }
-        let normalized = TransformEntrySourceId::new(id).normalized();
-        self.form_entry_source_ids.contains(normalized.as_str())
-    }
-
-    fn insight_intent_form_binding(&self, id: &str) -> Option<InsightIntentFormBinding> {
-        if let Some(binding) = self.insight_intent_form_bindings.get(id) {
-            return Some(binding.clone());
-        }
-        let normalized = TransformEntrySourceId::new(id).normalized();
-        self.insight_intent_form_bindings
-            .get(normalized.as_str())
-            .cloned()
-    }
-
-    fn is_entry_source(&self, id: &str) -> bool {
-        if self.entry_source_ids.contains(id) {
-            return true;
-        }
-        let normalized = TransformEntrySourceId::new(id).normalized();
-        self.entry_source_ids.contains(normalized.as_str())
     }
 }
 
@@ -3171,5 +3157,103 @@ class Service {
                 output.code
             );
         }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn transform_and_navigation_reuse_captured_symlink_identity_after_removal() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("Package");
+        std::fs::create_dir(&root).unwrap();
+        let file = root.join("Index.ets");
+        std::fs::write(&file, "export {};").unwrap();
+        let alias = temp.path().join("Alias");
+        std::os::unix::fs::symlink(&root, &alias).unwrap();
+        let canonical = std::fs::canonicalize(&file).unwrap();
+        let sources = TransformSourceSnapshot::new(
+            [(canonical.clone(), Arc::from("export {};"))]
+                .into_iter()
+                .collect(),
+        )
+        .with_path_aliases(vec![(alias.clone(), root.clone())]);
+        let routes = NavigationRouteMap::from_routes([crate::NavigationRoute::new(
+            &canonical,
+            "page",
+            "buildPage",
+        )]);
+        let plan = RolldownEtsTransformPlan::new(
+            "com.example",
+            "entry",
+            root.clone(),
+            root,
+            vec![],
+            12,
+            FxHashMap::default(),
+            transform::component_meta::ComponentMetadata::default(),
+            sources,
+        )
+        .with_form_entry_source_ids(
+            [canonical.to_str().unwrap().to_string()]
+                .into_iter()
+                .collect(),
+        )
+        .with_entry_source_ids(
+            [canonical.to_str().unwrap().to_string()]
+                .into_iter()
+                .collect(),
+        )
+        .with_navigation_routes(routes);
+        std::fs::remove_file(file).unwrap();
+        std::fs::remove_file(&alias).unwrap();
+        let id = alias.join("Index.ets");
+        let options = plan.transform_options_for(id.to_str().unwrap());
+        assert!(options.entry_source && options.form_entry);
+        assert_eq!(
+            options
+                .navigation_routes
+                .routes_for_source(id.to_str().unwrap(), &options.sources)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn uncaptured_symlink_parent_uses_physical_fallback_not_lexical_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("real");
+        std::fs::create_dir_all(real.join("child")).unwrap();
+        std::fs::write(real.join("Entry.ts"), "export {};").unwrap();
+        std::fs::write(temp.path().join("Entry.ts"), "export {};").unwrap();
+        std::os::unix::fs::symlink(real.join("child"), temp.path().join("link")).unwrap();
+        let sources = TransformSourceSnapshot::new(
+            [
+                (real.join("Entry.ts"), Arc::from("export {};")),
+                (temp.path().join("Entry.ts"), Arc::from("export {};")),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let id = temp.path().join("link/../Entry.ts");
+        let canonical = std::fs::canonicalize(&id).unwrap();
+        let plan = RolldownEtsTransformPlan::new(
+            "com.example",
+            "entry",
+            real.clone(),
+            real,
+            vec![],
+            12,
+            FxHashMap::default(),
+            transform::component_meta::ComponentMetadata::default(),
+            sources,
+        )
+        .with_entry_source_ids(
+            [canonical.to_str().unwrap().to_string()]
+                .into_iter()
+                .collect(),
+        );
+        assert!(
+            plan.transform_options_for(id.to_str().unwrap())
+                .entry_source
+        );
     }
 }

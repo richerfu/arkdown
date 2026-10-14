@@ -36,6 +36,7 @@ pub(crate) struct DependencySnapshotInventory {
     source_files: FxHashMap<PathBuf, Arc<[PathBuf]>>,
     resolved_roots: FxHashMap<(PathBuf, PathBuf, String), Option<PathBuf>>,
     canonical_roots: FxHashMap<PathBuf, PathBuf>,
+    source_inventory_paths: crate::source_store::SourceInventoryPaths,
 }
 
 #[derive(Clone, Copy)]
@@ -508,7 +509,7 @@ impl DependencySnapshotInventory {
             if !entry.file_type().is_file() {
                 continue;
             }
-            let path = canonicalize_or_owned(entry.path());
+            let path = self.source_inventory_paths.canonical_file(&entry);
             if HvigorSourceFileFilter::new(&path).is_ignored_macos_metadata() {
                 continue;
             }
@@ -776,6 +777,19 @@ impl DependencyGraphBuilder {
             ..Default::default()
         };
         self.collect_dependencies(&mut graph, inventory);
+        graph.canonical_package_roots = inventory.canonical_roots.clone();
+        for canonical in inventory.canonical_roots.values() {
+            graph
+                .canonical_package_roots
+                .insert(canonical.clone(), canonical.clone());
+        }
+        for edge in &graph.edges {
+            if let Some(alias) = &edge.installed_alias_path {
+                graph
+                    .canonical_package_roots
+                    .insert(alias.clone(), edge.package_root.clone());
+            }
+        }
         graph
     }
 
@@ -1686,6 +1700,31 @@ mod tests {
         );
         let graph_with_install = fixture.build_for("entry");
         assert!(graph_with_install.nodes.contains_key("native-types.so"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn package_identities_survive_removed_alias_and_keep_external_realpath_fallback() {
+        use std::os::unix::fs::symlink;
+        let fixture = DependencyGraphFixture::new();
+        fixture.write_package("", r#"{name: 'app'}"#);
+        fixture.write_package(
+            "entry",
+            r#"{name: 'entry', dependencies: {linked: '1.0.0'}}"#,
+        );
+        fixture.write_package("ActualPackage", r#"{name: 'linked', version: '1.0.0'}"#);
+        let modules = fixture.root().join("entry/oh_modules");
+        fs::create_dir_all(&modules).unwrap();
+        let alias = modules.join("linked");
+        symlink(fixture.root().join("ActualPackage"), &alias).unwrap();
+        let graph = fixture.build_for("entry");
+        let expected = fs::canonicalize(&alias).unwrap();
+        fs::remove_file(&alias).unwrap();
+        assert_eq!(graph.canonical_package_root(&alias).as_ref(), expected);
+        assert_eq!(graph.canonical_package_root(&expected).as_ref(), expected);
+        let outside = fixture.root().join("ExternalAlias");
+        symlink(&expected, &outside).unwrap();
+        assert_eq!(graph.canonical_package_root(&outside).as_ref(), expected);
     }
 
     #[cfg(unix)]

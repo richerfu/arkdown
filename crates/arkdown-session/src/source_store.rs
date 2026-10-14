@@ -15,7 +15,9 @@
 //! | `VisualSourceInventory` | `.visual` file to `.ets` association |
 //! | `WorkerSourceInventory` | `loadWorker`/`readWorkerFile` inventories |
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::io::{Error, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -261,9 +263,116 @@ pub struct SourceStore {
     /// Worker entry inventory.
     workers: WorkerSourceInventory,
     /// Canonical roots covered by this immutable inventory.
-    inventory_roots: Arc<[PathBuf]>,
+    inventory_roots: Arc<FxHashSet<PathBuf>>,
     /// Lexical caller roots mapped to their canonical startup identities.
-    root_aliases: Arc<[(PathBuf, PathBuf)]>,
+    root_aliases: Arc<SourceRootAliases>,
+}
+
+/// Component trie: longest-root matching visits the path once, independent of
+/// the number of dependency aliases. Component keys preserve platform spelling.
+#[derive(Debug, Default)]
+struct SourceRootAliases {
+    children: FxHashMap<OsString, SourceRootAliases>,
+    canonical: Option<PathBuf>,
+}
+
+impl SourceRootAliases {
+    fn new(aliases: Vec<(PathBuf, PathBuf)>) -> Self {
+        let mut roots = Self::default();
+        for (alias, canonical) in aliases {
+            let mut node = &mut roots;
+            for part in alias.components() {
+                node = node
+                    .children
+                    .entry(part.as_os_str().to_owned())
+                    .or_default();
+            }
+            node.canonical = Some(canonical);
+        }
+        roots
+    }
+
+    fn resolve(&self, path: &Path) -> Option<PathBuf> {
+        let mut node = self;
+        let mut parts = path.components();
+        let mut matched = self.canonical.as_ref().map(|root| (root, path));
+        while let Some(part) = parts.next() {
+            let Some(child) = node.children.get(part.as_os_str()) else {
+                break;
+            };
+            node = child;
+            if let Some(canonical) = &node.canonical {
+                matched = Some((canonical, parts.as_path()));
+            }
+        }
+        matched.map(|(canonical, relative)| canonical.join(relative))
+    }
+}
+
+impl arkdown_core::SourceInventory for SourceStore {
+    fn canonical_path(&self, path: &Path) -> Option<&Path> {
+        if let Some(file) = self.files.get(path) {
+            return Some(&file.path);
+        }
+        // A parent component after an uncaptured symlink requires realpath;
+        // lexical normalization is not evidence of physical identity.
+        if path
+            .components()
+            .any(|part| part == std::path::Component::ParentDir)
+        {
+            return None;
+        }
+        let path = self.lookup_path(path);
+        self.files
+            .get(path.as_ref())
+            .map(|file| file.path.as_path())
+            .or_else(|| {
+                self.inventory_roots
+                    .get(path.as_ref())
+                    .map(PathBuf::as_path)
+            })
+    }
+
+    fn source_text(&self, path: &Path) -> Option<Arc<str>> {
+        match self
+            .files
+            .get(self.canonical_path(path)?)?
+            .cached_content()?
+        {
+            SourceContent::Text(text) => Some(Arc::clone(text)),
+            SourceContent::Bytes(_) => None,
+        }
+    }
+}
+
+/// Per-startup walk cache. WalkDir's non-followed entry names have the directory's
+/// actual spelling; joining them to the physical parent preserves realpath identity.
+#[derive(Debug, Default)]
+pub(crate) struct SourceInventoryPaths {
+    directories: FxHashMap<PathBuf, Option<PathBuf>>,
+}
+
+impl SourceInventoryPaths {
+    pub(crate) fn canonical_file(&mut self, entry: &walkdir::DirEntry) -> PathBuf {
+        // A root file's name came from the caller, rather than directory enumeration.
+        if entry.depth() == 0 || entry.file_type().is_symlink() {
+            return canonicalize_or_owned(entry.path());
+        }
+        let Some(parent) = entry.path().parent() else {
+            return canonicalize_or_owned(entry.path());
+        };
+        match self
+            .directories
+            .entry(parent.to_path_buf())
+            .or_insert_with(|| {
+                arkdown_path::AbsPath::canonicalize(parent)
+                    .ok()
+                    .map(arkdown_path::AbsPath::into_path_buf)
+            }) {
+            Some(parent) => parent.join(entry.file_name()),
+            None => canonicalize_or_owned(entry.path()),
+        }
+    }
 }
 
 impl SourceStore {
@@ -293,6 +402,7 @@ impl SourceStore {
     ) -> Result<Self, std::io::Error> {
         let mut paths = BTreeSet::new();
         let mut visuals = VisualSourceInventory::default();
+        let mut inventory_paths = SourceInventoryPaths::default();
 
         let mut walk_roots = source_roots
             .iter()
@@ -336,7 +446,8 @@ impl SourceStore {
 
         for (_, inventory) in preinventoried_roots {
             for path in inventory.iter() {
-                let path = canonicalize_or_owned(path);
+                // DependencySnapshotInventory already captured physical file identities.
+                let path = path.clone();
                 if HvigorSourceFileFilter::new(&path).is_ignored_macos_metadata() {
                     continue;
                 }
@@ -351,9 +462,10 @@ impl SourceStore {
             }
         }
 
-        let walk_roots = walk_roots
-            .into_iter()
-            .map(|root| canonicalize_or_owned(&root))
+        let walk_roots = root_aliases
+            .iter()
+            .filter(|(root, _)| walk_roots.contains(root))
+            .map(|(_, canonical)| canonical.clone())
             .collect::<BTreeSet<_>>();
         for root in &walk_roots {
             if !root.exists() {
@@ -373,7 +485,7 @@ impl SourceStore {
                 if !entry.file_type().is_file() {
                     continue;
                 }
-                let path = canonicalize_or_owned(entry.path());
+                let path = inventory_paths.canonical_file(&entry);
                 if HvigorSourceFileFilter::new(&path).is_ignored_macos_metadata() {
                     continue;
                 }
@@ -436,8 +548,8 @@ impl SourceStore {
             code_resources: CodeResourceInventory::default(),
             visuals,
             workers: WorkerSourceInventory::default(),
-            inventory_roots: Arc::from(inventory_roots.into_iter().collect::<Vec<_>>()),
-            root_aliases: Arc::from(root_aliases),
+            inventory_roots: Arc::new(inventory_roots.into_iter().collect()),
+            root_aliases: Arc::new(SourceRootAliases::new(root_aliases)),
         })
     }
 
@@ -477,7 +589,7 @@ impl SourceStore {
 
     /// Return the source file entry for `path`, if it's in the store.
     pub fn source_by_path(&self, path: &std::path::Path) -> Option<&SourceFile> {
-        self.files.get(&self.lookup_path(path))
+        self.files.get(self.lookup_path(path).as_ref())
     }
 
     /// Return the startup source inventory in stable path order.
@@ -490,17 +602,18 @@ impl SourceStore {
         files
     }
 
-    fn lookup_path(&self, path: &Path) -> PathBuf {
+    fn lookup_path<'a>(&'a self, path: &'a Path) -> Cow<'a, Path> {
+        if let Some((canonical, _)) = self.files.get_key_value(path) {
+            return Cow::Borrowed(canonical);
+        }
+        if let Some(root) = self.inventory_roots.get(path) {
+            return Cow::Borrowed(root);
+        }
         let path = lexical_normalize(path);
-        if self.files.contains_key(&path) || self.inventory_roots.iter().any(|root| root == &path) {
-            return path;
+        if self.files.contains_key(&path) || self.inventory_roots.contains(&path) {
+            return Cow::Owned(path);
         }
-        for (alias, canonical) in self.root_aliases.iter() {
-            if let Ok(relative) = path.strip_prefix(alias) {
-                return self.snapshot_file_spelling(lexical_normalize(&canonical.join(relative)));
-            }
-        }
-        self.snapshot_file_spelling(path)
+        Cow::Owned(self.snapshot_file_spelling(self.root_aliases.resolve(&path).unwrap_or(path)))
     }
 
     fn snapshot_file_spelling(&self, path: PathBuf) -> PathBuf {
@@ -587,7 +700,11 @@ impl SourceStore {
     /// Return the startup-captured text content of a source file.
     pub fn read_text(&self, path: &std::path::Path) -> Result<Arc<str>, std::io::Error> {
         let path = self.lookup_path(path);
-        match self.files.get(&path).and_then(SourceFile::cached_content) {
+        match self
+            .files
+            .get(path.as_ref())
+            .and_then(SourceFile::cached_content)
+        {
             Some(SourceContent::Text(content)) => Ok(Arc::clone(content)),
             Some(SourceContent::Bytes(_)) => Err(Error::new(
                 ErrorKind::InvalidData,
@@ -606,7 +723,11 @@ impl SourceStore {
     /// Read the raw bytes of a source file.
     pub fn read_bytes(&self, path: &std::path::Path) -> Result<Arc<Vec<u8>>, std::io::Error> {
         let path = self.lookup_path(path);
-        match self.files.get(&path).and_then(SourceFile::cached_content) {
+        match self
+            .files
+            .get(path.as_ref())
+            .and_then(SourceFile::cached_content)
+        {
             Some(SourceContent::Bytes(content)) => Ok(Arc::clone(content)),
             Some(SourceContent::Text(content)) => Ok(Arc::new(content.as_bytes().to_vec())),
             None => Err(Error::new(
@@ -624,7 +745,7 @@ impl SourceStore {
     /// Returns `None` if the file is not in the store.
     pub fn fingerprint(&self, path: &std::path::Path) -> Option<&SourceFingerprint> {
         self.files
-            .get(&self.lookup_path(path))
+            .get(self.lookup_path(path).as_ref())
             .map(|f| &f.fingerprint)
     }
 
@@ -753,7 +874,10 @@ mod tests {
 
         let store = SourceStore::discover_with_preinventoried_roots(
             &[],
-            &[(dependency_root.clone(), Arc::from([captured.clone()]))],
+            &[(
+                dependency_root.clone(),
+                Arc::from([canonicalize_or_owned(&captured)]),
+            )],
         )
         .unwrap();
 
@@ -799,5 +923,138 @@ mod tests {
                 .path,
             store.source_by_path(&actual).expect("actual path").path
         );
+    }
+    #[test]
+    fn alias_trie_matches_longest_prefix_scan() {
+        let mut aliases = vec![(PathBuf::new(), PathBuf::from("fallback"))];
+        for n in 0..128 {
+            aliases.push((
+                PathBuf::from(format!("/root/pkg{n}")),
+                PathBuf::from(format!("/physical/{n}")),
+            ));
+            aliases.push((
+                PathBuf::from(format!("/root/pkg{n}/nested")),
+                PathBuf::from(format!("/nested/{n}")),
+            ));
+        }
+        aliases.sort_by_key(|(alias, _)| std::cmp::Reverse(alias.components().count()));
+        let trie = SourceRootAliases::new(aliases.clone());
+        for path in [
+            "/root/pkg12/a.ets",
+            "/root/pkg12/nested/a.ets",
+            "/root/pkg1234/a.ets",
+            "/outside/a.ets",
+            "relative.ets",
+            "",
+        ] {
+            let path = Path::new(path);
+            let scanned = aliases.iter().find_map(|(alias, canonical)| {
+                path.strip_prefix(alias)
+                    .ok()
+                    .map(|relative| canonical.join(relative))
+            });
+            assert_eq!(trie.resolve(path), scanned, "{}", path.display());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nested_root_aliases_choose_longest_component_prefix_without_disk_reads() {
+        use arkdown_core::SourceInventory;
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let outer = temp.path().join("Outer");
+        let inner = temp.path().join("Inner");
+        std::fs::create_dir(&outer).unwrap();
+        std::fs::create_dir(&inner).unwrap();
+        std::fs::write(outer.join("Same.ets"), "outer").unwrap();
+        std::fs::write(inner.join("Same.ets"), "inner").unwrap();
+        symlink(&inner, outer.join("nested")).unwrap();
+        let alias = temp.path().join("Alias");
+        symlink(&outer, &alias).unwrap();
+        let store = SourceStore::discover(&[alias.clone(), alias.join("nested")]).unwrap();
+        let expected = std::fs::canonicalize(inner.join("Same.ets")).unwrap();
+        std::fs::remove_file(&alias).unwrap();
+        assert_eq!(
+            store.read_text(&alias.join("Same.ets")).unwrap().as_ref(),
+            "outer"
+        );
+        assert_eq!(
+            store
+                .read_text(&alias.join("nested/Same.ets"))
+                .unwrap()
+                .as_ref(),
+            "inner"
+        );
+        assert_eq!(
+            store.canonical_path(&alias.join("nested/Same.ets")),
+            Some(expected.as_path())
+        );
+        assert!(store
+            .source_by_path(&temp.path().join("AliasOther/Same.ets"))
+            .is_none());
+        assert!(store
+            .canonical_path(&alias.join("nested/../Same.ets"))
+            .is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_identity_matches_realpath_for_roots_files_and_symlinks() {
+        use arkdown_core::SourceInventory;
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("ActualPackage");
+        std::fs::create_dir(&root).unwrap();
+        let file = root.join("MixedCase.ets");
+        std::fs::write(&file, "export const value = 1;\r\n").unwrap();
+        symlink(&file, root.join("linked.ets")).unwrap();
+        let alias = temp.path().join("alias");
+        symlink(&root, &alias).unwrap();
+        let mut paths = SourceInventoryPaths::default();
+        for entry in walkdir::WalkDir::new(&alias).follow_links(false) {
+            let entry = entry.unwrap();
+            assert_eq!(
+                paths.canonical_file(&entry),
+                canonicalize_or_owned(entry.path())
+            );
+        }
+        let store = SourceStore::discover(std::slice::from_ref(&alias)).unwrap();
+        let canonical = std::fs::canonicalize(&file).unwrap();
+        assert_eq!(
+            store.files.len(),
+            1,
+            "nested links remain excluded from discovery"
+        );
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(
+            store.canonical_path(&alias.join("MixedCase.ets")),
+            Some(canonical.as_path())
+        );
+        assert_eq!(
+            store.source_text(&canonical).unwrap().as_ref(),
+            "export const value = 1;\r\n"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn directory_walk_preserves_realpath_case_from_case_insensitive_root() {
+        if SourceStore::compiler_uses_case_sensitive_file_names() {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("ActualPackage");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("MixedCase.ets"), "export {};").unwrap();
+        let mut paths = SourceInventoryPaths::default();
+        let wrong_case_root = temp.path().join("actualpackage");
+        for entry in walkdir::WalkDir::new(wrong_case_root) {
+            let entry = entry.unwrap();
+            assert_eq!(
+                paths.canonical_file(&entry),
+                canonicalize_or_owned(entry.path())
+            );
+        }
     }
 }

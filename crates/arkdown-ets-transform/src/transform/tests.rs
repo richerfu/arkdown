@@ -7472,3 +7472,46 @@ function emptyAnimatable() {}
         "AnimatableExtend keeps the declared function name: {output}"
     );
 }
+
+#[test]
+fn printer_worker_scratch_preserves_code_and_map_across_files() {
+    fn print(source: &str) -> (String, Option<String>) {
+        let allocator = oxc_allocator::Allocator::default();
+        let parsed = oxc_parser::Parser::new(&allocator, source, SourceType::ets()).parse();
+        assert!(parsed.diagnostics.is_empty());
+        let output = HvigorTypescriptPrinter::print_with_source_map(
+            &parsed.program,
+            oxc_codegen::CodegenOptions {
+                source_map_path: Some("/project/Index.ets".into()),
+                ..Default::default()
+            },
+            source,
+        );
+        (output.code, output.source_map)
+    }
+    let unicode = "// 注释\r\nexport const text = '你好😀';\r\nexport function f(x: number) { return { x }; }\r\n";
+    let large = (0..2048)
+        .map(|n| format!("export const value{n} = {{ text: 'v{n}', n: {n} }};\n"))
+        .collect::<String>();
+    let inputs = [unicode, large.as_str(), "", "export {};", unicode];
+    let cold = inputs
+        .iter()
+        .map(|source| {
+            let source = source.to_string();
+            std::thread::spawn(move || print(&source)).join().unwrap()
+        })
+        .collect::<Vec<_>>();
+    std::thread::scope(|scope| {
+        for _ in 0..4 {
+            let inputs = &inputs;
+            let cold = &cold;
+            scope.spawn(move || {
+                for _ in 0..2 {
+                    for (input, expected) in inputs.iter().zip(cold) {
+                        assert_eq!(&print(input), expected);
+                    }
+                }
+            });
+        }
+    });
+}

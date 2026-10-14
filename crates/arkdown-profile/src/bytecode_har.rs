@@ -759,12 +759,12 @@ impl ByteCodeHarScanEntry {
         issuer_root: &Path,
         graph: &arkdown_session::DependencyGraphSnapshot,
     ) -> Option<String> {
-        let issuer_root = canonicalize_or_owned(issuer_root);
+        let issuer_root = graph.canonical_package_root(issuer_root);
         graph
             .edges
             .iter()
             .find(|edge| {
-                canonicalize_or_owned(&edge.issuer_root) == issuer_root
+                graph.canonical_package_root(&edge.issuer_root) == issuer_root
                     && (edge.alias == dependency_name || edge.package_name == dependency_name)
             })
             .and_then(|edge| graph.nodes.get(&edge.package_name))
@@ -892,15 +892,15 @@ impl LoaderByteCodeHarFields {
 
         let mut files = Vec::new();
         for dep in deps {
-            let issuer_root = canonicalize_or_owned(&dep.package_root);
+            let issuer_root = graph.canonical_package_root(&dep.package_root);
             let dependency_node = graph.nodes.values().find(|node| {
                 node.package_root
                     .as_ref()
-                    .is_some_and(|root| canonicalize_or_owned(root) == issuer_root)
+                    .is_some_and(|root| graph.canonical_package_root(root) == issuer_root)
             });
             for edge in graph.edges.iter().filter(|edge| {
                 edge.kind != DependencyEdgeKind::DevDependency
-                    && canonicalize_or_owned(&edge.issuer_root) == issuer_root
+                    && graph.canonical_package_root(&edge.issuer_root) == issuer_root
             }) {
                 let Some(node) = graph.nodes.get(&edge.package_name) else {
                     continue;
@@ -985,27 +985,29 @@ impl LoaderByteCodeHarFields {
             .filter_map(|node| {
                 node.package_root
                     .as_ref()
-                    .map(|root| (canonicalize_or_owned(root), node))
+                    .map(|root| (graph.canonical_package_root(root).into_owned(), node))
             })
             .collect::<std::collections::BTreeMap<PathBuf, &DependencyNodeSnapshot>>();
         let mut walkable_issuers = graph
             .edges
             .iter()
             .filter(|edge| !edge.is_transitive)
-            .map(|edge| canonicalize_or_owned(&edge.issuer_root))
+            .map(|edge| graph.canonical_package_root(&edge.issuer_root).into_owned())
             .collect::<FxHashSet<_>>();
         let mut blockers_by_issuer = std::collections::BTreeMap::<PathBuf, String>::new();
         let mut seen_roots = FxHashSet::default();
         let mut grouped = IndexMap::<String, Vec<PathBuf>>::new();
 
         for edge in &graph.edges {
-            let issuer_root = canonicalize_or_owned(&edge.issuer_root);
+            let issuer_root = graph.canonical_package_root(&edge.issuer_root).into_owned();
             if edge.kind == DependencyEdgeKind::DevDependency
                 || !walkable_issuers.contains(&issuer_root)
             {
                 continue;
             }
-            let package_root = canonicalize_or_owned(&edge.package_root);
+            let package_root = graph
+                .canonical_package_root(&edge.package_root)
+                .into_owned();
             if !seen_roots.insert(package_root.clone()) {
                 continue;
             }
@@ -1873,6 +1875,59 @@ mod tests {
             fs::create_dir_all(parent).expect("create parent dirs");
         }
         fs::write(path, b"PANDA\x00\x00\x00").expect("write abc");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn graph_loader_fields_use_captured_roots_after_symlink_removal() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let issuer = tmp.path().join("Issuer");
+        let dependency = issuer.join("oh_modules/leaf");
+        write_file(
+            &issuer.join("oh-package.json5"),
+            r#"{name:'issuer', dependencies:{leaf:'1.0.0'}}"#,
+        );
+        write_file(
+            &dependency.join("oh-package.json5"),
+            r#"{name:'leaf', version:'1.2.3', main:'Index.ets'}"#,
+        );
+        write_file(&dependency.join("Index.ets"), "export const x = 1;");
+        let alias = tmp.path().join("Alias");
+        symlink(&issuer, &alias).unwrap();
+        let graph = arkdown_session::dependency_graph::builder::DependencyGraphBuilder::new(
+            "issuer",
+            tmp.path(),
+            &alias,
+        )
+        .build();
+        let expected_entry = graph.nodes["leaf"]
+            .compile_inputs
+            .other_compile_entry_file
+            .clone()
+            .unwrap();
+        std::fs::remove_file(&alias).unwrap();
+        assert_eq!(
+            ByteCodeHarScanEntry::dependency_version_from_graph("leaf", &alias, &graph).as_deref(),
+            Some("1.2.3")
+        );
+        let dep = ByteCodeHarScanEntry {
+            package_name: "issuer".into(),
+            package_root: alias,
+            abc_path: issuer.join("ets/modules.abc"),
+            is_har_dependency: true,
+            compatible_sdk_version: None,
+            compatible_sdk_version_stage: None,
+            source_maps_path: None,
+            insight_intent: None,
+            declaration_entry: Vec::new(),
+            extra_importees: Vec::new(),
+            main_entry: None,
+        };
+        assert_eq!(
+            LoaderByteCodeHarFields::collect_other_compile_files_from_graph(&[dep], &graph),
+            vec![expected_entry]
+        );
     }
 
     #[test]

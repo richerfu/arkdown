@@ -860,7 +860,8 @@ impl BuildCoordinator {
             .with_sdk_declaration_roots(sdk_declaration_roots)
             .with_custom_type_declaration_inputs(&loader_json.compiler_type_declaration_inputs)
             .build()?
-            .with_visual_sources(visual_sources);
+            .with_visual_sources(visual_sources)
+            .with_source_inventory(session.source_store.clone());
             tracing::info!(
               module = %module.name,
               elapsed_ms = transform_snapshot_start.elapsed().as_millis(),

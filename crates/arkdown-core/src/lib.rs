@@ -36,7 +36,9 @@ pub mod module;
 // are kept here until arkdown-resolver absorbs them (Phase 3).  Only those
 // specific types are re-exported.
 pub mod resolution;
+pub mod source_inventory;
 pub mod source_maps;
+pub use source_inventory::SourceInventory;
 
 // ---------------------------------------------------------------------------
 // Narrow re-exports (SPEC-048: no wildcard pub use)

@@ -33,6 +33,7 @@ oxc_span = { workspace = true }
 oxc_ast_visit = { workspace = true }
 oxc_syntax = { workspace = true }
 rolldown_sourcemap = { workspace = true }
+oxc_sourcemap = { workspace = true }
 string_wizard = { workspace = true }
 
 [dev-dependencies]
