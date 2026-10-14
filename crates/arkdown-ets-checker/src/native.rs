@@ -240,6 +240,13 @@ pub trait NativeOhSdkPluginHost: Send + Sync + std::fmt::Debug {
 }
 
 impl NativeCompilerOptions {
+    /// tsrs checker.rs:1856 enables SDK checks in strict only for strict-only
+    /// mode; arkts_diagnostics::get_arkts_normal_diagnostics disables normal
+    /// SDK checks after diagnostics when need_do_ark_ts_linter is enabled.
+    pub fn strict_pass_reads_sdk_sources(&self) -> bool {
+        !self.need_do_ark_ts_linter || self.strict_checker_only
+    }
+
     /// ets2bundle/compiler/tsconfig.json compiler options. Module resolution
     /// Node10 is passed verbatim; the native compiler owns its interpretation.
     pub fn arkts11(project_root: &Path) -> Self {
@@ -257,9 +264,8 @@ impl NativeCompilerOptions {
             paths_base_path: project_root.to_path_buf(),
             base_url: project_root.to_path_buf(),
             no_emit: true,
-            // ArkTS retains normal and strict pools together. Bound both
-            // pools to four checkers so duplicated inference state stays
-            // within the native service memory budget.
+            // Bound each normal/strict pool to four checkers so duplicated
+            // inference state stays within the native service memory budget.
             checkers: std::thread::available_parallelism()
                 .map_or(4, |count| count.get())
                 .min(4),
@@ -715,21 +721,31 @@ impl NativeTypeSession {
         &mut self,
         program: &NativeProgram,
     ) -> Result<NativeArktsNormalDiagnostics, NativeCheckError> {
-        self.check_result(program.arkts_normal_diagnostics())
+        let normal = self.check_result(program.arkts_normal_diagnostics())?;
+        // Compact immediately after normal diagnostics, before declaration/fact
+        // queries. Retained snapshots support any later SDK node reparses.
+        if let Some(host) = &self.sdk_plugin_host {
+            host.compact_session();
+        }
+        Ok(normal)
     }
     pub fn arkts_strict_diagnostics(
         &mut self,
         program: &NativeProgram,
         normal: NativeArktsNormalDiagnostics,
     ) -> Result<NativeArktsBuildDiagnostics, NativeCheckError> {
-        // Normal-pool diagnostics and transform facts are owned at this boundary.
-        // Strict may still query SDK plugins; keep their session and source snapshots.
-        if let Some(host) = &self.sdk_plugin_host {
-            host.compact_session();
-        }
         Ok(self
             .check_result(program.arkts_strict_diagnostics(normal))?
             .into())
+    }
+    /// The caller must own a one-shot program: WireReference sends each source
+    /// only once per session, so incremental sessions must retain JS snapshots.
+    pub fn release_sdk_sources_before_strict(&self, options: &NativeCompilerOptions) {
+        if !options.strict_pass_reads_sdk_sources()
+            && let Some(host) = &self.sdk_plugin_host
+        {
+            host.release_sources();
+        }
     }
     pub fn release_arkts_build_checkers(
         &mut self,

@@ -438,7 +438,7 @@ impl NativeOhSdkPluginHost for CompactingPluginHost {
 }
 
 #[test]
-fn native_compacts_sdk_session_between_normal_and_strict_without_waiting() {
+fn native_compacts_sdk_session_immediately_after_normal_without_waiting() {
     let project = tempfile::tempdir().unwrap();
     let sdk = project.path().join("api.d.ets");
     let app = project.path().join("entry.ets");
@@ -487,6 +487,14 @@ fn native_compacts_sdk_session_between_normal_and_strict_without_waiting() {
     let program = session.create_program(&roots, &options).unwrap();
     let normal = session.arkts_normal_diagnostics(&program).unwrap();
     let normal_end = host.operations.lock().unwrap().len();
+    assert_eq!(
+        host.operations.lock().unwrap().last().unwrap(),
+        "compactSession"
+    );
+    assert!(
+        host.compaction.lock().unwrap().is_some(),
+        "normal must enqueue without waiting"
+    );
     assert!(
         host.operations
             .lock()
@@ -503,9 +511,9 @@ fn native_compacts_sdk_session_between_normal_and_strict_without_waiting() {
             .count(),
         1
     );
-    assert_eq!(operations[normal_end], "compactSession");
+    assert_eq!(operations[normal_end - 1], "compactSession");
     assert!(
-        operations[normal_end + 1..].iter().any(|op| op == "syscap"),
+        operations[normal_end..].iter().any(|op| op == "syscap"),
         "{operations:?}"
     );
     assert_eq!(format!("{diagnostics:#?}"), format!("{baseline:#?}"));
@@ -537,6 +545,7 @@ fn native_skips_sdk_compaction_if_no_callback_initialized_the_session() {
         .create_program(&[app], &NativeCompilerOptions::arkts11(project.path()))
         .unwrap();
     let normal = session.arkts_normal_diagnostics(&program).unwrap();
+    session.release_sdk_sources_before_strict(&NativeCompilerOptions::arkts11(project.path()));
     session.arkts_strict_diagnostics(&program, normal).unwrap();
     drop(program);
     drop(session);

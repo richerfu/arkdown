@@ -16,10 +16,18 @@ impl PluginHost {
     }
 
     pub(super) fn compact_session(&self) {
+        self.submit_session_operation("compactSession");
+    }
+
+    pub(super) fn release_sources(&self) {
+        self.submit_session_operation("releaseSources");
+    }
+
+    fn submit_session_operation(&self, operation: &'static str) {
         let Some(&session_id) = self.session.get() else {
             return;
         };
-        // Enqueue before strict callbacks without waiting on the JS event loop.
+        // Enqueue at the owning compiler boundary without waiting on JS.
         self.host.submit_batch(
             vec![NativeOhSdkPluginRequest {
                 session_id,
@@ -27,23 +35,25 @@ impl PluginHost {
                 path: None,
                 function_name: None,
                 class_name: None,
-                operation: "compactSession".into(),
+                operation: operation.into(),
                 after: None,
                 args: Vec::new(),
             }],
             Box::new(move |result| match result {
                 Ok(responses) => match responses.as_slice() {
                     [response] if response.error.is_empty() => {
-                        tracing::info!(session_id, stats = ?response.stats, "SDK callback session compacted");
+                        tracing::info!(session_id, operation, stats = ?response.stats, "{}",
+                            if operation == "compactSession" { "SDK callback session compacted" }
+                            else { "SDK callback session sources released" });
                     }
                     [response] => tracing::warn!(
-                        session_id, error = %response.error, "SDK callback session compaction failed"
+                        session_id, operation, error = %response.error, "SDK callback session operation failed"
                     ),
                     _ => tracing::warn!(
-                        session_id, responses = responses.len(), "Invalid SDK session compaction response count"
+                        session_id, operation, responses = responses.len(), "Invalid SDK session operation response count"
                     ),
                 },
-                Err(error) => tracing::warn!(%error, session_id, "SDK callback session compaction failed"),
+                Err(error) => tracing::warn!(%error, session_id, operation, "SDK callback session operation failed"),
             }),
         );
     }
