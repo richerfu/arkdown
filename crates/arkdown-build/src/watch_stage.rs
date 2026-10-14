@@ -72,6 +72,7 @@ pub(super) struct WatchStageInput {
     pub(super) cache: bool,
     pub(super) package_plugins: Vec<PackagePlugin>,
     pub(super) node_executable: Option<PathBuf>,
+    pub(super) heap_reclaimer: Option<Arc<dyn crate::request::BuildHeapReclaimer>>,
     pub(super) sdk_plugin_host: Option<Arc<dyn arkdown_ets_checker::NativeOhSdkPluginHost>>,
     pub(super) pack_compress_level: Option<u32>,
     pub(super) align_device_types: Vec<String>,
@@ -155,6 +156,7 @@ impl WatchStageInput {
             package_plugins,
             node_executable: args.node_executable.clone(),
             sdk_plugin_host: args.sdk_plugin_host.clone(),
+            heap_reclaimer: args.heap_reclaimer.clone(),
             pack_compress_level: args.pack_compress_level,
             align_device_types: args.align_device_types.clone(),
             enable_sign_task: args.enable_sign_task,
@@ -216,6 +218,7 @@ impl WatchStage {
         let package_plugins = input.package_plugins;
         let node_executable = input.node_executable;
         let sdk_plugin_host = input.sdk_plugin_host;
+        let heap_reclaimer = input.heap_reclaimer;
         let pack_compress_level = input.pack_compress_level;
         let align_device_types = input.align_device_types;
         let enable_sign_task = input.enable_sign_task;
@@ -391,6 +394,7 @@ impl WatchStage {
                     parameter_file_override: parameter_file_override.clone(),
                     node_executable: node_executable.clone(),
                     sdk_plugin_host: sdk_plugin_host.clone(),
+                    heap_reclaimer: heap_reclaimer.clone(),
                     hvigor_cache_dir: hvigor_cache_dir.clone(),
                 };
                 let command =

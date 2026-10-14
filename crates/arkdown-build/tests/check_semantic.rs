@@ -1,6 +1,8 @@
 //! In-process tsrs check application regression. Uses linked compiler crates and the configured
 //! OpenHarmony SDK.
 
+#![recursion_limit = "256"]
+
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -58,6 +60,7 @@ fn check_reports_native_typescript_semantic_diagnostics() {
         is_crossplatform: false,
         ignore_crossplatform_check: false,
         sdk_plugin_host: sdk_plugin_host(),
+        heap_reclaimer: None,
     })
     .execute()
     .expect_err("native TypeScript checker must reject a TypeScript type mismatch");
@@ -83,6 +86,7 @@ fn check_defaults_to_native_typescript_without_a_node_runtime() {
         is_crossplatform: false,
         ignore_crossplatform_check: false,
         sdk_plugin_host: sdk_plugin_host(),
+        heap_reclaimer: None,
     })
     .execute()
     .expect("native TypeScript check must accept the SDK fixture without Node");
@@ -113,6 +117,7 @@ fn check_uses_module_target_and_its_source_owned_standard_library() {
             is_crossplatform: false,
             ignore_crossplatform_check: false,
             sdk_plugin_host: sdk_plugin_host(),
+            heap_reclaimer: None,
         })
         .execute();
         if target == "ES2017" {
@@ -162,6 +167,7 @@ fn check_applies_source_owned_flow_limit_and_invalid_range_default() {
             is_crossplatform: false,
             ignore_crossplatform_check: false,
             sdk_plugin_host: sdk_plugin_host(),
+            heap_reclaimer: None,
         })
         .execute();
         if limit == 1999 {
@@ -219,4 +225,46 @@ fn is_generated_fixture_path(relative: &Path) -> bool {
     relative.components().any(|component| {
     matches!(component, Component::Normal(name) if name == "build" || name == ".hvigor")
   })
+}
+
+#[derive(Debug, Default)]
+struct RecordingReclaimer(std::sync::Mutex<Vec<arkdown_build::request::BuildHeapBoundary>>);
+
+impl arkdown_build::request::BuildHeapReclaimer for RecordingReclaimer {
+    fn reclaim(&self, boundary: arkdown_build::request::BuildHeapBoundary) {
+        self.0.lock().unwrap().push(boundary);
+    }
+}
+
+#[tokio::test]
+async fn build_request_reclaims_after_checker_bundle_before_bytecode_and_pack() {
+    use arkdown_build::request::{BuildHeapBoundary, BuildRequest};
+    let temp = tempfile::tempdir().unwrap();
+    copy_fixture(&repo_root().join("tests/fixtures/minimal-hap"), temp.path()).unwrap();
+    fs::write(
+        temp.path().join("oh-package.json5"),
+        r#"{"modelVersion":"6.0.0","dependencies":{},"devDependencies":{}}"#,
+    )
+    .unwrap();
+    let reclaimer = Arc::new(RecordingReclaimer::default());
+    arkdown_build::BuildService::new(BuildRequest {
+        project: Some(temp.path().into()),
+        target: "hap".into(),
+        mode: "debug".into(),
+        sdk_plugin_host: sdk_plugin_host(),
+        heap_reclaimer: Some(reclaimer.clone()),
+        ..Default::default()
+    })
+    .execute()
+    .await
+    .unwrap();
+    assert_eq!(
+        *reclaimer.0.lock().unwrap(),
+        [
+            BuildHeapBoundary::CheckerReleased,
+            BuildHeapBoundary::BundleCompleted,
+            BuildHeapBoundary::BeforeBytecode,
+            BuildHeapBoundary::BeforePack,
+        ]
+    );
 }

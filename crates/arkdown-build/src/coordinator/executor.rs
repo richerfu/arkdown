@@ -2155,6 +2155,8 @@ impl BuildCoordinator {
             }
         }
 
+        args.reclaim_heap(crate::request::BuildHeapBoundary::BeforeBytecode);
+
         // ── Step 5: ABC compilation ───────────────────────────────────────
         let bytecode_output = self
             .run_bytecode_stage(CoordinatorBytecodeStageInput {
@@ -2186,6 +2188,8 @@ impl BuildCoordinator {
             return Ok(output);
         }
         let bundle_package_outs = bytecode_output.bundle_package_outs;
+
+        args.reclaim_heap(crate::request::BuildHeapBoundary::BeforePack);
 
         // ── Step 6: Packaging + Signing ───────────────────────────────────
         let mut output_paths = Vec::new();

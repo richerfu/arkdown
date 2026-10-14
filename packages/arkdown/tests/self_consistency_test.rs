@@ -257,6 +257,7 @@ impl SelfConsistencyOracle {
         build_version: None,
         node_executable: None,
         sdk_plugin_host: Some(Arc::new(UnavailableTestSdkPluginHost)),
+        heap_reclaimer: None,
         hvigor_cache_dir: None,
         hvigor_properties: Default::default(),
       })

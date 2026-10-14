@@ -62,10 +62,11 @@ fn initialize_async_runtime() {
       .ok()
       .and_then(|value| value.parse::<usize>().ok())
       .unwrap_or_else(|| num_cpus::get_physical() * 3 / 2);
-    let runtime = tokio::runtime::Builder::new_multi_thread()
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    heap_reclaimer::NapiHeapReclaimer::configure_runtime(&mut builder, worker_threads);
+    let runtime = builder
       .worker_threads(worker_threads)
       .max_blocking_threads(max_blocking_threads)
-      .thread_name("arkdown-rolldown-worker")
       .enable_all()
       .build()
       .expect("failed to initialize the Arkdown N-API runtime");
@@ -73,6 +74,7 @@ fn initialize_async_runtime() {
   }
 }
 
+mod heap_reclaimer;
 mod hvigor_plugin_plan;
 mod js_callback;
 mod plugin_module;
@@ -259,6 +261,7 @@ pub fn check<'a>(
     ignore_crossplatform_check: config.ignore_crossplatform_check.unwrap_or(false),
 
     sdk_plugin_host,
+    heap_reclaimer: Some(heap_reclaimer::NapiHeapReclaimer::from_env(&env)?),
   };
   let raw_promise = napi::bindgen_prelude::execute_tokio_future(
     env.raw(),
@@ -2555,6 +2558,7 @@ pub fn build<'a>(
     node_executable: node_executable.map(std::path::PathBuf::from),
 
     sdk_plugin_host,
+    heap_reclaimer: Some(heap_reclaimer::NapiHeapReclaimer::from_env(&env)?),
   };
 
   // 2. Spawn the async build and return a JS Promise.
@@ -2625,6 +2629,7 @@ struct PackageBuildArgs {
   cache: bool,
   node_executable: Option<std::path::PathBuf>,
   sdk_plugin_host: Option<Arc<dyn NativeOhSdkPluginHost>>,
+  heap_reclaimer: Option<Arc<dyn arkdown_build::request::BuildHeapReclaimer>>,
 }
 
 async fn run_build(
@@ -2691,6 +2696,7 @@ async fn run_build(
     parameter_file_override: None,
     node_executable: package_args.node_executable,
     sdk_plugin_host: package_args.sdk_plugin_host,
+    heap_reclaimer: package_args.heap_reclaimer,
     hvigor_cache_dir: Some(project_path.join(".hvigor")),
   };
 

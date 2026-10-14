@@ -442,6 +442,7 @@ impl BuildCoordinator {
                     component_metadata,
                 )
                 .with_sdk_plugin_host(args.sdk_plugin_host.clone())
+                .with_heap_reclaimer(args.heap_reclaimer.clone())
                 .with_compile_mode(&loader_json.compile_mode)
                 .with_sdk_plugin_project_config(&share.project_config)
                 .with_sdk_options(&session.sdk)?
@@ -1446,6 +1447,8 @@ impl BuildCoordinator {
 
             bundle_out.release_chunk_graph();
         }
+
+        args.reclaim_heap(crate::request::BuildHeapBoundary::BundleCompleted);
 
         Ok(CoordinatorBundleStageOutput {
             bundle_outs,

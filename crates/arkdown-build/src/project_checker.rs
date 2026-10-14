@@ -224,6 +224,7 @@ pub struct ProjectSemanticChecker<'a> {
     cache_path: Option<PathBuf>,
     check_declarations: bool,
     sdk_plugin_host: Option<Arc<dyn NativeOhSdkPluginHost>>,
+    heap_reclaimer: Option<Arc<dyn crate::request::BuildHeapReclaimer>>,
     crossplatform_dependencies: FxHashMap<(String, String), CrossplatformSourceCollection>,
 }
 
@@ -305,8 +306,17 @@ impl<'a> ProjectSemanticChecker<'a> {
             cache_path: None,
             check_declarations: false,
             sdk_plugin_host: None,
+            heap_reclaimer: None,
             crossplatform_dependencies: FxHashMap::default(),
         }
+    }
+
+    pub fn with_heap_reclaimer(
+        mut self,
+        reclaimer: Option<Arc<dyn crate::request::BuildHeapReclaimer>>,
+    ) -> Self {
+        self.heap_reclaimer = reclaimer;
+        self
     }
 
     pub fn with_sdk_plugin_host(mut self, host: Option<Arc<dyn NativeOhSdkPluginHost>>) -> Self {
@@ -675,6 +685,11 @@ impl<'a> ProjectSemanticChecker<'a> {
         let program = session.create_program(&prepared.roots, &prepared.options)?;
         let report = self.check_program(&mut session, &program, &prepared, mode)?;
         drop(program);
+        drop(session);
+        drop(prepared);
+        if let Some(reclaimer) = &self.heap_reclaimer {
+            reclaimer.reclaim(crate::request::BuildHeapBoundary::CheckerReleased);
+        }
         Ok(report)
     }
 
