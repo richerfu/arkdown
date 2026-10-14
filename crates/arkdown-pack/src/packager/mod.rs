@@ -574,11 +574,7 @@ impl Packager {
                 .filter(|so_path| so_path.exists())
                 .map(|so_path| (ArchivePath::native_lib(so_path), so_path.clone()))
                 .collect();
-            let compressed =
-                zip_writer::ParallelDeflatedFiles::compress(native_entries, self.compress_level)?;
-            for entry in compressed.entries() {
-                writer.add_precompressed_deflated(entry)?;
-            }
+            writer.add_files_deflated(native_entries, self.compress_level)?;
         } else {
             for so_path in &input.native_libs {
                 if so_path.exists() {
