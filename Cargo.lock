@@ -275,6 +275,7 @@ dependencies = [
 name = "arkdown-ets-checker"
 version = "0.1.0"
 dependencies = [
+ "arkdown-core",
  "arkdown-ohos-schema",
  "arkdown-path",
  "serde",

@@ -12,6 +12,92 @@ use arkdown_ets_checker::{
 };
 use serde_json::json;
 
+#[derive(Debug)]
+struct DeferredSource {
+    text: &'static str,
+    reads: std::sync::atomic::AtomicUsize,
+    fail_path: Option<PathBuf>,
+}
+
+impl arkdown_core::SourceTextHandle for DeferredSource {
+    fn size_bytes(&self) -> u64 {
+        self.text.len() as u64
+    }
+
+    fn read_text(&self) -> Result<Arc<str>, arkdown_core::SourceReadError> {
+        self.reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Some(path) = &self.fail_path {
+            return Err(arkdown_core::SourceReadError::ReloadIo {
+                path: path.clone(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "snapshot reload denied",
+                ),
+            });
+        }
+        Ok(Arc::from(self.text))
+    }
+}
+
+#[test]
+fn source_handles_materialize_only_program_reads_and_do_not_fall_back_on_error() {
+    use arkdown_core::SourceTextHandle;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let project = tempfile::tempdir().unwrap();
+    let app = project.path().join("entry.ets");
+    let unused = project.path().join("unused.ets");
+    // An unchecked disk fallback would suppress the captured-text type error.
+    std::fs::write(&app, "export {}; const n: number = 1;").unwrap();
+    let make = |text, fail_path| {
+        Arc::new(DeferredSource {
+            text,
+            reads: AtomicUsize::new(0),
+            fail_path,
+        })
+    };
+    let used = make("export {}; const n: number = 'wrong';", None);
+    let unneeded = make("invalid unused source", None);
+    let mut session = NativeTypeSession::start(project.path(), BTreeMap::new(), None)
+        .unwrap()
+        .with_source_handles(BTreeMap::from([
+            (app.clone(), used.clone() as Arc<dyn SourceTextHandle>),
+            (unused, unneeded.clone() as Arc<dyn SourceTextHandle>),
+        ]));
+    let options = NativeCompilerOptions::arkts11(project.path());
+    let program = session
+        .create_program(std::slice::from_ref(&app), &options)
+        .unwrap();
+    for _ in 0..2 {
+        assert!(
+            session
+                .diagnostics(&program)
+                .unwrap()
+                .iter()
+                .any(|diagnostic| diagnostic.code == 2322)
+        );
+    }
+    assert_eq!(used.reads.load(Ordering::Relaxed), 1);
+    assert_eq!(unneeded.reads.load(Ordering::Relaxed), 0);
+
+    let failed = make("", Some(app.clone()));
+    let mut session = NativeTypeSession::start(project.path(), BTreeMap::new(), None)
+        .unwrap()
+        .with_source_handles(BTreeMap::from([(
+            app.clone(),
+            failed as Arc<dyn SourceTextHandle>,
+        )]));
+    let error = match session.create_program(std::slice::from_ref(&app), &options) {
+        Err(error) => error,
+        Ok(_) => panic!(
+            "a failed captured read must not turn into missing-source diagnostics or disk content"
+        ),
+    };
+    assert!(
+        matches!(error, NativeCheckError::Source(error) if matches!(&*error, arkdown_core::SourceReadError::ReloadIo { path, .. } if path == &app))
+    );
+}
+
 #[test]
 fn compiler_options_preserve_oh_acronym_wire_names_and_checker_mode() {
     let project = tempfile::tempdir().unwrap();
