@@ -42,7 +42,7 @@ function dispatch(plugin, hookName, request = {}) {
   return plugin.__arkdownDispatchPluginHook({ hookName, ...request })
 }
 
-test('SDK checker plugins run in the build-scoped JavaScript compatibility host', () => {
+test('SDK checker plugins run in the build-scoped JavaScript compatibility host', (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'arkdown-sdk-plugin-'))
   const typescriptRoot = path.join(root, 'node_modules', 'typescript')
   fs.mkdirSync(typescriptRoot, { recursive: true })
@@ -154,8 +154,22 @@ exports.SyscapChecker = class {
   const otherSession = { ...syscapRequest, ...classDescriptor, sessionId: 8 }
   invoke(otherSession)
   const creationsBeforeRelease = require(typescriptRoot).sourceFileCreations()
+  const gcCalls = []
+  const previousGc = Object.getOwnPropertyDescriptor(global, 'gc')
+  const previousNodeVersion = Object.getOwnPropertyDescriptor(process.versions, 'node')
+  t.after(() => {
+    if (previousGc) Object.defineProperty(global, 'gc', previousGc)
+    else delete global.gc
+    Object.defineProperty(process.versions, 'node', previousNodeVersion)
+  })
+  Object.defineProperty(process.versions, 'node', { ...previousNodeVersion, value: '22.0.0' })
+  global.gc = (...args) => gcCalls.push(args)
   const { stats, ...released } = invoke({ sessionId: 7, operation: 'releaseSession', args: [] })
   assert.deepEqual(released, { found: true })
+  assert.deepEqual(gcCalls, [[{ type: 'major', execution: 'sync', flavor: 'last-resort' }]],
+    'session release requests page reclamation before the next build stage')
+  invoke({ sessionId: 7, operation: 'releaseSession', args: [] })
+  assert.equal(gcCalls.length, 1, 'an already released session does not collect again')
   assert.equal(stats.parses, 2)
   assert.equal(stats.reparses, 0)
   assert.equal(stats.batches, 3)
@@ -186,6 +200,12 @@ exports.SyscapChecker = class {
     creationsBeforeRelease + 2,
     'released ASTs must be recreated from a newly registered source',
   )
+  for (const [version, sessionId] of [['18.17.0', 8], ['20.0.0', 7]]) {
+    Object.defineProperty(process.versions, 'node', { ...previousNodeVersion, value: version })
+    invoke({ sessionId, operation: 'releaseSession', args: [] })
+    assert.deepEqual(gcCalls.at(-1), [], `Node ${version} release retains no-argument full GC`)
+  }
+  assert.equal(gcCalls.length, 3, 'both legacy sessions still trigger a full collection')
 
   assert.deepEqual(
     JSON.parse(
@@ -373,7 +393,11 @@ test('SDK batches collect only above 128 MiB and twice the last post-GC heap', (
   })
   t.mock.method(process, 'memoryUsage', () => ({ heapUsed: used }))
   const { invoke, request, calls } = sdkBatchFixture(t)
-  global.gc = () => { collectedAfter.push(calls.length); used = afterGc }
+  global.gc = (...args) => {
+    assert.deepEqual(args, [], 'repeated batch-threshold collections stay plain')
+    collectedAfter.push(calls.length)
+    used = afterGc
+  }
   const run = (heap) => {
     used = heap * mb
     const count = calls.length
