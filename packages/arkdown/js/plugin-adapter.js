@@ -90,18 +90,18 @@ function requireDefaultExport(value, file) {
   })
 }
 
-// 64 covers interleaved file batches; declarations remain resident. Eviction drops indexes too.
+// Bound app ASTs/indexes for interleaved batches; keep declarations.
 const SDK_PLUGIN_AST_LRU_CAPACITY = 64
 
 class SdkPluginHost {
   classInstances = new Map()
-  typeScriptModules = new Map()
+  typeScripts = new Map()
   sessions = new Map()
   heapAfterGc = process.memoryUsage().heapUsed
 
   session(id) {
     if (!this.sessions.has(id)) this.sessions.set(id, {
-      snapshots: new Map(), sourceFiles: new WeakMap(), sourceLru: new Map(), configs: new Map(), plugins: new Map(),
+      snapshots: new Map(), asts: new WeakMap(), lru: new Map(), configs: new Map(), plugins: new Map(),
       stats: { parses: 0, reparses: 0, batches: 0, peakCommitted: 0 },
     })
     return this.sessions.get(id)
@@ -109,50 +109,55 @@ class SdkPluginHost {
 
   loadTypeScript(loader) {
     if (!loader) throw new Error('SDK checker project config has no etsLoaderPath')
-    if (!this.typeScriptModules.has(loader)) {
-      this.typeScriptModules.set(loader, require(path.join(loader, 'node_modules', 'typescript')))
+    if (!this.typeScripts.has(loader)) {
+      this.typeScripts.set(loader, require(path.join(loader, 'node_modules', 'typescript')))
     }
-    return this.typeScriptModules.get(loader)
+    return this.typeScripts.get(loader)
   }
 
-  register(request) {
-    if (request.path !== undefined) this.session(request.sessionId).plugins.set(request.pluginId, {
-      path: request.path, functionName: request.functionName, className: request.className,
+  register(req) {
+    if (req.path !== undefined) this.session(req.sessionId).plugins.set(req.pluginId, {
+      path: req.path, functionName: req.functionName, className: req.className,
     })
   }
 
-  snapshot(sessionId, snapshot) {
-    const snapshots = this.session(sessionId).snapshots
-    let source = snapshots.get(snapshot.sourceId)
-    if (snapshot.source !== undefined && !source) {
-      source = { fileName: snapshot.fileName, source: snapshot.source, parses: 0 }
-      snapshots.set(snapshot.sourceId, source)
+  snapshot(id, span) {
+    const { snapshots } = this.session(id)
+    if (!snapshots) throw new Error(`SDK checker source ${id}:${span.sourceId}: sources were released before strict diagnostics`)
+    let source = snapshots.get(span.sourceId)
+    if (span.source !== undefined && !source) {
+      source = { fileName: span.fileName, source: span.source, parses: 0 }
+      snapshots.set(span.sourceId, source)
     }
-    if (!source || source.fileName !== snapshot.fileName) {
-      throw new Error(`SDK checker source ${sessionId}:${snapshot.sourceId} is not registered`)
-    }
+    if (!source || source.fileName !== span.fileName) throw new Error(`SDK checker source ${id}:${span.sourceId} is not registered`)
     return source
   }
 
-  projectConfig(sessionId, payload) {
-    const configs = this.session(sessionId).configs
-    let config = configs.get(payload.projectConfigId)
-    if (!config && payload.projectConfig !== undefined) {
-      config = { ...payload.projectConfig }
+  encodeText(text) {
+    // Rust str via JSON has no lone surrogates: UTF-8 preserves UTF-16 spans.
+    if (typeof text.source === 'string') text.source = Buffer.from(text.source)
+  }
+
+  projectConfig(id, ref) {
+    const { configs } = this.session(id)
+    let config = configs.get(ref.projectConfigId)
+    if (!config && ref.projectConfig !== undefined) {
+      config = { ...ref.projectConfig }
       for (const field of ['syscapIntersection', 'syscapUnion']) config[field + 'Set'] = new Set(config[field + 'Set'] || config[field] || [])
-      configs.set(payload.projectConfigId, config)
+      configs.set(ref.projectConfigId, config)
     }
-    if (!config) throw new Error(`SDK checker project config ${sessionId}:${payload.projectConfigId} is not registered`)
+    if (!config) throw new Error(`SDK checker project config ${id}:${ref.projectConfigId} is not registered`)
     return config
   }
 
-  locateNode(ts, sessionId, span) {
-    const text = this.snapshot(sessionId, span)
-    const session = this.session(sessionId)
-    let files = session.sourceFiles.get(ts)
-    if (!files) session.sourceFiles.set(ts, files = new Map())
+  locateNode(ts, id, span) {
+    const text = this.snapshot(id, span)
+    const session = this.session(id)
+    let files = session.asts.get(ts)
+    if (!files) session.asts.set(ts, files = new Map())
     let source = files.get(span.sourceId)
     if (!source) {
+      text.source = text.source.toString()
       const kind = span.fileName.endsWith('.ets') ? ts.ScriptKind.ETS ?? ts.ScriptKind.TS : ts.ScriptKind.TS
       source = {
         sourceFile: ts.createSourceFile(span.fileName, text.source, ts.ScriptTarget.Latest, true, kind),
@@ -162,7 +167,7 @@ class SdkPluginHost {
       if (text.parses++) session.stats.reparses++
       files.set(span.sourceId, source)
     }
-    const lru = session.sourceLru
+    const lru = session.lru
     if (!/\.d\.(ts|ets)$/.test(span.fileName)) {
       lru.delete(source)
       lru.set(source, { files, id: span.sourceId })
@@ -170,6 +175,7 @@ class SdkPluginHost {
         const [oldest, entry] = lru.entries().next().value
         entry.files.delete(entry.id)
         lru.delete(oldest)
+        this.encodeText(session.snapshots.get(entry.id))
       }
     }
     const sf = source.sourceFile
@@ -191,7 +197,7 @@ class SdkPluginHost {
     const locate = (node) => {
       if (node.pos > span.pos || node.end < span.end) return undefined
       let exact
-      // Raw spans prune the tree. Only end-matching candidates need a scanner.
+      // Prune by raw spans; scan only end-matching candidates.
       if (node.end === span.end) {
         const start = span.text === undefined || node.pos !== span.pos ? node.getStart(sf) : span.start
         if ((node.pos === span.pos || start === span.pos) && matches(node, start)) exact = node
@@ -217,22 +223,22 @@ class SdkPluginHost {
   }
 
   prepareNodes(requests) {
-    const prepared = new Array(requests.length)
+    const items = new Array(requests.length)
     const groups = new Map()
     // Register even short-circuited callbacks.
     for (let i = 0; i < requests.length; i++) {
-      const request = requests[i], payload = request.args[0]
-      this.register(request)
+      const req = requests[i], payload = req.args[0]
+      this.register(req)
       const item = {}
-      prepared[i] = item
+      items[i] = item
       try {
-        item.config = this.projectConfig(request.sessionId, payload)
-        for (const field of ['node', 'declaration']) this.snapshot(request.sessionId, payload[field])
+        item.config = this.projectConfig(req.sessionId, payload)
+        for (const field of ['node', 'declaration']) this.snapshot(req.sessionId, payload[field])
         const ts = this.loadTypeScript(item.config.etsLoaderPath)
         let bySource = groups.get(ts)
         if (!bySource) groups.set(ts, bySource = new Map())
         for (const field of ['node', 'declaration']) {
-          const key = `${request.sessionId}:${payload[field].sourceId}`
+          const key = `${req.sessionId}:${payload[field].sourceId}`
           if (!bySource.has(key)) bySource.set(key, [])
           bySource.get(key).push(i, field)
         }
@@ -241,18 +247,22 @@ class SdkPluginHost {
     // Group node lookup; keep callbacks in wire order.
     for (const [ts, bySource] of groups) for (const entries of bySource.values()) {
       for (let j = 0; j < entries.length; j += 2) {
-        const i = entries[j], field = entries[j + 1], request = requests[i]
-        const item = prepared[i]
-        try { item[field] = this.locateNode(ts, request.sessionId, request.args[0][field]) }
+        const i = entries[j], field = entries[j + 1], req = requests[i]
+        const item = items[i]
+        try { item[field] = this.locateNode(ts, req.sessionId, req.args[0][field]) }
         catch (error) { item[field + 'Error'] = error }
       }
     }
-    return prepared
+    return items
   }
 
-  collectHeap() {
+  collectHeap({ reduceMemory = false } = {}) {
     if (typeof global.gc === 'function') {
-      global.gc()
+      // ets_checker.ts::serviceChecker collects after releasing compiler state.
+      // Node 18/20 interpret unknown options as minor GC; use full GC there.
+      if (reduceMemory && Number.parseInt(process.versions.node, 10) >= 22) {
+        global.gc({ type: 'major', execution: 'sync', flavor: 'last-resort' })
+      } else global.gc()
       this.heapAfterGc = process.memoryUsage().heapUsed
     }
   }
@@ -283,19 +293,32 @@ class SdkPluginHost {
     return responses
   }
 
-  dispatch(request, prepared) {
-    if (request.operation === 'releaseSession') {
-      const stats = this.sessions.get(request.sessionId)?.stats
-      if (this.sessions.delete(request.sessionId)) this.collectHeap()
-      return { found: true, stats: stats && { ...stats, retainedCommitted: v8.getHeapStatistics().total_physical_size } }
+  dispatch(req, prepared) {
+    const { operation, sessionId, pluginId, args } = req
+    if (['compactSession', 'releaseSources', 'releaseSession'].includes(operation)) {
+      let session = this.sessions.get(sessionId)
+      if (!session) return { found: true }
+      const stats = session.stats
+      const committedBefore = v8.getHeapStatistics().total_physical_size
+      if (operation === 'releaseSession') this.sessions.delete(sessionId)
+      else {
+        // tsrs sends text once; retain snapshots for reparsing.
+        session.asts = new WeakMap()
+        session.lru.clear()
+        if (operation === 'releaseSources') session.snapshots = null
+        else for (const text of session.snapshots?.values() || []) this.encodeText(text)
+      }
+      session = null
+      this.collectHeap({ reduceMemory: true })
+      return { found: true, stats: { ...stats, committedBefore, retainedCommitted: v8.getHeapStatistics().total_physical_size } }
     }
     let callback
-    const classCall = ['prepareClass', 'syscap'].includes(request.operation)
+    const isClass = ['prepareClass', 'syscap'].includes(operation)
     try {
-      this.register(request)
-      const descriptor = this.session(request.sessionId).plugins.get(request.pluginId)
-      if (!descriptor) throw new Error(`SDK checker plugin ${request.sessionId}:${request.pluginId} is not registered`)
-      if (classCall) {
+      this.register(req)
+      const descriptor = this.session(sessionId).plugins.get(pluginId)
+      if (!descriptor) throw new Error(`SDK checker plugin ${sessionId}:${pluginId} is not registered`)
+      if (isClass) {
         const key = `${descriptor.path}\0${descriptor.className}`
         callback = this.classInstances.get(key)
         if (!callback) {
@@ -305,30 +328,30 @@ class SdkPluginHost {
         }
       } else callback = require(descriptor.path)[descriptor.functionName]
     } catch (error) { return { found: false, phase: 'load', error: String(error?.stack || error) } }
-    if (classCall ? !callback : typeof callback !== 'function') return { found: false }
-    if (request.operation === 'prepareClass') return { found: true }
+    if (isClass ? !callback : typeof callback !== 'function') return { found: false }
+    if (operation === 'prepareClass') return { found: true }
     try {
-      if (request.operation === 'syscap') {
+      if (operation === 'syscap') {
         if (typeof callback.check !== 'function') return { found: true, checkResult: false, checkMessage: '' }
         const { node, declaration, config, error, nodeError, declarationError } = prepared
         if (error || nodeError || declarationError) throw error || nodeError || declarationError
         if (!node || !declaration) {
-          const missing = request.args[0][!node ? 'node' : 'declaration']
+          const missing = args[0][!node ? 'node' : 'declaration']
           throw new Error(`Unable to recreate SDK checker source node ${missing.fileName}:${missing.pos}-${missing.end} (start ${missing.start})`)
         }
         const value = callback.check(node, declaration, config)
         return { found: true, checkResult: Boolean(value?.checkResult), checkMessage: String(value?.checkMessage ?? '') }
       }
-      if (request.operation === 'regex') {
+      if (operation === 'regex') {
         const regex = callback()
         if (!(regex instanceof RegExp)) return { found: true, matched: false }
         regex.lastIndex = 0
-        const match = regex.exec(request.args[0])
+        const match = regex.exec(args[0])
         return { found: true, matched: match !== null,
           groups: match === null ? [] : Array.from(match, (value) => value === undefined ? '' : String(value)) }
       }
-      const value = callback(...request.args)
-      if (request.operation === 'distribution') return {
+      const value = callback(...args)
+      if (operation === 'distribution') return {
         found: true, valid: Boolean(value?.valid), version: String(value?.version ?? ''), message: String(value?.message ?? ''),
       }
       return { found: true, result: Boolean(value?.result), message: String(value?.message ?? '') }

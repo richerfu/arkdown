@@ -33,6 +33,8 @@ pub use tsrs_api::embedded::{
 
 #[derive(Debug, thiserror::Error)]
 pub enum NativeCheckError {
+    #[error(transparent)]
+    Source(#[from] Arc<arkdown_core::SourceReadError>),
     #[error("ARKDOWN_TYPE_SERVICE: {0}")]
     Compiler(String),
     #[error("ARKDOWN_TYPE_SERVICE: {0}")]
@@ -184,7 +186,7 @@ pub struct NativeOhSdkPluginRequest {
 }
 
 /// Session-local JS parser counters and V8 committed heap samples after node
-/// preparation, plus the retained committed heap after session release/GC.
+/// preparation, plus committed heap before/after session compaction or release.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct NativeOhSdkPluginStats {
@@ -192,6 +194,7 @@ pub struct NativeOhSdkPluginStats {
     pub reparses: u64,
     pub batches: u64,
     pub peak_committed: u64,
+    pub committed_before: u64,
     pub retained_committed: u64,
 }
 
@@ -237,6 +240,13 @@ pub trait NativeOhSdkPluginHost: Send + Sync + std::fmt::Debug {
 }
 
 impl NativeCompilerOptions {
+    /// tsrs checker.rs:1856 enables SDK checks in strict only for strict-only
+    /// mode; arkts_diagnostics::get_arkts_normal_diagnostics disables normal
+    /// SDK checks after diagnostics when need_do_ark_ts_linter is enabled.
+    pub fn strict_pass_reads_sdk_sources(&self) -> bool {
+        !self.need_do_ark_ts_linter || self.strict_checker_only
+    }
+
     /// ets2bundle/compiler/tsconfig.json compiler options. Module resolution
     /// Node10 is passed verbatim; the native compiler owns its interpretation.
     pub fn arkts11(project_root: &Path) -> Self {
@@ -254,9 +264,8 @@ impl NativeCompilerOptions {
             paths_base_path: project_root.to_path_buf(),
             base_url: project_root.to_path_buf(),
             no_emit: true,
-            // ArkTS retains normal and strict pools together. Bound both
-            // pools to four checkers so duplicated inference state stays
-            // within the native service memory budget.
+            // Bound each normal/strict pool to four checkers so duplicated
+            // inference state stays within the native service memory budget.
             checkers: std::thread::available_parallelism()
                 .map_or(4, |count| count.get())
                 .min(4),
@@ -468,7 +477,9 @@ pub struct NativeTypeSession {
     compiler: Compiler,
     base: Arc<dyn FS>,
     sources: BTreeMap<PathBuf, Arc<str>>,
+    source_handles: BTreeMap<PathBuf, Arc<dyn arkdown_core::SourceTextHandle>>,
     deleted: BTreeSet<PathBuf>,
+    sdk_plugin_host: Option<Arc<plugins::PluginHost>>,
     sdk_plugin_executor: Option<Arc<dyn tsrs_core::OhSdkPluginExecutor>>,
     preprocessor: Option<Arc<dyn NativeSourcePreprocessor>>,
     snapshot: Option<Arc<SourceSnapshot>>,
@@ -487,16 +498,18 @@ impl NativeTypeSession {
             Arc::clone(&base),
             false,
         ))?;
-        let sdk_plugin_executor = sdk_plugin_host.map(|host| {
-            Arc::new(tsrs_api::embedded::SdkPluginExecutor::new(Arc::new(
-                plugins::PluginHost::new(host),
-            ))) as Arc<dyn tsrs_core::OhSdkPluginExecutor>
+        let sdk_plugin_host = sdk_plugin_host.map(|host| Arc::new(plugins::PluginHost::new(host)));
+        let sdk_plugin_executor = sdk_plugin_host.as_ref().map(|host| {
+            Arc::new(tsrs_api::embedded::SdkPluginExecutor::new(host.clone()))
+                as Arc<dyn tsrs_core::OhSdkPluginExecutor>
         });
         Ok(Self {
             compiler,
             base,
             sources,
+            source_handles: BTreeMap::new(),
             deleted: BTreeSet::new(),
+            sdk_plugin_host,
             sdk_plugin_executor,
             preprocessor: None,
             snapshot: None,
@@ -515,6 +528,28 @@ impl NativeTypeSession {
         self
     }
 
+    /// Supply fingerprint-backed identities for a one-shot program. Text is
+    /// leased only on first content access. Incremental sessions use the eager
+    /// source map so their previous-version equality/reuse semantics stay intact.
+    pub fn with_source_handles(
+        mut self,
+        handles: BTreeMap<PathBuf, Arc<dyn arkdown_core::SourceTextHandle>>,
+    ) -> Self {
+        assert!(
+            self.snapshot.is_none() && self.sources.is_empty(),
+            "source handles require a fresh one-shot session"
+        );
+        self.source_handles = handles;
+        self
+    }
+
+    fn check_result<T>(&self, result: tsrs_api::ApiResult<T>) -> Result<T, NativeCheckError> {
+        match &self.snapshot {
+            Some(snapshot) => snapshot.check_result(result),
+            None => result.map_err(Into::into),
+        }
+    }
+
     /// Initialized source versions from the current input snapshot. Callers
     /// select the current Program graph before consuming diagnostic names/facts.
     pub fn read_sources(&self) -> BTreeMap<PathBuf, NativeProcessedSource> {
@@ -529,19 +564,22 @@ impl NativeTypeSession {
         roots: &[PathBuf],
         options: &NativeCompilerOptions,
     ) -> Result<NativeProgram, NativeCheckError> {
-        let fs = Arc::new(SourceSnapshot::new(
-            Arc::clone(&self.base),
-            &self.sources,
-            &self.deleted,
-            self.preprocessor.clone(),
-            None,
-            &BTreeSet::new(),
-        )?);
-        let program = self.compiler.create_program(
+        let fs = Arc::new(
+            SourceSnapshot::new(
+                Arc::clone(&self.base),
+                &self.sources,
+                &self.deleted,
+                self.preprocessor.clone(),
+                None,
+                &BTreeSet::new(),
+            )?
+            .with_source_handles(&self.source_handles)?,
+        );
+        let program = fs.check_result(self.compiler.create_program(
             &options::CompilerPaths::many(roots)?,
             options.to_tsrs(self.sdk_plugin_executor.clone())?,
             fs.clone(),
-        )?;
+        ))?;
         self.snapshot = Some(fs);
         Ok(program)
     }
@@ -585,6 +623,9 @@ impl NativeTypeSession {
         sources: BTreeMap<PathBuf, Arc<str>>,
         observed: &NativeProgramFileChanges,
     ) -> Result<NativeProgram, NativeCheckError> {
+        if !self.source_handles.is_empty() {
+            return Err(NativeCheckError::Compiler("source handles are for one-shot programs; incremental programs require eager sources".into()));
+        }
         let mut changed = observed.changed.iter().cloned().collect::<BTreeSet<_>>();
         let mut created = observed.created.iter().cloned().collect::<BTreeSet<_>>();
         let mut deleted = observed.deleted.iter().cloned().collect::<BTreeSet<_>>();
@@ -661,39 +702,56 @@ impl NativeTypeSession {
         program: &NativeProgram,
         ty: &NativeType,
     ) -> Result<NativeType, NativeCheckError> {
-        Ok(program.non_nullable_type(ty)?)
+        self.check_result(program.non_nullable_type(ty))
     }
     pub fn type_symbol(
         &mut self,
         program: &NativeProgram,
         ty: &NativeType,
     ) -> Result<Option<NativeSymbol>, NativeCheckError> {
-        Ok(program.type_symbol(ty)?)
+        self.check_result(program.type_symbol(ty))
     }
     pub fn arkts_build_diagnostics(
         &mut self,
         program: &NativeProgram,
     ) -> Result<NativeArktsBuildDiagnostics, NativeCheckError> {
-        Ok(program.arkts_build_diagnostics()?.into())
+        Ok(self.check_result(program.arkts_build_diagnostics())?.into())
     }
     pub fn arkts_normal_diagnostics(
         &mut self,
         program: &NativeProgram,
     ) -> Result<NativeArktsNormalDiagnostics, NativeCheckError> {
-        Ok(program.arkts_normal_diagnostics()?)
+        let normal = self.check_result(program.arkts_normal_diagnostics())?;
+        // Compact immediately after normal diagnostics, before declaration/fact
+        // queries. Retained snapshots support any later SDK node reparses.
+        if let Some(host) = &self.sdk_plugin_host {
+            host.compact_session();
+        }
+        Ok(normal)
     }
     pub fn arkts_strict_diagnostics(
         &mut self,
         program: &NativeProgram,
         normal: NativeArktsNormalDiagnostics,
     ) -> Result<NativeArktsBuildDiagnostics, NativeCheckError> {
-        Ok(program.arkts_strict_diagnostics(normal)?.into())
+        Ok(self
+            .check_result(program.arkts_strict_diagnostics(normal))?
+            .into())
+    }
+    /// The caller must own a one-shot program: WireReference sends each source
+    /// only once per session, so incremental sessions must retain JS snapshots.
+    pub fn release_sdk_sources_before_strict(&self, options: &NativeCompilerOptions) {
+        if !options.strict_pass_reads_sdk_sources()
+            && let Some(host) = &self.sdk_plugin_host
+        {
+            host.release_sources();
+        }
     }
     pub fn release_arkts_build_checkers(
         &mut self,
         program: &NativeProgram,
     ) -> Result<(), NativeCheckError> {
-        Ok(program.release_arkts_build_checkers()?)
+        self.check_result(program.release_arkts_build_checkers())
     }
     pub fn diagnostics(
         &mut self,
@@ -701,8 +759,7 @@ impl NativeTypeSession {
     ) -> Result<Vec<NativeDiagnostic>, NativeCheckError> {
         let mut diagnostics = self.syntactic_diagnostics(program)?;
         diagnostics.extend(
-            program
-                .semantic_diagnostics()?
+            self.check_result(program.semantic_diagnostics())?
                 .into_iter()
                 .map(NativeDiagnostic::from),
         );
@@ -712,8 +769,8 @@ impl NativeTypeSession {
         &mut self,
         program: &NativeProgram,
     ) -> Result<Vec<NativeDiagnostic>, NativeCheckError> {
-        Ok(program
-            .arkts_linter_diagnostics()?
+        Ok(self
+            .check_result(program.arkts_linter_diagnostics())?
             .into_iter()
             .map(Into::into)
             .collect())
@@ -722,8 +779,8 @@ impl NativeTypeSession {
         &mut self,
         program: &NativeProgram,
     ) -> Result<Vec<NativeDiagnostic>, NativeCheckError> {
-        Ok(program
-            .syntactic_diagnostics()?
+        Ok(self
+            .check_result(program.syntactic_diagnostics())?
             .into_iter()
             .map(Into::into)
             .collect())
@@ -733,8 +790,8 @@ impl NativeTypeSession {
         program: &NativeProgram,
         files: &[PathBuf],
     ) -> Result<Vec<NativeDiagnostic>, NativeCheckError> {
-        Ok(program
-            .declaration_diagnostics(&options::CompilerPaths::many(files)?)?
+        Ok(self
+            .check_result(program.declaration_diagnostics(&options::CompilerPaths::many(files)?))?
             .into_iter()
             .map(Into::into)
             .collect())
@@ -743,14 +800,14 @@ impl NativeTypeSession {
         &mut self,
         program: &NativeProgram,
     ) -> Result<NativeProgramSourceGraph, NativeCheckError> {
-        Ok(program.source_graph()?)
+        self.check_result(program.source_graph())
     }
     pub fn annotation_transform_infos(
         &mut self,
         program: &NativeProgram,
         files: &[PathBuf],
     ) -> Result<Vec<NativeAnnotationTransformInfo>, NativeCheckError> {
-        Ok(program.annotation_transform_infos(&options::CompilerPaths::many(files)?)?)
+        self.check_result(program.annotation_transform_infos(&options::CompilerPaths::many(files)?))
     }
     pub fn arkts_transform_type_facts(
         &mut self,
@@ -758,10 +815,12 @@ impl NativeTypeSession {
         queries: &[NativeArktsTransformTypeQuery],
         sdk_api_use_files: &[PathBuf],
     ) -> Result<Vec<NativeArktsTransformTypeFacts>, NativeCheckError> {
-        Ok(program.arkts_transform_type_facts(
-            queries,
-            &options::CompilerPaths::many(sdk_api_use_files)?,
-        )?)
+        self.check_result(
+            program.arkts_transform_type_facts(
+                queries,
+                &options::CompilerPaths::many(sdk_api_use_files)?,
+            ),
+        )
     }
     pub fn types_at_positions(
         &mut self,
@@ -769,8 +828,10 @@ impl NativeTypeSession {
         file: &Path,
         positions: &[u32],
     ) -> Result<Vec<Option<NativeType>>, NativeCheckError> {
-        Ok(program
-            .types_at_positions(&options::CompilerPaths::one(file)?, positions)?
+        Ok(self
+            .check_result(
+                program.types_at_positions(&options::CompilerPaths::one(file)?, positions),
+            )?
             .into_iter()
             .map(Some)
             .collect())

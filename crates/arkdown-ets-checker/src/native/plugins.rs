@@ -14,6 +14,49 @@ impl PluginHost {
             session: OnceLock::new(),
         }
     }
+
+    pub(super) fn compact_session(&self) {
+        self.submit_session_operation("compactSession");
+    }
+
+    pub(super) fn release_sources(&self) {
+        self.submit_session_operation("releaseSources");
+    }
+
+    fn submit_session_operation(&self, operation: &'static str) {
+        let Some(&session_id) = self.session.get() else {
+            return;
+        };
+        // Enqueue at the owning compiler boundary without waiting on JS.
+        self.host.submit_batch(
+            vec![NativeOhSdkPluginRequest {
+                session_id,
+                plugin_id: 0,
+                path: None,
+                function_name: None,
+                class_name: None,
+                operation: operation.into(),
+                after: None,
+                args: Vec::new(),
+            }],
+            Box::new(move |result| match result {
+                Ok(responses) => match responses.as_slice() {
+                    [response] if response.error.is_empty() => {
+                        tracing::info!(session_id, operation, stats = ?response.stats, "{}",
+                            if operation == "compactSession" { "SDK callback session compacted" }
+                            else { "SDK callback session sources released" });
+                    }
+                    [response] => tracing::warn!(
+                        session_id, operation, error = %response.error, "SDK callback session operation failed"
+                    ),
+                    _ => tracing::warn!(
+                        session_id, operation, responses = responses.len(), "Invalid SDK session operation response count"
+                    ),
+                },
+                Err(error) => tracing::warn!(%error, session_id, operation, "SDK callback session operation failed"),
+            }),
+        );
+    }
 }
 impl Drop for PluginHost {
     fn drop(&mut self) {

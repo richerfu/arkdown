@@ -38,7 +38,7 @@ pub mod module;
 pub mod resolution;
 pub mod source_inventory;
 pub mod source_maps;
-pub use source_inventory::SourceInventory;
+pub use source_inventory::{SourceInventory, SourceReadError, SourceTextHandle};
 
 // ---------------------------------------------------------------------------
 // Narrow re-exports (SPEC-048: no wildcard pub use)

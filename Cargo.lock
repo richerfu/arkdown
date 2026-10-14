@@ -275,6 +275,7 @@ dependencies = [
 name = "arkdown-ets-checker"
 version = "0.1.0"
 dependencies = [
+ "arkdown-core",
  "arkdown-ohos-schema",
  "arkdown-path",
  "serde",
@@ -335,6 +336,7 @@ dependencies = [
  "arkdown-config",
  "arkdown-core",
  "arkdown-ets-checker",
+ "arkdown-ets-transform",
  "arkdown-path",
  "arkdown-profile",
  "arkdown-sign",
@@ -343,6 +345,7 @@ dependencies = [
  "hapsigner",
  "hex",
  "json5 0.4.1",
+ "libc",
  "libmimalloc-sys2",
  "mimalloc-safe",
  "napi",
@@ -350,6 +353,7 @@ dependencies = [
  "napi-derive",
  "num_cpus",
  "pbkdf2",
+ "rayon",
  "rolldown_common",
  "rolldown_plugin",
  "rolldown_sourcemap",
@@ -3953,7 +3957,7 @@ dependencies = [
 [[package]]
 name = "rolldown"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "anyhow",
  "append-only-vec",
@@ -4018,7 +4022,7 @@ dependencies = [
 [[package]]
 name = "rolldown_common"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "anyhow",
  "arcstr",
@@ -4053,7 +4057,7 @@ dependencies = [
 [[package]]
 name = "rolldown_dev_common"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "derive_more",
  "rolldown_common",
@@ -4064,7 +4068,7 @@ dependencies = [
 [[package]]
 name = "rolldown_devtools"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "blake3",
  "rolldown_devtools_action",
@@ -4078,7 +4082,7 @@ dependencies = [
 [[package]]
 name = "rolldown_devtools_action"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "serde",
  "ts-rs",
@@ -4087,7 +4091,7 @@ dependencies = [
 [[package]]
 name = "rolldown_ecmascript"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "arcstr",
  "oxc",
@@ -4100,7 +4104,7 @@ dependencies = [
 [[package]]
 name = "rolldown_ecmascript_utils"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "memchr",
  "oxc",
@@ -4111,7 +4115,7 @@ dependencies = [
 [[package]]
 name = "rolldown_error"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "anyhow",
  "arcstr",
@@ -4128,7 +4132,7 @@ dependencies = [
 [[package]]
 name = "rolldown_fs"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "oxc_resolver",
  "vfs",
@@ -4137,7 +4141,7 @@ dependencies = [
 [[package]]
 name = "rolldown_plugin"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "anyhow",
  "arcstr",
@@ -4167,7 +4171,7 @@ dependencies = [
 [[package]]
 name = "rolldown_plugin_asset_module"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "anyhow",
  "rolldown_common",
@@ -4180,7 +4184,7 @@ dependencies = [
 [[package]]
 name = "rolldown_plugin_chunk_import_map"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "arcstr",
  "rolldown_common",
@@ -4194,7 +4198,7 @@ dependencies = [
 [[package]]
 name = "rolldown_plugin_copy_module"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "anyhow",
  "arcstr",
@@ -4208,7 +4212,7 @@ dependencies = [
 [[package]]
 name = "rolldown_plugin_data_url"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "arcstr",
  "base64-simd",
@@ -4222,7 +4226,7 @@ dependencies = [
 [[package]]
 name = "rolldown_plugin_hmr"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "rolldown_common",
  "rolldown_plugin",
@@ -4231,7 +4235,7 @@ dependencies = [
 [[package]]
 name = "rolldown_plugin_lazy_compilation"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "anyhow",
  "arcstr",
@@ -4245,7 +4249,7 @@ dependencies = [
 [[package]]
 name = "rolldown_plugin_oxc_runtime"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "arcstr",
  "phf",
@@ -4257,7 +4261,7 @@ dependencies = [
 [[package]]
 name = "rolldown_plugin_utils"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "anyhow",
  "arcstr",
@@ -4275,7 +4279,7 @@ dependencies = [
 [[package]]
 name = "rolldown_resolver"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "anyhow",
  "arcstr",
@@ -4291,7 +4295,7 @@ dependencies = [
 [[package]]
 name = "rolldown_sourcemap"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "memchr",
  "oxc",
@@ -4301,7 +4305,7 @@ dependencies = [
 [[package]]
 name = "rolldown_std_utils"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "regex",
  "sugar_path",
@@ -4310,7 +4314,7 @@ dependencies = [
 [[package]]
 name = "rolldown_tracing"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "tracing",
  "tracing-subscriber",
@@ -4319,7 +4323,7 @@ dependencies = [
 [[package]]
 name = "rolldown_utils"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "anyhow",
  "arcstr",
@@ -4866,7 +4870,7 @@ checksum = "d08889ec5408683408db66ad89e0e1f93dff55c73a4ccc71c427d5b277ee47e6"
 [[package]]
 name = "string_wizard"
 version = "1.2.4"
-source = "git+https://github.com/ohos-rs/rolldown?rev=3aac1451ad00e255acfaaecb5c94fc2d52c31c03#3aac1451ad00e255acfaaecb5c94fc2d52c31c03"
+source = "git+https://github.com/ohos-rs/rolldown?rev=63112ceaa35eb24750a09d0ce3ae6f2f8074ed42#63112ceaa35eb24750a09d0ce3ae6f2f8074ed42"
 dependencies = [
  "memchr",
  "oxc_index",

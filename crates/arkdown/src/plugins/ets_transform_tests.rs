@@ -11,8 +11,8 @@ impl arkdown_core::SourceInventory for CapturedSource {
     fn canonical_path(&self, path: &Path) -> Option<&Path> {
         (path == self.path).then_some(self.path.as_path())
     }
-    fn source_text(&self, path: &Path) -> Option<Arc<str>> {
-        (path == self.path).then(|| Arc::clone(&self.text))
+    fn source_text(&self, path: &Path) -> Result<Option<Arc<str>>, arkdown_core::SourceReadError> {
+        Ok((path == self.path).then(|| Arc::clone(&self.text)))
     }
 }
 

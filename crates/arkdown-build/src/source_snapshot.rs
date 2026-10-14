@@ -276,7 +276,7 @@ impl<'a> TransformSourceSnapshotBuilder<'a> {
         }
 
         if let Some(source_store) = self.source_store.filter(|store| store.covers(&root)) {
-            for (path, source) in source_store.text_sources_under(&root) {
+            for (path, source) in source_store.text_sources_under(&root)? {
                 let kind = SourceClassifier::classify_path(path);
                 if matches!(mode, SourceRootMode::TransformAndDeclarations)
                     && kind.is_javascript_runtime()

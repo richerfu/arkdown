@@ -1,13 +1,17 @@
 //! In-process tsrs check application regression. Uses linked compiler crates and the configured
 //! OpenHarmony SDK.
 
+#![recursion_limit = "256"]
+
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use arkdown_build::check::{CheckApplication, CheckRequest};
 use arkdown_ets_checker::{
-    NativeCheckError, NativeOhSdkPluginHost, NativeOhSdkPluginRequest, NativeOhSdkPluginResponse,
+    NativeCheckError, NativeCompilerOptions, NativeOhSdkClassCheckPlugin,
+    NativeOhSdkPluginCompletion, NativeOhSdkPluginHost, NativeOhSdkPluginRequest,
+    NativeOhSdkPluginResponse, NativeTypeSession,
 };
 use walkdir::WalkDir;
 
@@ -58,6 +62,7 @@ fn check_reports_native_typescript_semantic_diagnostics() {
         is_crossplatform: false,
         ignore_crossplatform_check: false,
         sdk_plugin_host: sdk_plugin_host(),
+        heap_reclaimer: None,
     })
     .execute()
     .expect_err("native TypeScript checker must reject a TypeScript type mismatch");
@@ -83,6 +88,7 @@ fn check_defaults_to_native_typescript_without_a_node_runtime() {
         is_crossplatform: false,
         ignore_crossplatform_check: false,
         sdk_plugin_host: sdk_plugin_host(),
+        heap_reclaimer: None,
     })
     .execute()
     .expect("native TypeScript check must accept the SDK fixture without Node");
@@ -113,6 +119,7 @@ fn check_uses_module_target_and_its_source_owned_standard_library() {
             is_crossplatform: false,
             ignore_crossplatform_check: false,
             sdk_plugin_host: sdk_plugin_host(),
+            heap_reclaimer: None,
         })
         .execute();
         if target == "ES2017" {
@@ -162,6 +169,7 @@ fn check_applies_source_owned_flow_limit_and_invalid_range_default() {
             is_crossplatform: false,
             ignore_crossplatform_check: false,
             sdk_plugin_host: sdk_plugin_host(),
+            heap_reclaimer: None,
         })
         .execute();
         if limit == 1999 {
@@ -219,4 +227,203 @@ fn is_generated_fixture_path(relative: &Path) -> bool {
     relative.components().any(|component| {
     matches!(component, Component::Normal(name) if name == "build" || name == ".hvigor")
   })
+}
+
+#[derive(Default)]
+struct RecordingSdkHost {
+    operations: std::sync::Mutex<Vec<String>>,
+    pending: std::sync::Mutex<Vec<NativeOhSdkPluginCompletion>>,
+}
+
+impl std::fmt::Debug for RecordingSdkHost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RecordingSdkHost").finish_non_exhaustive()
+    }
+}
+
+impl NativeOhSdkPluginHost for RecordingSdkHost {
+    fn invoke_batch(
+        &self,
+        requests: Vec<NativeOhSdkPluginRequest>,
+    ) -> Result<Vec<NativeOhSdkPluginResponse>, NativeCheckError> {
+        Ok(requests
+            .into_iter()
+            .map(|request| {
+                assert!(
+                    !matches!(
+                        request.operation.as_str(),
+                        "compactSession" | "releaseSources"
+                    ),
+                    "session maintenance must not wait on JS"
+                );
+                self.operations
+                    .lock()
+                    .unwrap()
+                    .push(request.operation.clone());
+                NativeOhSdkPluginResponse {
+                    found: true,
+                    // An uncached load error makes strict-only retry syscap.
+                    error: if request.operation == "syscap" {
+                        "plugin unavailable".into()
+                    } else {
+                        String::new()
+                    },
+                    phase: "load".into(),
+                    ..Default::default()
+                }
+            })
+            .collect())
+    }
+
+    fn submit_batch(
+        &self,
+        requests: Vec<NativeOhSdkPluginRequest>,
+        complete: NativeOhSdkPluginCompletion,
+    ) {
+        if requests.len() == 1
+            && matches!(
+                requests[0].operation.as_str(),
+                "compactSession" | "releaseSources"
+            )
+        {
+            self.operations
+                .lock()
+                .unwrap()
+                .push(requests[0].operation.clone());
+            self.pending.lock().unwrap().push(complete);
+        } else {
+            complete(self.invoke_batch(requests));
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct RecordingReclaimer {
+    boundaries: std::sync::Mutex<Vec<arkdown_build::request::BuildHeapBoundary>>,
+    sdk: Arc<RecordingSdkHost>,
+}
+
+impl arkdown_build::request::BuildHeapReclaimer for RecordingReclaimer {
+    fn reclaim(&self, boundary: arkdown_build::request::BuildHeapBoundary) {
+        self.boundaries.lock().unwrap().push(boundary);
+        if boundary == arkdown_build::request::BuildHeapBoundary::NormalCheckerReleased {
+            assert_eq!(
+                self.sdk.operations.lock().unwrap().last().unwrap(),
+                "releaseSources",
+                "one-shot source release must be queued before pre-strict reclaim"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn build_request_reclaims_after_checker_bundle_before_bytecode_and_pack() {
+    use arkdown_build::request::{BuildHeapBoundary, BuildRequest};
+    let temp = tempfile::tempdir().unwrap();
+    copy_fixture(&repo_root().join("tests/fixtures/minimal-hap"), temp.path()).unwrap();
+    fs::write(
+        temp.path().join("oh-package.json5"),
+        r#"{"modelVersion":"6.0.0","dependencies":{},"devDependencies":{}}"#,
+    )
+    .unwrap();
+    let reclaimer = Arc::new(RecordingReclaimer::default());
+    arkdown_build::BuildService::new(BuildRequest {
+        project: Some(temp.path().into()),
+        target: "hap".into(),
+        mode: "debug".into(),
+        sdk_plugin_host: Some(reclaimer.sdk.clone()),
+        heap_reclaimer: Some(reclaimer.clone()),
+        ..Default::default()
+    })
+    .execute()
+    .await
+    .unwrap();
+    assert_eq!(
+        *reclaimer.boundaries.lock().unwrap(),
+        [
+            BuildHeapBoundary::NormalCheckerReleased,
+            BuildHeapBoundary::CheckerReleased,
+            BuildHeapBoundary::BundleCompleted,
+            BuildHeapBoundary::BeforeBytecode,
+            BuildHeapBoundary::BeforePack,
+        ]
+    );
+    let operations = reclaimer.sdk.operations.lock().unwrap();
+    assert_eq!(
+        operations
+            .iter()
+            .filter(|op| *op == "releaseSources")
+            .count(),
+        1
+    );
+    assert_eq!(operations.last().unwrap(), "releaseSession");
+}
+
+#[test]
+fn one_shot_sdk_source_release_respects_strict_only_and_disabled_linter_options() {
+    // Build configuration fixes strictCheckerOnly=false. Drive the same native
+    // boundary with explicit options to protect callers that enable strict-only.
+    for (linter, strict_only, release) in [
+        (true, false, true),
+        (true, true, false),
+        (false, false, false),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let sdk = temp.path().join("api.d.ets");
+        let app = temp.path().join("entry.ets");
+        let normal_app = temp.path().join("entry.ts");
+        let sources = std::collections::BTreeMap::from([
+            (
+                sdk.clone(),
+                Arc::from("/** @syscap base */ declare function sdkCall(): void;"),
+            ),
+            (app.clone(), Arc::from("export {}; sdkCall();")),
+            (normal_app.clone(), Arc::from("export {}; sdkCall();")),
+        ]);
+        let mut options = NativeCompilerOptions::arkts11(temp.path());
+        options.need_do_ark_ts_linter = linter;
+        options.strict_checker_only = strict_only;
+        options.ets_loader_path = temp.path().join("ets-loader");
+        options.oh_compile_mode = "moduleJson".into();
+        options.oh_device_types = vec!["phone".into()];
+        options.oh_syscap_intersection = vec!["base".into()];
+        options.oh_all_module_paths = vec![sdk.clone()];
+        options.oh_sdk_class_check_plugins = vec![NativeOhSdkClassCheckPlugin {
+            tag_name: "syscap".into(),
+            path: temp.path().join("checker.cjs"),
+            class_name: "Checker".into(),
+        }];
+        let host = Arc::new(RecordingSdkHost::default());
+        let mut session =
+            NativeTypeSession::start(temp.path(), sources, Some(host.clone())).unwrap();
+        let program = session
+            .create_program(&[sdk, app, normal_app], &options)
+            .unwrap();
+        let normal = session.arkts_normal_diagnostics(&program).unwrap();
+        assert!(host
+            .operations
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|op| op == "syscap"));
+        session.release_arkts_build_checkers(&program).unwrap();
+        session.release_sdk_sources_before_strict(&options);
+        let strict_start = host.operations.lock().unwrap().len();
+        session.arkts_strict_diagnostics(&program, normal).unwrap();
+        drop(program);
+        drop(session);
+        let operations = host.operations.lock().unwrap();
+        assert_eq!(
+            operations
+                .iter()
+                .filter(|op| *op == "releaseSources")
+                .count(),
+            usize::from(release)
+        );
+        assert_eq!(
+            operations[strict_start..].iter().any(|op| op == "syscap"),
+            strict_only
+        );
+        assert_eq!(operations.last().unwrap(), "releaseSession");
+    }
 }

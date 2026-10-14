@@ -6,11 +6,97 @@ use std::{
 
 use arkdown_ets_checker::{
     NativeArktsTransformTypeQuery, NativeCheckError, NativeCompilerOptions, NativeDiagnostic,
-    NativeOhSdkCheckPlugin, NativeOhSdkClassCheckPlugin, NativeOhSdkPluginHost,
-    NativeOhSdkPluginRequest, NativeOhSdkPluginResponse, NativeProgramFileChanges,
-    NativeTypeQueryRange, NativeTypeSession,
+    NativeOhSdkCheckPlugin, NativeOhSdkClassCheckPlugin, NativeOhSdkPluginCompletion,
+    NativeOhSdkPluginHost, NativeOhSdkPluginRequest, NativeOhSdkPluginResponse,
+    NativeProgramFileChanges, NativeTypeQueryRange, NativeTypeSession,
 };
 use serde_json::json;
+
+#[derive(Debug)]
+struct DeferredSource {
+    text: &'static str,
+    reads: std::sync::atomic::AtomicUsize,
+    fail_path: Option<PathBuf>,
+}
+
+impl arkdown_core::SourceTextHandle for DeferredSource {
+    fn size_bytes(&self) -> u64 {
+        self.text.len() as u64
+    }
+
+    fn read_text(&self) -> Result<Arc<str>, arkdown_core::SourceReadError> {
+        self.reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Some(path) = &self.fail_path {
+            return Err(arkdown_core::SourceReadError::ReloadIo {
+                path: path.clone(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "snapshot reload denied",
+                ),
+            });
+        }
+        Ok(Arc::from(self.text))
+    }
+}
+
+#[test]
+fn source_handles_materialize_only_program_reads_and_do_not_fall_back_on_error() {
+    use arkdown_core::SourceTextHandle;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let project = tempfile::tempdir().unwrap();
+    let app = project.path().join("entry.ets");
+    let unused = project.path().join("unused.ets");
+    // An unchecked disk fallback would suppress the captured-text type error.
+    std::fs::write(&app, "export {}; const n: number = 1;").unwrap();
+    let make = |text, fail_path| {
+        Arc::new(DeferredSource {
+            text,
+            reads: AtomicUsize::new(0),
+            fail_path,
+        })
+    };
+    let used = make("export {}; const n: number = 'wrong';", None);
+    let unneeded = make("invalid unused source", None);
+    let mut session = NativeTypeSession::start(project.path(), BTreeMap::new(), None)
+        .unwrap()
+        .with_source_handles(BTreeMap::from([
+            (app.clone(), used.clone() as Arc<dyn SourceTextHandle>),
+            (unused, unneeded.clone() as Arc<dyn SourceTextHandle>),
+        ]));
+    let options = NativeCompilerOptions::arkts11(project.path());
+    let program = session
+        .create_program(std::slice::from_ref(&app), &options)
+        .unwrap();
+    for _ in 0..2 {
+        assert!(
+            session
+                .diagnostics(&program)
+                .unwrap()
+                .iter()
+                .any(|diagnostic| diagnostic.code == 2322)
+        );
+    }
+    assert_eq!(used.reads.load(Ordering::Relaxed), 1);
+    assert_eq!(unneeded.reads.load(Ordering::Relaxed), 0);
+
+    let failed = make("", Some(app.clone()));
+    let mut session = NativeTypeSession::start(project.path(), BTreeMap::new(), None)
+        .unwrap()
+        .with_source_handles(BTreeMap::from([(
+            app.clone(),
+            failed as Arc<dyn SourceTextHandle>,
+        )]));
+    let error = match session.create_program(std::slice::from_ref(&app), &options) {
+        Err(error) => error,
+        Ok(_) => panic!(
+            "a failed captured read must not turn into missing-source diagnostics or disk content"
+        ),
+    };
+    assert!(
+        matches!(error, NativeCheckError::Source(error) if matches!(&*error, arkdown_core::SourceReadError::ReloadIo { path, .. } if path == &app))
+    );
+}
 
 #[test]
 fn compiler_options_preserve_oh_acronym_wire_names_and_checker_mode() {
@@ -285,6 +371,186 @@ fn native_delegates_sdk_since_callback_to_the_api_host() {
         .collect::<Vec<_>>();
     assert!(sdk_linter.is_empty(), "{linter:#?}");
     drop(program);
+}
+
+#[derive(Default)]
+struct CompactingPluginHost {
+    operations: Mutex<Vec<String>>,
+    compaction: Mutex<Option<NativeOhSdkPluginCompletion>>,
+}
+
+impl std::fmt::Debug for CompactingPluginHost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompactingPluginHost")
+            .finish_non_exhaustive()
+    }
+}
+
+impl NativeOhSdkPluginHost for CompactingPluginHost {
+    fn invoke_batch(
+        &self,
+        requests: Vec<NativeOhSdkPluginRequest>,
+    ) -> Result<Vec<NativeOhSdkPluginResponse>, NativeCheckError> {
+        Ok(requests
+            .into_iter()
+            .map(|request| {
+                assert_ne!(
+                    request.operation, "compactSession",
+                    "compaction must not wait on JS"
+                );
+                self.operations
+                    .lock()
+                    .unwrap()
+                    .push(request.operation.clone());
+                NativeOhSdkPluginResponse {
+                    found: true,
+                    // Missing plugins are nonfatal and uncached: strict must retry.
+                    error: if request.operation == "syscap" {
+                        "plugin unavailable".into()
+                    } else {
+                        String::new()
+                    },
+                    phase: "load".into(),
+                    ..Default::default()
+                }
+            })
+            .collect())
+    }
+
+    fn submit_batch(
+        &self,
+        requests: Vec<NativeOhSdkPluginRequest>,
+        complete: NativeOhSdkPluginCompletion,
+    ) {
+        if requests.len() == 1 && requests[0].operation == "compactSession" {
+            let request = &requests[0];
+            assert!(request.session_id > 0);
+            assert!(request.args.is_empty());
+            self.operations
+                .lock()
+                .unwrap()
+                .push(request.operation.clone());
+            assert!(self.compaction.lock().unwrap().replace(complete).is_none());
+        } else {
+            complete(self.invoke_batch(requests));
+        }
+    }
+}
+
+#[test]
+fn native_compacts_sdk_session_immediately_after_normal_without_waiting() {
+    let project = tempfile::tempdir().unwrap();
+    let sdk = project.path().join("api.d.ets");
+    let app = project.path().join("entry.ets");
+    let normal_app = project.path().join("normal.ts");
+    let sources = BTreeMap::from([
+        (
+            sdk.clone(),
+            Arc::from("/** @syscap base */ declare function sdkCall(): void;"),
+        ),
+        (
+            app.clone(),
+            Arc::from("export {}; sdkCall(); const bad: number = 'bad';"),
+        ),
+        (
+            normal_app.clone(),
+            Arc::from("export {}; sdkCall(); const bad: number = 'bad';"),
+        ),
+    ]);
+    let mut options = NativeCompilerOptions::arkts11(project.path());
+    // tsrs enables strict SDK callbacks in strict-checker-only mode. TS files
+    // still run in normal, while ETS files run in strict, exercising both sides.
+    options.strict_checker_only = true;
+    options.ets_loader_path = project.path().join("ets-loader");
+    options.oh_compile_mode = "moduleJson".into();
+    options.oh_device_types = vec!["phone".into()];
+    options.oh_syscap_intersection = vec!["base".into()];
+    options.oh_all_module_paths = vec![sdk.clone()];
+    options.oh_sdk_class_check_plugins = vec![NativeOhSdkClassCheckPlugin {
+        tag_name: "syscap".into(),
+        path: project.path().join("check.cjs"),
+        class_name: "Checker".into(),
+    }];
+    let roots = [sdk, app, normal_app];
+    let baseline_host = Arc::new(CompactingPluginHost::default());
+    let mut baseline_session =
+        NativeTypeSession::start(project.path(), sources.clone(), Some(baseline_host)).unwrap();
+    let baseline_program = baseline_session.create_program(&roots, &options).unwrap();
+    let baseline = baseline_session
+        .arkts_build_diagnostics(&baseline_program)
+        .unwrap();
+    assert!(!baseline.semantic_diagnostics.is_empty());
+
+    let host = Arc::new(CompactingPluginHost::default());
+    let mut session =
+        NativeTypeSession::start(project.path(), sources, Some(host.clone())).unwrap();
+    let program = session.create_program(&roots, &options).unwrap();
+    let normal = session.arkts_normal_diagnostics(&program).unwrap();
+    let normal_end = host.operations.lock().unwrap().len();
+    assert_eq!(
+        host.operations.lock().unwrap().last().unwrap(),
+        "compactSession"
+    );
+    assert!(
+        host.compaction.lock().unwrap().is_some(),
+        "normal must enqueue without waiting"
+    );
+    assert!(
+        host.operations
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|op| op == "syscap")
+    );
+    let diagnostics = session.arkts_strict_diagnostics(&program, normal).unwrap();
+    let operations = host.operations.lock().unwrap().clone();
+    assert_eq!(
+        operations
+            .iter()
+            .filter(|op| *op == "compactSession")
+            .count(),
+        1
+    );
+    assert_eq!(operations[normal_end - 1], "compactSession");
+    assert!(
+        operations[normal_end..].iter().any(|op| op == "syscap"),
+        "{operations:?}"
+    );
+    assert_eq!(format!("{diagnostics:#?}"), format!("{baseline:#?}"));
+    // The entire strict pass completes while JS compaction is still pending.
+    let complete = host.compaction.lock().unwrap().take().unwrap();
+    complete(Err(NativeCheckError::Compiler(
+        "compaction unavailable".into(),
+    )));
+    drop(program);
+    drop(session);
+    assert_eq!(
+        host.operations.lock().unwrap().last().unwrap(),
+        "releaseSession"
+    );
+}
+
+#[test]
+fn native_skips_sdk_compaction_if_no_callback_initialized_the_session() {
+    let project = tempfile::tempdir().unwrap();
+    let app = project.path().join("entry.ets");
+    let host = Arc::new(CompactingPluginHost::default());
+    let mut session = NativeTypeSession::start(
+        project.path(),
+        BTreeMap::from([(app.clone(), Arc::from("export {}; const n: number = 1;"))]),
+        Some(host.clone()),
+    )
+    .unwrap();
+    let program = session
+        .create_program(&[app], &NativeCompilerOptions::arkts11(project.path()))
+        .unwrap();
+    let normal = session.arkts_normal_diagnostics(&program).unwrap();
+    session.release_sdk_sources_before_strict(&NativeCompilerOptions::arkts11(project.path()));
+    session.arkts_strict_diagnostics(&program, normal).unwrap();
+    drop(program);
+    drop(session);
+    assert!(host.operations.lock().unwrap().is_empty());
+    assert!(host.compaction.lock().unwrap().is_none());
 }
 
 #[derive(Debug, Default)]

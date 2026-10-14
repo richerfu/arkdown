@@ -6,6 +6,7 @@ license = "MIT"
 description = "Native TypeScript API service for ArkTS project checking and type queries"
 
 [dependencies]
+arkdown-core = { workspace = true }
 tsrs_api = { workspace = true }
 tsrs_core = { workspace = true }
 tsrs_vfs = { workspace = true }

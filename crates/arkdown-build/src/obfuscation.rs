@@ -199,7 +199,7 @@ impl<'a> ModuleArkguardPlanBuilder<'a> {
             inventory_sources.extend(
                 self.session
                     .source_store
-                    .text_sources_under(&root)
+                    .text_sources_under(&root)?
                     .into_iter()
                     .filter(|(path, _)| Self::is_arkguard_source(path))
                     .map(|(path, source)| ObfuscationSource {
@@ -354,11 +354,10 @@ impl<'a> ModuleArkguardPlanBuilder<'a> {
             let Some(source) = self.session.source_store.source_by_path(&path) else {
                 continue;
             };
-            let Some(arkdown_session::SourceContent::Text(content)) = source.cached_content()
-            else {
+            let arkdown_session::SourceContent::Text(content) = source.cached_content()? else {
                 continue;
             };
-            let value: serde_json::Value = json5::from_str(content)?;
+            let value: serde_json::Value = json5::from_str(&content)?;
             Self::extend_string_array(&mut reserved, &value, "ReservedPropertyNames");
             Self::extend_string_array(&mut optimized, &value, "OptimizedReservedPropertyNames");
         }

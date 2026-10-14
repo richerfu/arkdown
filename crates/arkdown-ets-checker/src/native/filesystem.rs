@@ -2,6 +2,7 @@
 use super::{
     NativeCheckError, NativeProcessedSource, NativeSourcePreprocessor, options::CompilerPaths,
 };
+use arkdown_core::{SourceReadError, SourceTextHandle};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
@@ -17,29 +18,59 @@ pub(super) struct SourceSnapshot {
     preprocessor: Option<Arc<dyn NativeSourcePreprocessor>>,
     deleted: BTreeSet<String>,
     directories: BTreeMap<String, PathBuf>,
+    read_error: OnceLock<Arc<SourceReadError>>,
 }
 struct SnapshotSource {
     path: PathBuf,
-    raw: Arc<str>,
-    processed: OnceLock<NativeProcessedSource>,
+    raw: SourceInput,
+    processed: OnceLock<Result<SnapshotContent, Arc<SourceReadError>>>,
+}
+enum SourceInput {
+    Captured(Arc<str>),
+    Deferred(Arc<dyn SourceTextHandle>),
+}
+impl SourceInput {
+    fn size_bytes(&self) -> u64 {
+        match self {
+            Self::Captured(text) => text.len() as u64,
+            Self::Deferred(source) => source.size_bytes(),
+        }
+    }
+}
+struct SnapshotContent {
+    // Preprocessing can create different text. Retain the original lease too,
+    // so the store never evicts a source the program has actually read.
+    _raw: Arc<str>,
+    processed: NativeProcessedSource,
 }
 impl SnapshotSource {
     fn content(
         &self,
         preprocessor: Option<&dyn NativeSourcePreprocessor>,
-    ) -> &NativeProcessedSource {
-        self.processed.get_or_init(|| {
-            if Self::is_preprocess_source(&self.path)
-                && let Some(preprocessor) = preprocessor
-            {
-                preprocessor.preprocess(&self.path, Arc::clone(&self.raw))
-            } else {
-                NativeProcessedSource {
-                    text: Arc::clone(&self.raw),
-                    ..Default::default()
-                }
-            }
-        })
+    ) -> Result<&NativeProcessedSource, &Arc<SourceReadError>> {
+        self.processed
+            .get_or_init(|| {
+                let raw = match &self.raw {
+                    SourceInput::Captured(text) => Arc::clone(text),
+                    SourceInput::Deferred(source) => source.read_text().map_err(Arc::new)?,
+                };
+                let processed = if Self::is_preprocess_source(&self.path)
+                    && let Some(preprocessor) = preprocessor
+                {
+                    preprocessor.preprocess(&self.path, Arc::clone(&raw))
+                } else {
+                    NativeProcessedSource {
+                        text: Arc::clone(&raw),
+                        ..Default::default()
+                    }
+                };
+                Ok(SnapshotContent {
+                    _raw: raw,
+                    processed,
+                })
+            })
+            .as_ref()
+            .map(|content| &content.processed)
     }
     fn is_preprocess_source(path: &Path) -> bool {
         let name = path
@@ -76,12 +107,12 @@ impl SourceSnapshot {
                 let key = canonical(&path);
                 let source = previous
                     .and_then(|previous| previous.sources.get(&key))
-                    .filter(|source| source.raw.as_ref() == text.as_ref())
+                    .filter(|source| matches!(&source.raw, SourceInput::Captured(raw) if raw.as_ref() == text.as_ref()))
                     .map(Arc::clone)
                     .unwrap_or_else(|| {
                         Arc::new(SnapshotSource {
                             path: PathBuf::from(path),
-                            raw: Arc::clone(text),
+                            raw: SourceInput::Captured(Arc::clone(text)),
                             processed: OnceLock::new(),
                         })
                     });
@@ -120,7 +151,55 @@ impl SourceSnapshot {
             sources,
             deleted,
             directories,
+            read_error: OnceLock::new(),
         })
+    }
+
+    pub(super) fn with_source_handles(
+        mut self,
+        handles: &BTreeMap<PathBuf, Arc<dyn SourceTextHandle>>,
+    ) -> Result<Self, NativeCheckError> {
+        for (path, handle) in handles {
+            let path = PathBuf::from(CompilerPaths::one(path)?);
+            for directory in path.ancestors().skip(1) {
+                self.directories.insert(
+                    self.key(directory.to_str().unwrap()),
+                    directory.to_path_buf(),
+                );
+            }
+            self.sources.insert(
+                self.key(path.to_str().unwrap()),
+                Arc::new(SnapshotSource {
+                    path,
+                    raw: SourceInput::Deferred(Arc::clone(handle)),
+                    processed: OnceLock::new(),
+                }),
+            );
+        }
+        Ok(self)
+    }
+
+    // tsrs FS returns Option, not Result. Preserve a failed captured read and
+    // return its typed cause at the native API boundary, never a disk fallback
+    // or an apparent "missing module" diagnostic.
+    pub(super) fn check_result<T>(
+        &self,
+        result: tsrs_api::ApiResult<T>,
+    ) -> Result<T, NativeCheckError> {
+        if let Some(error) = self.read_error.get() {
+            return Err(NativeCheckError::Source(Arc::clone(error)));
+        }
+        result.map_err(Into::into)
+    }
+
+    fn content(&self, source: &SnapshotSource) -> Option<Arc<str>> {
+        match source.content(self.preprocessor.as_deref()) {
+            Ok(processed) => Some(Arc::clone(&processed.text)),
+            Err(error) => {
+                let _ = self.read_error.set(Arc::clone(error));
+                None
+            }
+        }
     }
     fn key(&self, path: &str) -> String {
         tsrs_core::tspath::get_canonical_file_name(
@@ -143,7 +222,8 @@ impl SourceSnapshot {
             source
                 .processed
                 .get()
-                .map(|processed| (source.path.clone(), processed.clone()))
+                .and_then(|content| content.as_ref().ok())
+                .map(|content| (source.path.clone(), content.processed.clone()))
         };
         self.sources
             .values()
@@ -175,9 +255,7 @@ impl FS for SourceSnapshot {
             return None;
         }
         if let Some(source) = self.known_source(path) {
-            return Some(Arc::clone(
-                &source.content(self.preprocessor.as_deref()).text,
-            ));
+            return self.content(source);
         }
         if self.preprocessor.is_none() || !SnapshotSource::is_preprocess_source(Path::new(path)) {
             return self.base.read_file_shared(path);
@@ -190,16 +268,14 @@ impl FS for SourceSnapshot {
                 let raw = self.base.read_file_shared(path)?;
                 let source = Arc::new(SnapshotSource {
                     path: PathBuf::from(path),
-                    raw,
+                    raw: SourceInput::Captured(raw),
                     processed: OnceLock::new(),
                 });
                 sources.insert(p, Arc::clone(&source));
                 source
             }
         };
-        Some(Arc::clone(
-            &source.content(self.preprocessor.as_deref()).text,
-        ))
+        self.content(&source)
     }
     fn directory_exists(&self, path: &str) -> bool {
         self.directories.contains_key(&self.key(path)) || self.base.directory_exists(path)
@@ -244,7 +320,7 @@ impl FS for SourceSnapshot {
         if let Some(source) = self.sources.get(&p) {
             return Some(FileInfo {
                 name: source.path.file_name()?.to_str()?.into(),
-                size: source.raw.len() as i64,
+                size: source.raw.size_bytes() as i64,
                 mode: FileMode::None,
                 mod_time: None,
             });

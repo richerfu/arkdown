@@ -234,8 +234,8 @@ impl<'a> CompileProjectConfigBuilder<'a> {
             .source_store
             .source_by_path(&mock_config_path)
         {
-            let content = match source.cached_content() {
-                Some(arkdown_session::SourceContent::Text(content)) => content.as_ref(),
+            let content = match source.cached_content()? {
+                arkdown_session::SourceContent::Text(content) => content,
                 _ => {
                     anyhow::bail!(
             "ARKDOWN_ETS_CHECKER_MOCK_CONFIG_CONTENT: mock config {} was not captured as UTF-8 text",
@@ -243,7 +243,7 @@ impl<'a> CompileProjectConfigBuilder<'a> {
           )
                 }
             };
-            let entries = json5::from_str::<indexmap::IndexMap<String, Value>>(content)
+            let entries = json5::from_str::<indexmap::IndexMap<String, Value>>(&content)
                 .with_context(|| format!("parse mock config {}", mock_config_path.display()))?;
             for (key, entry) in entries {
                 if let Some(source) = entry.get("source").and_then(Value::as_str) {

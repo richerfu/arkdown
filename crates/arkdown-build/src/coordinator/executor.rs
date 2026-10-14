@@ -6,6 +6,32 @@ use super::package_sign_stage::PackageSignStageInput;
 use super::*;
 
 impl BuildCoordinator {
+    pub(super) fn owns_source_text_lifecycle(&self, incremental: bool) -> bool {
+        // APP children and multiple targets share their parent's startup snapshot.
+        // Watch/hot-reload owners also retain their source leases across builds.
+        self.owns_task_cycle
+            && !incremental
+            && !self.args.watch
+            && !self.args.preview
+            && !self.args.action.is_hot_reload()
+            && self.args.watch_invalidation.is_none()
+    }
+
+    fn release_source_texts(&self, boundary: crate::request::BuildHeapBoundary, incremental: bool) {
+        use crate::request::BuildHeapBoundary;
+        if !self.owns_source_text_lifecycle(incremental) {
+            return;
+        }
+        let last_reader = if self.session.arkts_language_version.is_static() {
+            BuildHeapBoundary::BeforePack
+        } else {
+            BuildHeapBoundary::BeforeBytecode
+        };
+        if boundary == last_reader {
+            self.session.source_store.release_texts();
+        }
+    }
+
     /// Internal build pipeline implementation.
     ///
     /// Called by [`BuildCoordinator::execute`] after target selection.
@@ -2155,6 +2181,12 @@ impl BuildCoordinator {
             }
         }
 
+        self.release_source_texts(
+            crate::request::BuildHeapBoundary::BeforeBytecode,
+            bundle_runtime.is_some() || semantic_runtime.is_some(),
+        );
+        args.reclaim_heap(crate::request::BuildHeapBoundary::BeforeBytecode);
+
         // ── Step 5: ABC compilation ───────────────────────────────────────
         let bytecode_output = self
             .run_bytecode_stage(CoordinatorBytecodeStageInput {
@@ -2186,6 +2218,12 @@ impl BuildCoordinator {
             return Ok(output);
         }
         let bundle_package_outs = bytecode_output.bundle_package_outs;
+
+        self.release_source_texts(
+            crate::request::BuildHeapBoundary::BeforePack,
+            bundle_runtime.is_some() || semantic_runtime.is_some(),
+        );
+        args.reclaim_heap(crate::request::BuildHeapBoundary::BeforePack);
 
         // ── Step 6: Packaging + Signing ───────────────────────────────────
         let mut output_paths = Vec::new();

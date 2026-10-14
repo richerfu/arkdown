@@ -133,7 +133,7 @@ impl EtsTransformPlugin {
         let plan = self.plan.load();
         Ok(plan
             .sources
-            .module_source_text(path)
+            .module_source_text(path)?
             .map(|source| HookLoadOutput {
                 code: source.as_ref().into(),
                 ..Default::default()
@@ -389,9 +389,10 @@ impl Plugin for EtsTransformPlugin {
     ) -> impl std::future::Future<Output = HookLoadReturn> + Send {
         let result = self.load_source(args.id);
         if matches!(&result, Ok(Some(_))) {
-            // Rolldown only auto-registers disk loads. Preserve invalidation for
-            // snapshot-backed modules without re-reading their source.
-            ctx.add_watch_file(args.id);
+            // Match module_task.rs disk loading: only the global watch set.
+            // Self-dependencies allocate a sharded set per module and serve
+            // Rolldown HMR, which our snapshot/invalidation rebuilds do not use.
+            ctx.inner.add_watch_file(args.id);
         }
         ready(result)
     }

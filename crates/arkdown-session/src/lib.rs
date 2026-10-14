@@ -123,7 +123,7 @@ pub use session::{BuildSession, ModuleCompileContext};
 // source_store
 pub use source_store::{
     CodeResourceInventory, SourceContent, SourceFile, SourceFingerprint, SourceStore,
-    VisualSourceInventory, WorkerSourceInventory,
+    SourceTextCounts, VisualSourceInventory, WorkerSourceInventory,
 };
 
 // dependency_views

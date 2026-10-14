@@ -101,6 +101,13 @@ impl PrintScratch {
 pub struct HvigorTypescriptPrinter;
 
 impl HvigorTypescriptPrinter {
+    /// Release capacity-only buffers on the calling worker once a transform
+    /// stage has finished. Existing prints own their scratch locally, so this
+    /// cannot invalidate live ASTs or another worker's print.
+    pub fn release_thread_scratch() {
+        PRINT_SCRATCH.with(|scratch| *scratch.borrow_mut() = PrintScratch::default());
+    }
+
     pub(crate) fn print(program: &Program<'_>, options: CodegenOptions) -> String {
         Self::print_internal(
             program,
