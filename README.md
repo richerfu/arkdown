@@ -218,4 +218,13 @@ Release builds use Cargo `--locked`. Platform package assembly includes the
 compiler license and notices; the dependency revision stays in Cargo manifests. The N-API
 binding embeds the standard libraries; no separate compiler executable is shipped.
 
-The package is distributed as `UNLICENSED`.
+## License
+
+Original arkdown code is dual-licensed under the [MIT License](LICENSE-MIT) or
+the [Apache License, Version 2.0](LICENSE-APACHE), at your option
+(`MIT OR Apache-2.0`). Third-party material retains its original license.
+
+[Third-party notices](THIRD_PARTY_NOTICES.md) identify the compiler, bundler,
+signing dependencies, and OpenHarmony source references. Their license texts
+and upstream notices are included in `licenses/` and distributed with the
+main npm package and its native platform packages.

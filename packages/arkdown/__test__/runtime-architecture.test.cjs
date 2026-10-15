@@ -77,10 +77,12 @@ test('compiler crates are embedded and executable integration stays deleted', ()
   assert.match(workflow, /napi build .*-- --locked/)
   const lockfile = fs.readFileSync(path.join(root, 'Cargo.lock'), 'utf8')
   assert.ok(lockfile.includes(`git+https://github.com/ohos-rs/tsrs.git?rev=${pins[0][1]}#${pins[0][1]}`))
+  const licenseWriter = fs.readFileSync(path.join(packageRoot, 'scripts/package-licenses.cjs'), 'utf8')
   for (const notice of ['tsrs-LICENSE.txt', 'tsrs-NOTICE.txt']) {
     assert.ok(manifest.files.includes(notice))
     assert.ok(fs.statSync(path.join(packageRoot, notice)).size > 0)
-    assert.ok(manifest.scripts.artifacts.includes(notice))
+    assert.ok(licenseWriter.includes(notice))
+    assert.ok(manifest.scripts.artifacts.includes('scripts/package-licenses.cjs'))
   }
   assert.match(workflow, /cargo test --locked -p arkdown-ets-checker --test native/)
   assert.doesNotMatch(

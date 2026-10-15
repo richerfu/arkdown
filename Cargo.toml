@@ -26,6 +26,10 @@ members = [
     "packages/arkdown",
 ]
 
+[workspace.package]
+license = "MIT OR Apache-2.0"
+license-file = "LICENSE"
+
 [workspace.dependencies]
 tsrs_api = { git = "https://github.com/ohos-rs/tsrs.git", rev = "4d7e69df3847b5e0e5708b22a3f713082e5e6d02" }
 tsrs_core = { git = "https://github.com/ohos-rs/tsrs.git", rev = "4d7e69df3847b5e0e5708b22a3f713082e5e6d02" }

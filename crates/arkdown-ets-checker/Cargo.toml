@@ -1,8 +1,9 @@
 [package]
+license.workspace = true
+license-file.workspace = true
 name = "arkdown-ets-checker"
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
 description = "Native TypeScript API service for ArkTS project checking and type queries"
 
 [dependencies]

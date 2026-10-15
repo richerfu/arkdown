@@ -1,0 +1,256 @@
+[
+  {
+    "name": "oxc",
+    "repository": "https://github.com/ohos-rs/oxc",
+    "revision": "3f2b4b7d5338c10014c973e0db874ec2d3b655db",
+    "license": "MIT",
+    "kind": "linked dependency",
+    "files": [
+      {
+        "path": "oxc/LICENSE",
+        "source": "https://github.com/ohos-rs/oxc/blob/3f2b4b7d5338c10014c973e0db874ec2d3b655db/LICENSE",
+        "sha256": "95ced5ecf1133fbf41d409b5555c86c344f83f3b019926057ddbc07cfdcc27b3"
+      },
+      {
+        "path": "oxc/THIRD-PARTY-LICENSE",
+        "source": "https://github.com/ohos-rs/oxc/blob/3f2b4b7d5338c10014c973e0db874ec2d3b655db/THIRD-PARTY-LICENSE",
+        "sha256": "77643247a04db72198cea3c8b73751091821b4d51b5448fd65501127a9db5111"
+      }
+    ]
+  },
+  {
+    "name": "rolldown",
+    "repository": "https://github.com/ohos-rs/rolldown",
+    "revision": "63112ceaa35eb24750a09d0ce3ae6f2f8074ed42",
+    "license": "MIT",
+    "kind": "linked dependency",
+    "files": [
+      {
+        "path": "rolldown/LICENSE",
+        "source": "https://github.com/ohos-rs/rolldown/blob/63112ceaa35eb24750a09d0ce3ae6f2f8074ed42/LICENSE",
+        "sha256": "23ecfff35a5a2e80d92142f75228912c3b1abc4b5a8337a821ff4397e2f9f734"
+      },
+      {
+        "path": "rolldown/THIRD-PARTY-LICENSE",
+        "source": "https://github.com/ohos-rs/rolldown/blob/63112ceaa35eb24750a09d0ce3ae6f2f8074ed42/THIRD-PARTY-LICENSE",
+        "sha256": "a877291d800ed43692f3f9ae09d8e01cc6f7293ad39d43896059c188ffbb8b7c"
+      }
+    ]
+  },
+  {
+    "name": "tsrs",
+    "repository": "https://github.com/ohos-rs/tsrs.git",
+    "revision": "4d7e69df3847b5e0e5708b22a3f713082e5e6d02",
+    "license": "Apache-2.0",
+    "kind": "linked dependency",
+    "files": [
+      {
+        "path": "tsrs/LICENSE",
+        "source": "https://github.com/ohos-rs/tsrs/blob/4d7e69df3847b5e0e5708b22a3f713082e5e6d02/LICENSE",
+        "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47"
+      },
+      {
+        "path": "tsrs/NOTICE",
+        "source": "https://github.com/ohos-rs/tsrs/blob/4d7e69df3847b5e0e5708b22a3f713082e5e6d02/NOTICE",
+        "sha256": "1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118"
+      }
+    ]
+  },
+  {
+    "name": "hapsigner",
+    "repository": "https://github.com/harmony-contrib/hapsigner-rs.git",
+    "revision": "0b4a16ad812d679c28e9d5602f0b0a239f28c719",
+    "license": "MIT",
+    "kind": "linked dependency",
+    "files": [
+      {
+        "path": "hapsigner/LICENSE",
+        "source": "https://github.com/harmony-contrib/hapsigner-rs/blob/0b4a16ad812d679c28e9d5602f0b0a239f28c719/LICENSE",
+        "sha256": "8429d1f2b861d6f7d27f9cb9364af836f234d927f11da0c01455cea828a921c3"
+      },
+      {
+        "path": "hapsigner/THIRD_PARTY_NOTICES.md",
+        "source": "https://github.com/harmony-contrib/hapsigner-rs/blob/0b4a16ad812d679c28e9d5602f0b0a239f28c719/THIRD_PARTY_NOTICES.md",
+        "sha256": "69101df6884391a51245bd0e68f86f769952038efba5a4eea252ab27a444d640"
+      }
+    ]
+  },
+  {
+    "name": "typescript",
+    "repository": "https://github.com/ohos-rs/TypeScript.git",
+    "revision": "583e9e8b5450c6de49bbe985bd836d7941c7a961",
+    "license": "Apache-2.0",
+    "kind": "compiler source reference",
+    "files": [
+      {
+        "path": "typescript/LICENSE.txt",
+        "source": "https://github.com/ohos-rs/TypeScript/blob/583e9e8b5450c6de49bbe985bd836d7941c7a961/LICENSE.txt",
+        "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47"
+      },
+      {
+        "path": "typescript/NOTICE.txt",
+        "source": "https://github.com/ohos-rs/TypeScript/blob/583e9e8b5450c6de49bbe985bd836d7941c7a961/NOTICE.txt",
+        "sha256": "f5c708b59114507b8b27b48181b6883d106bbca0c1634bbee45b5e344237b66b"
+      }
+    ]
+  },
+  {
+    "name": "openharmony-ets2bundle",
+    "repository": "https://gitee.com/openharmony/developtools_ace_ets2bundle.git",
+    "revision": "45b3c707d1d173a6d81a514512ef2c831eaf3ec5",
+    "license": "Apache-2.0",
+    "kind": "build behavior and fixture reference",
+    "files": [
+      {
+        "path": "openharmony-ets2bundle/LICENSE",
+        "source": "https://gitee.com/openharmony/developtools_ace_ets2bundle/blob/45b3c707d1d173a6d81a514512ef2c831eaf3ec5/LICENSE",
+        "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+      }
+    ]
+  },
+  {
+    "name": "openharmony-runtime-core",
+    "repository": "https://gitee.com/openharmony/arkcompiler_runtime_core.git",
+    "revision": "579d0e2e582fa77462edb0504c62819bc9752d8a",
+    "license": "Apache-2.0",
+    "kind": "bytecode and runtime source reference",
+    "files": [
+      {
+        "path": "openharmony-runtime-core/LICENSE",
+        "source": "https://gitee.com/openharmony/arkcompiler_runtime_core/blob/579d0e2e582fa77462edb0504c62819bc9752d8a/LICENSE",
+        "sha256": "d59c05f05ecc2d0b0045b0ccd32fc52a62127c081276066e84657ee1a3dd539a"
+      }
+    ]
+  },
+  {
+    "name": "openharmony-sdk-js",
+    "repository": "https://gitee.com/openharmony/interface_sdk-js.git",
+    "revision": "c349adc73e2ec1f61f6fca489b5af059e3ed6999",
+    "license": "Apache-2.0",
+    "kind": "SDK declarations and schemas reference",
+    "files": [
+      {
+        "path": "openharmony-sdk-js/LICENCE.md",
+        "source": "https://gitee.com/openharmony/interface_sdk-js/blob/c349adc73e2ec1f61f6fca489b5af059e3ed6999/LICENCE.md",
+        "sha256": "d3f9f5254850ea32fd21ae45935b15c46c61a170cb1cd8c9bb3798b121d40cff"
+      },
+      {
+        "path": "openharmony-sdk-js/LICENSE",
+        "source": "https://gitee.com/openharmony/interface_sdk-js/blob/c349adc73e2ec1f61f6fca489b5af059e3ed6999/LICENSE",
+        "sha256": "0cec06e0e55fbc3dc5cee4fca9b607f66cb8f4e4dbcf3b3c013594dd156732e9"
+      }
+    ]
+  },
+  {
+    "name": "openharmony-sdk-c",
+    "repository": "https://gitcode.com/openharmony/interface_sdk_c.git",
+    "revision": "d3be61cb5a42d0b320a3761eedb4cb11805ca060",
+    "license": "Apache-2.0",
+    "kind": "native SDK source reference",
+    "files": [
+      {
+        "path": "openharmony-sdk-c/LICENSE",
+        "source": "https://gitcode.com/openharmony/interface_sdk_c/blob/d3be61cb5a42d0b320a3761eedb4cb11805ca060/LICENSE",
+        "sha256": "0cec06e0e55fbc3dc5cee4fca9b607f66cb8f4e4dbcf3b3c013594dd156732e9"
+      }
+    ]
+  },
+  {
+    "name": "openharmony-ets-utils",
+    "repository": "https://gitee.com/openharmony/commonlibrary_ets_utils.git",
+    "revision": "3803cc4d5ce30fe9702069ed8335fb1c9ad304f5",
+    "license": "Apache-2.0",
+    "kind": "ArkTS library source reference",
+    "files": [
+      {
+        "path": "openharmony-ets-utils/LICENSE",
+        "source": "https://gitee.com/openharmony/commonlibrary_ets_utils/blob/3803cc4d5ce30fe9702069ed8335fb1c9ad304f5/LICENSE",
+        "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+      }
+    ]
+  },
+  {
+    "name": "openharmony-manifest",
+    "repository": "https://gitee.com/openharmony/manifest.git",
+    "revision": "88874afe039b6467430f26bbf519b75910523ddc",
+    "license": "Apache-2.0",
+    "kind": "source inventory reference",
+    "files": [
+      {
+        "path": "openharmony-manifest/LICENSE",
+        "source": "https://gitee.com/openharmony/manifest/blob/88874afe039b6467430f26bbf519b75910523ddc/LICENSE",
+        "sha256": "9264a6b3c134511ccfcae48ed3808320688ae6933ec4fc547476a005095fc1ef"
+      }
+    ]
+  },
+  {
+    "name": "openharmony-arkcompiler-ets-frontend",
+    "repository": "https://github.com/openharmony/arkcompiler_ets_frontend",
+    "revision": "3271e689443900dbce3ad766c881f397a38e2c76",
+    "license": "Apache-2.0",
+    "kind": "build/compiler/resource/signing source reference",
+    "files": [
+      {
+        "path": "openharmony-arkcompiler-ets-frontend/LICENSE",
+        "source": "https://raw.githubusercontent.com/openharmony/arkcompiler_ets_frontend/3271e689443900dbce3ad766c881f397a38e2c76/LICENSE",
+        "sha256": "620d9862c267f840369b6cfe7632396dfdf374cd95cb4ffeab2eae3a545b8fae"
+      }
+    ]
+  },
+  {
+    "name": "openharmony-developtools-hapsigner",
+    "repository": "https://github.com/openharmony/developtools_hapsigner",
+    "revision": "24ef0c843d94f68d16975cac42e377f31def48c6",
+    "license": "Apache-2.0",
+    "kind": "build/compiler/resource/signing source reference",
+    "files": [
+      {
+        "path": "openharmony-developtools-hapsigner/LICENSE",
+        "source": "https://raw.githubusercontent.com/openharmony/developtools_hapsigner/24ef0c843d94f68d16975cac42e377f31def48c6/LICENSE",
+        "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+      }
+    ]
+  },
+  {
+    "name": "openharmony-security-appverify",
+    "repository": "https://github.com/openharmony/security_appverify",
+    "revision": "2aad634e874337fbce59687dfde4333e20018989",
+    "license": "Apache-2.0",
+    "kind": "build/compiler/resource/signing source reference",
+    "files": [
+      {
+        "path": "openharmony-security-appverify/LICENSE",
+        "source": "https://raw.githubusercontent.com/openharmony/security_appverify/2aad634e874337fbce59687dfde4333e20018989/LICENSE",
+        "sha256": "9264a6b3c134511ccfcae48ed3808320688ae6933ec4fc547476a005095fc1ef"
+      }
+    ]
+  },
+  {
+    "name": "openharmony-developtools-packing-tool",
+    "repository": "https://github.com/openharmony/developtools_packing_tool",
+    "revision": "b2aa3f6abcdb0f2d3a63f5220019465e412fe22a",
+    "license": "Apache-2.0",
+    "kind": "build/compiler/resource/signing source reference",
+    "files": [
+      {
+        "path": "openharmony-developtools-packing-tool/LICENSE",
+        "source": "https://raw.githubusercontent.com/openharmony/developtools_packing_tool/b2aa3f6abcdb0f2d3a63f5220019465e412fe22a/LICENSE",
+        "sha256": "0cec06e0e55fbc3dc5cee4fca9b607f66cb8f4e4dbcf3b3c013594dd156732e9"
+      }
+    ]
+  },
+  {
+    "name": "openharmony-developtools-global-resource-tool",
+    "repository": "https://github.com/openharmony/developtools_global_resource_tool",
+    "revision": "0e5c134b70d5d25c5b7690d072596775bb781fb1",
+    "license": "Apache-2.0",
+    "kind": "build/compiler/resource/signing source reference",
+    "files": [
+      {
+        "path": "openharmony-developtools-global-resource-tool/LICENSE",
+        "source": "https://raw.githubusercontent.com/openharmony/developtools_global_resource_tool/0e5c134b70d5d25c5b7690d072596775bb781fb1/LICENSE",
+        "sha256": "0cec06e0e55fbc3dc5cee4fca9b607f66cb8f4e4dbcf3b3c013594dd156732e9"
+      }
+    ]
+  }
+]

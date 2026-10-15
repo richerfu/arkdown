@@ -1,4 +1,6 @@
 [package]
+license.workspace = true
+license-file.workspace = true
 name = "arkdown-session"
 version = "0.1.0"
 edition = "2021"

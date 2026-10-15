@@ -12,7 +12,7 @@
     "url": "git+https://github.com/richerfu/arkdown.git",
     "directory": "packages/arkdown"
   },
-  "license": "UNLICENSED",
+  "license": "MIT OR Apache-2.0",
   "keywords": [
     "ohos",
     "harmonyos",
@@ -28,7 +28,14 @@
     "runtime-entry.d.ts",
     "README.md",
     "tsrs-LICENSE.txt",
-    "tsrs-NOTICE.txt"
+    "tsrs-NOTICE.txt",
+    "LICENSE",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+    "THIRD_PARTY_NOTICES.md",
+    "licenses/",
+    "scripts/package-licenses.cjs",
+    "NOTICE"
   ],
   "napi": {
     "binaryName": "arkdown",
@@ -47,7 +54,7 @@
     "provenance": true
   },
   "scripts": {
-    "artifacts": "napi artifacts && node -e \"const fs = require('node:fs'); for (const name of fs.readdirSync('npm')) { const dir = 'npm/' + name; const file = dir + '/package.json'; if (!fs.existsSync(file)) continue; const pkg = JSON.parse(fs.readFileSync(file)); for (const notice of ['tsrs-LICENSE.txt', 'tsrs-NOTICE.txt']) { fs.copyFileSync(notice, dir + '/' + notice); pkg.files = [...new Set([...pkg.files, notice])]; } fs.writeFileSync(file, JSON.stringify(pkg, null, 2) + '\\n'); }\"",
+    "artifacts": "napi artifacts && node scripts/package-licenses.cjs",
     "build": "napi build --platform --release",
     "build:debug": "napi build --platform",
     "test": "node --test",
@@ -57,7 +64,9 @@
     "format:rs": "cargo fmt",
     "prepublishOnly": "napi prepublish -t npm",
     "preversion": "napi build --platform && git add .",
-    "version": "napi version"
+    "version": "napi version",
+    "licenses": "node scripts/package-licenses.cjs",
+    "prepack": "node scripts/package-licenses.cjs"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.7.1",

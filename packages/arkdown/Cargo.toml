@@ -1,5 +1,7 @@
 
 [package]
+license.workspace = true
+license-file.workspace = true
 name = "arkdown-napi"
 version = "0.1.3"
 edition = "2021"

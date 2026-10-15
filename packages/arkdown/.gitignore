@@ -128,3 +128,10 @@ Cargo.lock
 !.yarn/sdks
 !.yarn/versions
 /npm
+# Materialized from the canonical workspace license bundle.
+/LICENSE
+/LICENSE-MIT
+/LICENSE-APACHE
+/NOTICE
+/THIRD_PARTY_NOTICES.md
+/licenses/
