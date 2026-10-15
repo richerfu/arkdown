@@ -94,7 +94,8 @@ jobs:
           pnpm --version
 
       - name: Check Rust formatting
-        run: cargo fmt --manifest-path ../../Cargo.toml --check
+        working-directory: .
+        run: cargo fmt --all --check
 
       - name: Clippy NAPI package
         run: cargo clippy --locked -p arkdown-napi --all-targets -- -D warnings
