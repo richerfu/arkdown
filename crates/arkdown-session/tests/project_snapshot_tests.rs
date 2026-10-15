@@ -189,8 +189,7 @@ fn api8_project_uses_package_json_and_node_modules_for_dependency_snapshots() {
     assert_eq!(
         dependency.package_root.as_deref(),
         Some(
-            dependency_root
-                .canonicalize()
+            arkdown_path::AbsPath::canonicalize(&dependency_root)
                 .expect("canonical dependency")
                 .as_path()
         )

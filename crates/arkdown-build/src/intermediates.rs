@@ -773,9 +773,12 @@ impl IntermediateArtifactWriter {
         let mut res_config = serde_json::Map::new();
         res_config.insert(
             "configPath".to_string(),
-            serde_json::Value::String(IntermediateArtifactWriter::path_string(
+            // Restool ResourcePack::InitConfigJson selects Stage mode by the
+            // filename. FileEntry::FilePath::Init splits only on the host
+            // separator, so this SDK input must retain native path separators.
+            serde_json::to_value(arkdown_path::lexical_normalize(
                 &module_layout.process_profile_module_json(),
-            )),
+            ))?,
         );
         res_config.insert(
             "packageName".to_string(),

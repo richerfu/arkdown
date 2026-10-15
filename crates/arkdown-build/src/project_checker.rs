@@ -1686,11 +1686,129 @@ mod tests {
     use std::{collections::BTreeMap, sync::Arc};
 
     use super::{NativeAnnotationFactsConverter, ProjectSemanticChecker};
-    use arkdown_ets_transform::{
-        transform::component_meta::ComponentMetadata, ArktsSourceSemanticCollector,
-    };
+    use arkdown_ets_transform::transform::component_meta::ComponentMetadata;
+    #[cfg(unix)]
+    use arkdown_ets_transform::ArktsSourceSemanticCollector;
     use arkdown_resolver::PackageResolutionPlan;
-    use arkdown_session::{SourceContent, SourceStore};
+    #[cfg(unix)]
+    use arkdown_session::SourceContent;
+    use arkdown_session::SourceStore;
+
+    #[test]
+    fn semantic_runtime_keeps_sdk_sources_across_rebuilds_and_reclaims_normal_pools() {
+        use super::{ProjectSemanticMode, ProjectSemanticRuntime};
+        use crate::request::{BuildHeapBoundary, BuildHeapReclaimer};
+        use arkdown_ets_checker::NativeOhSdkClassCheckPlugin;
+        use arkdown_ets_checker::{
+            NativeCheckError, NativeOhSdkPluginHost, NativeOhSdkPluginRequest,
+            NativeOhSdkPluginResponse,
+        };
+
+        #[derive(Debug, Default)]
+        struct RuntimeSdkHost {
+            operations: std::sync::Mutex<Vec<(u64, String)>>,
+            normal_reclaims: std::sync::atomic::AtomicUsize,
+        }
+        impl NativeOhSdkPluginHost for RuntimeSdkHost {
+            fn invoke_batch(
+                &self,
+                requests: Vec<NativeOhSdkPluginRequest>,
+            ) -> Result<Vec<NativeOhSdkPluginResponse>, NativeCheckError> {
+                Ok(requests
+                    .into_iter()
+                    .map(|request| {
+                        self.operations
+                            .lock()
+                            .unwrap()
+                            .push((request.session_id, request.operation.clone()));
+                        NativeOhSdkPluginResponse {
+                            found: true,
+                            check_result: true,
+                            ..Default::default()
+                        }
+                    })
+                    .collect())
+            }
+        }
+        impl BuildHeapReclaimer for RuntimeSdkHost {
+            fn reclaim(&self, boundary: BuildHeapBoundary) {
+                if boundary == BuildHeapBoundary::NormalCheckerReleased {
+                    self.normal_reclaims
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    assert!(!self
+                        .operations
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|(_, op)| op == "releaseSources"));
+                }
+            }
+        }
+
+        // The public OpenHarmony SDK has no vendor class-check plugins. Supply
+        // the callback contract directly so this lifetime regression is independent
+        // of whichever SDK happens to be installed on the test host.
+        let temp = tempfile::tempdir().unwrap();
+        let sdk = temp.path().join("api.d.ets");
+        let app = temp.path().join("entry.ts");
+        std::fs::write(
+            &sdk,
+            "/** @syscap base */ declare function sdkCall(): void;",
+        )
+        .unwrap();
+        std::fs::write(&app, "export {}; sdkCall();").unwrap();
+        let roots = [sdk.clone(), app];
+        let packages = PackageResolutionPlan::default();
+        let metadata = ComponentMetadata::default();
+        let host = Arc::new(RuntimeSdkHost::default());
+        let mut checker = ProjectSemanticChecker::new(temp.path(), &roots, &packages, &metadata)
+            .with_sdk_plugin_host(Some(host.clone()))
+            .with_heap_reclaimer(Some(host.clone()));
+        checker.builtin_declarations = vec![sdk.clone()];
+        checker.compiler_options.ets_loader_path = temp.path().join("ets-loader");
+        checker.compiler_options.oh_compile_mode = "moduleJson".into();
+        checker.compiler_options.oh_device_types = vec!["phone".into()];
+        checker.compiler_options.oh_syscap_intersection = vec!["base".into()];
+        checker.compiler_options.oh_all_module_paths = vec![sdk];
+        checker.compiler_options.oh_sdk_class_check_plugins = vec![NativeOhSdkClassCheckPlugin {
+            tag_name: "syscap".into(),
+            path: temp.path().join("checker.cjs"),
+            class_name: "Checker".into(),
+        }];
+        let mut semantic = ProjectSemanticRuntime::default();
+        for _ in 0..2 {
+            let report = checker
+                .run_for_build_with_runtime(&mut semantic, None, ProjectSemanticMode::Full)
+                .unwrap();
+            assert!(report.diagnostics.is_empty(), "{report:?}");
+        }
+        semantic.close();
+        let operations = host.operations.lock().unwrap();
+        assert_eq!(
+            host.normal_reclaims
+                .load(std::sync::atomic::Ordering::Relaxed),
+            2
+        );
+        assert_eq!(
+            operations
+                .iter()
+                .map(|(id, _)| id)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            1,
+            "both programs share one SDK session"
+        );
+        assert!(operations.iter().any(|(_, op)| op == "syscap"));
+        assert_eq!(
+            operations
+                .iter()
+                .filter(|(_, op)| op == "compactSession")
+                .count(),
+            2
+        );
+        assert!(!operations.iter().any(|(_, op)| op == "releaseSources"));
+        assert_eq!(&operations.last().unwrap().1, "releaseSession");
+    }
 
     #[derive(Debug)]
     struct SourceLeaseReclaimer {

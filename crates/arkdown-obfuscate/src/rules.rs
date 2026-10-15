@@ -23,7 +23,7 @@
 
 use std::path::Path;
 
-use arkdown_path::{lexical_normalize, ArtifactPathSerializer};
+use arkdown_path::{lexical_normalize, AbsPath, ArtifactPathSerializer};
 use rustc_hash::FxHashSet;
 
 use crate::ObfuscationError;
@@ -512,7 +512,7 @@ impl ObfuscationRules {
                 continue;
             }
             let resolved = if !contains_wildcards && resolved.exists() {
-                std::fs::canonicalize(&resolved)?
+                AbsPath::canonicalize(&resolved)?.into_path_buf()
             } else {
                 resolved
             };
@@ -543,7 +543,7 @@ impl ObfuscationRules {
                 continue;
             }
             let resolved = if !contains_wildcards && resolved.exists() {
-                std::fs::canonicalize(&resolved)?
+                AbsPath::canonicalize(&resolved)?.into_path_buf()
             } else {
                 resolved
             };

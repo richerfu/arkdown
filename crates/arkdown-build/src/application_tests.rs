@@ -13,123 +13,6 @@ use crate::unit_test::{
     UnitTestTemplateParams, UnitTestTemplateWriter, UNIT_TEST_REPLACE_PAGE,
 };
 
-#[tokio::test]
-async fn semantic_runtime_keeps_sdk_sources_across_rebuilds_and_reclaims_normal_pools() {
-    use crate::request::{BuildHeapBoundary, BuildHeapReclaimer, BuildRequest};
-    use arkdown_ets_checker::{
-        NativeCheckError, NativeOhSdkPluginHost, NativeOhSdkPluginRequest,
-        NativeOhSdkPluginResponse,
-    };
-
-    #[derive(Debug, Default)]
-    struct RuntimeSdkHost {
-        operations: std::sync::Mutex<Vec<(u64, String)>>,
-        normal_reclaims: std::sync::atomic::AtomicUsize,
-    }
-    impl NativeOhSdkPluginHost for RuntimeSdkHost {
-        fn invoke_batch(
-            &self,
-            requests: Vec<NativeOhSdkPluginRequest>,
-        ) -> Result<Vec<NativeOhSdkPluginResponse>, NativeCheckError> {
-            Ok(requests
-                .into_iter()
-                .map(|request| {
-                    self.operations
-                        .lock()
-                        .unwrap()
-                        .push((request.session_id, request.operation.clone()));
-                    NativeOhSdkPluginResponse {
-                        found: true,
-                        check_result: true,
-                        ..Default::default()
-                    }
-                })
-                .collect())
-        }
-    }
-    impl BuildHeapReclaimer for RuntimeSdkHost {
-        fn reclaim(&self, boundary: BuildHeapBoundary) {
-            if boundary == BuildHeapBoundary::NormalCheckerReleased {
-                self.normal_reclaims
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                assert!(!self
-                    .operations
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .any(|(_, op)| op == "releaseSources"));
-            }
-        }
-    }
-
-    let fixture =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/minimal-hap");
-    let temp = TempDir::new().unwrap();
-    for entry in walkdir::WalkDir::new(&fixture)
-        .into_iter()
-        .filter_entry(|entry| entry.file_name() != "build" && entry.file_name() != ".hvigor")
-    {
-        let entry = entry.unwrap();
-        let destination = temp
-            .path()
-            .join(entry.path().strip_prefix(&fixture).unwrap());
-        if entry.file_type().is_dir() {
-            std::fs::create_dir_all(destination).unwrap();
-        } else if entry.file_type().is_file() {
-            std::fs::copy(entry.path(), destination).unwrap();
-        }
-    }
-    std::fs::write(
-        temp.path().join("oh-package.json5"),
-        r#"{"modelVersion":"6.0.0","dependencies":{},"devDependencies":{}}"#,
-    )
-    .unwrap();
-    let host = Arc::new(RuntimeSdkHost::default());
-    let mut bundle = crate::bundle_plan::BundleRuntime::default();
-    let mut semantic = crate::project_checker::ProjectSemanticRuntime::default();
-    for _ in 0..2 {
-        crate::BuildService::new(BuildRequest {
-            project: Some(temp.path().into()),
-            target: "hap".into(),
-            mode: "debug".into(),
-            sdk_plugin_host: Some(host.clone()),
-            heap_reclaimer: Some(host.clone()),
-            cache: false,
-            ..Default::default()
-        })
-        .execute_with_runtimes(&mut bundle, &mut semantic)
-        .await
-        .unwrap();
-    }
-    semantic.close();
-    bundle.close().await.unwrap();
-    let operations = host.operations.lock().unwrap();
-    assert_eq!(
-        host.normal_reclaims
-            .load(std::sync::atomic::Ordering::Relaxed),
-        2
-    );
-    assert_eq!(
-        operations
-            .iter()
-            .map(|(id, _)| id)
-            .collect::<std::collections::BTreeSet<_>>()
-            .len(),
-        1,
-        "both programs share one SDK session"
-    );
-    assert!(operations.iter().any(|(_, op)| op == "syscap"));
-    assert_eq!(
-        operations
-            .iter()
-            .filter(|(_, op)| op == "compactSession")
-            .count(),
-        2
-    );
-    assert!(!operations.iter().any(|(_, op)| op == "releaseSources"));
-    assert_eq!(&operations.last().unwrap().1, "releaseSession");
-}
-
 #[test]
 fn make_pack_info_form_profiles_follow_form_widget_module_source_set() {
     let temp = TempDir::new().expect("create form resource fixture root");
@@ -766,7 +649,9 @@ fn pkg_sdk_info_matches_hvigor_tree_order_types_and_hsp_barrier() {
     use arkdown_session::PackageSnapshot;
 
     let temp = TempDir::new().expect("create pkg sdk info fixture root");
-    let project_root = temp.path().canonicalize().expect("canonical project root");
+    let project_root = arkdown_path::AbsPath::canonicalize(temp.path())
+        .expect("canonical project root")
+        .into_path_buf();
     let host_root = project_root.join("entry");
     let package = |root: &std::path::Path, name: &str, version: &str| {
         std::fs::create_dir_all(root).expect("create package root");
@@ -937,8 +822,8 @@ const GOLDEN_UNIT_TEST_DIR: &str = concat!(
 
 #[test]
 fn unit_test_template_matches_hvigor_generated_files_byte_for_byte() {
-    let module_path = std::fs::canonicalize(
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let module_path = arkdown_path::AbsPath::canonicalize(
+        &std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
             .join("tests")
@@ -946,7 +831,8 @@ fn unit_test_template_matches_hvigor_generated_files_byte_for_byte() {
             .join("minimal-hap")
             .join("entry"),
     )
-    .expect("minimal-hap entry fixture must exist");
+    .expect("minimal-hap entry fixture must exist")
+    .into_path_buf();
     let serialized_module_path =
         arkdown_path::ArtifactPathSerializer::path_to_slash_string(&module_path)
             .expect("fixture path must serialize");

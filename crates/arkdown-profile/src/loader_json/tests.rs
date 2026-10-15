@@ -1108,16 +1108,22 @@ fn test_loader_json_writes_ap_path_and_copies_ap_when_present() {
     assert_eq!(
         loader.an_build_out_put.as_deref(),
         Some(
-            canonical_module_root
-                .join("build/default/intermediates/loader_out/default/an/arm64-v8a")
-                .to_string_lossy()
-                .as_ref()
+            arkdown_path::ArtifactPathSerializer::path_to_slash_string(
+                &canonical_module_root
+                    .join("build/default/intermediates/loader_out/default/an/arm64-v8a"),
+            )
+            .unwrap()
+            .as_str()
         )
     );
     assert_eq!(loader.an_build_mode.as_deref(), Some("type"));
     assert_eq!(
         loader.ap_path.as_deref(),
-        Some(canonical_source_ap.to_string_lossy().as_ref())
+        Some(
+            arkdown_path::ArtifactPathSerializer::path_to_slash_string(&canonical_source_ap)
+                .unwrap()
+                .as_str()
+        )
     );
     let copied_ap = module_root.join("build/default/intermediates/ap/entry.ap");
     assert_eq!(
@@ -1127,7 +1133,11 @@ fn test_loader_json_writes_ap_path_and_copies_ap_when_present() {
     let value = serde_json::to_value(&loader).expect("serialize loader");
     assert_eq!(
         value["apPath"].as_str(),
-        Some(canonical_source_ap.to_string_lossy().as_ref())
+        Some(
+            arkdown_path::ArtifactPathSerializer::path_to_slash_string(&canonical_source_ap)
+                .unwrap()
+                .as_str()
+        )
     );
 }
 
@@ -1484,7 +1494,7 @@ fn test_loader_json_relative_paths_become_absolute() {
     );
     assert_eq!(
         loader.project_root_path,
-        expected_project.to_string_lossy().as_ref()
+        arkdown_path::ArtifactPathSerializer::path_to_slash_string(&expected_project).unwrap()
     );
 
     assert!(
@@ -1493,9 +1503,7 @@ fn test_loader_json_relative_paths_become_absolute() {
         loader.node_modules_path
     );
     assert!(
-        loader
-            .node_modules_path
-            .starts_with(expected_module.to_string_lossy().as_ref()),
+        std::path::Path::new(&loader.node_modules_path).starts_with(&expected_module),
         "nodeModulesPath must be under module root"
     );
 

@@ -513,7 +513,10 @@ mod tests {
                 assert_eq!(cfg.modules[0].name, "entry");
                 assert_eq!(
                     cfg.modules[0].src_path,
-                    std::fs::canonicalize(&tmp).unwrap().join("entry")
+                    arkdown_path::AbsPath::canonicalize(&tmp)
+                        .unwrap()
+                        .join("entry")
+                        .into_path_buf()
                 );
                 assert_eq!(
                     cfg.modules[0].module_type,
@@ -600,7 +603,7 @@ mod tests {
                     .expect("signing config present");
                 assert_eq!(sc.name.as_deref(), Some("default"));
                 assert_eq!(sc.key_alias, "testKey");
-                assert_eq!(sc.cert_path.to_str().unwrap(), "/test/cert.cer");
+                assert_eq!(sc.cert_path, std::path::Path::new("/test/cert.cer"));
                 // targetSdkVersion used for compile_api_version
                 assert_eq!(cfg.sdk_config.compile_api_version, 17);
                 assert_eq!(cfg.product.target_sdk_version.as_deref(), Some("5.0.5(17)"));

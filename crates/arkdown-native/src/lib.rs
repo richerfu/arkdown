@@ -415,7 +415,12 @@ mod tests {
         };
 
         let command = config.ninja_command_plan(&toolchain, "arm64-v8a").command();
-        let build_dir = module_root.join(".cxx/paid/phone/release/arm64-v8a");
+        let build_dir = module_root
+            .join(".cxx")
+            .join("paid")
+            .join("phone")
+            .join("release")
+            .join("arm64-v8a");
         let arguments = command.get_args().collect::<Vec<_>>();
 
         assert_eq!(command.get_program(), ninja.as_os_str());
@@ -465,7 +470,12 @@ mod tests {
             collect_all_libs: false,
             release_cmake_build_type: NativeReleaseCmakeBuildType::default(),
         };
-        let build_dir = module_root.join(".cxx/paid/phone/release/arm64-v8a");
+        let build_dir = module_root
+            .join(".cxx")
+            .join("paid")
+            .join("phone")
+            .join("release")
+            .join("arm64-v8a");
         let plan = config.ninja_command_plan(&toolchain, "arm64-v8a");
 
         assert_eq!(
@@ -1441,13 +1451,13 @@ mod tests {
                 .unwrap();
 
         assert!(strip_cache["libs"]
-            .get(binxo.to_string_lossy().as_ref())
+            .get(arkdown_path::lexical_normalize(&binxo).to_str().unwrap())
             .is_some());
         assert!(strip_cache["libs"]
-            .get(process.to_string_lossy().as_ref())
+            .get(arkdown_path::lexical_normalize(&process).to_str().unwrap())
             .is_none());
         assert!(binxo_cache["libs"]
-            .get(process.to_string_lossy().as_ref())
+            .get(arkdown_path::lexical_normalize(&process).to_str().unwrap())
             .is_some());
         assert_eq!(binxo_cache["binxoSymbol"]["enableAsanBinxo"], true);
     }

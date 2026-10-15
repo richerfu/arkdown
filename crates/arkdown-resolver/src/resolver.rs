@@ -1858,8 +1858,10 @@ mod tests {
             _ => panic!("expected LocalSource"),
         }
     }
+    #[cfg(unix)]
     #[derive(Debug)]
     struct CapturedPaths(FxHashMap<PathBuf, PathBuf>);
+    #[cfg(unix)]
     impl arkdown_core::SourceInventory for CapturedPaths {
         fn canonical_path(&self, path: &Path) -> Option<&Path> {
             self.0.get(path).map(PathBuf::as_path)

@@ -57,10 +57,14 @@
     "artifacts": "napi artifacts && node scripts/package-licenses.cjs",
     "build": "napi build --platform --release",
     "build:debug": "napi build --platform",
-    "test": "node --test",
+    "test": "node scripts/package-licenses.cjs && node --test",
+    "test:e2e": "node --test __test__/*.e2e.cjs",
     "smoke": "node -e \"const arkdown = require('./js/runtime-entry.js'); if (typeof arkdown.build !== 'function') process.exit(1)\" && node js/arkdown-cli.js --help",
     "publish:local": "bash scripts/publish-local.sh",
-    "format": "prettier . -w",
+    "lint": "oxlint --deny-warnings js __test__ scripts",
+    "lint:fix": "oxlint --fix js __test__ scripts",
+    "format": "cd ../.. && oxfmt packages/arkdown/js packages/arkdown/__test__ packages/arkdown/scripts packages/arkdown/package.json packages/arkdown/index.d.ts packages/arkdown/runtime-entry.d.ts packages/arkdown/.oxlintrc.json .github .oxfmtrc.json",
+    "format:check": "cd ../.. && oxfmt --check packages/arkdown/js packages/arkdown/__test__ packages/arkdown/scripts packages/arkdown/package.json packages/arkdown/index.d.ts packages/arkdown/runtime-entry.d.ts packages/arkdown/.oxlintrc.json .github .oxfmtrc.json",
     "format:rs": "cargo fmt",
     "prepublishOnly": "napi prepublish -t npm",
     "preversion": "napi build --platform && git add .",
@@ -70,14 +74,8 @@
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.7.1",
-    "prettier": "^3.6.2"
-  },
-  "prettier": {
-    "printWidth": 120,
-    "semi": false,
-    "trailingComma": "all",
-    "singleQuote": true,
-    "arrowParens": "always"
+    "oxfmt": "^0.73.0",
+    "oxlint": "^1.88.0"
   },
   "packageManager": "pnpm@10.12.1"
 }

@@ -37,7 +37,10 @@ impl Plugin for TransformProbe {
         _ctx: SharedTransformPluginContext,
         args: &HookTransformArgs<'_>,
     ) -> impl Future<Output = HookTransformReturn> + Send {
-        if Path::new(args.id).starts_with(&self.source_root) {
+        // Rolldown may retain the Windows short spelling of the temp directory.
+        if arkdown_path::AbsPath::canonicalize(Path::new(args.id))
+            .is_ok_and(|path| path.starts_with(&self.source_root))
+        {
             self.transform_count.fetch_add(1, Ordering::Relaxed);
         }
         async { Ok(None) }
@@ -157,7 +160,9 @@ async fn retained_graph_only_retransforms_changed_modules_and_closes_once() {
     let transform_count = Arc::new(AtomicUsize::new(0));
     let close_count = Arc::new(AtomicUsize::new(0));
     let plugin = Arc::new(TransformProbe {
-        source_root: fs_err::canonicalize(&source_root).expect("canonical source root"),
+        source_root: arkdown_path::AbsPath::canonicalize(&source_root)
+            .expect("canonical source root")
+            .into_path_buf(),
         transform_count: Arc::clone(&transform_count),
         close_count: Arc::clone(&close_count),
     });
@@ -186,8 +191,9 @@ async fn retained_graph_only_retransforms_changed_modules_and_closes_once() {
         .module_source_files
         .iter()
         .find(|source| {
-            Path::new(&source.module_id)
-                == fs_err::canonicalize(&dependency).expect("canonical dependency")
+            arkdown_path::AbsPath::canonicalize(Path::new(&source.module_id))
+                .expect("canonical module source")
+                == arkdown_path::AbsPath::canonicalize(&dependency).expect("canonical dependency")
         })
         .expect("dependency output");
     assert!(fs_err::read_to_string(&dependency_output.path)

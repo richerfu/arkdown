@@ -425,6 +425,31 @@ mod tests {
     use super::*;
     use arkdown_cache::CacheGroupKey;
 
+    #[test]
+    fn cache_hook_ast_is_present_for_javascript_and_optional_for_sdk_typescript() {
+        // ShouldInvalidCacheOptions.ast is optional. Public SDK versions emit
+        // ResourceTable.ts with TypeScript namespaces that Acorn cannot parse.
+        for (code, has_ast) in [
+            ("export const resource = 1;", true),
+            (
+                "export namespace ResourceTable { export const value = 1; }",
+                false,
+            ),
+        ] {
+            let module = PluginCacheModule {
+                id: "ResourceTable.ts".into(),
+                code: code.into(),
+            };
+            let request = module.hook_request_value();
+            assert_eq!(request["id"], "ResourceTable.ts");
+            assert_eq!(request["code"], code);
+            assert_eq!(request.get("__arkdownOxcAst").is_some(), has_ast);
+            if has_ast {
+                assert_eq!(request["__arkdownOxcAst"]["node"]["type"], "Program");
+            }
+        }
+    }
+
     fn module_source(module_id: &str, path: PathBuf) -> HvigorModuleSourceFile {
         HvigorModuleSourceFile {
             module_id: module_id.to_string(),

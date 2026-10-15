@@ -1,0 +1,20 @@
+{
+  "apiPath": ["./api"],
+  "prefix": "@arkdown-ci",
+  "osName": "HarmonyOS",
+  "apiCheckPlugin": [
+    {
+      "tag": "since",
+      "type": "CompatibilityCheck",
+      "path": "hooks/checker.cjs",
+      "functionName": "checkSinceValue"
+    }
+  ],
+  "apiCheckPlugins": [
+    {
+      "tagName": "syscap",
+      "path": "hooks/checker.cjs",
+      "className": "SyscapChecker"
+    }
+  ]
+}

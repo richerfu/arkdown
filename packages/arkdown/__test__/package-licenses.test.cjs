@@ -2,7 +2,7 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
-const { execFileSync } = require('node:child_process')
+const { execSync } = require('node:child_process')
 const test = require('node:test')
 const { PackageLicenseWriter } = require('../scripts/package-licenses.cjs')
 
@@ -41,8 +41,10 @@ test('npm main and native tarballs carry the original license texts and dual-lic
     const manifest = JSON.parse(fs.readFileSync(path.join(directory, 'package.json'), 'utf8'))
     assert.equal(manifest.license, 'MIT OR Apache-2.0')
     const result = JSON.parse(
-      execFileSync('npm', ['pack', directory, '--dry-run', '--ignore-scripts', '--offline', '--json'], {
-        cwd: temporary,
+      // npm is a .cmd launcher on Windows. Keep the shell command constant and
+      // select the package through cwd so paths never enter shell syntax.
+      execSync('npm pack --dry-run --ignore-scripts --offline --json', {
+        cwd: directory,
         env: { ...process.env, NPM_CONFIG_CACHE: path.join(temporary, 'npm-cache') },
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'pipe'],

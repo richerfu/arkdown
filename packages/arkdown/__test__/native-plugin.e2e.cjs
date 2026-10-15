@@ -98,7 +98,7 @@ test('TypeScript compile plugin executes its complete source-module lifecycle', 
   assert.equal(firstTrace.projectConfig.targetName, '.default')
   assert.equal(typeof firstTrace.projectConfig.compileSdkVersion, 'number')
   assert.equal(typeof firstTrace.projectConfig.compatibleSdkVersion, 'number')
-  const canonicalProject = fs.realpathSync(project)
+  const canonicalProject = fs.realpathSync.native(project)
   assert.equal(firstTrace.projectConfig.modulePath, path.join(canonicalProject, 'entry').replaceAll(path.sep, '/'))
   assert.equal(
     firstTrace.projectConfig.projectPath,
@@ -129,7 +129,11 @@ test('TypeScript compile plugin executes its complete source-module lifecycle', 
   assert.equal(secondTrace.shouldInvalidCacheCount > 0, true)
   assert.equal(typeof secondTrace.cacheRequest.id, 'string')
   assert.equal(secondTrace.cacheRequest.code.length > 0, true)
-  assert.equal(secondTrace.cacheRequest.astType, 'Program')
+  // SDK-generated ResourceTable.ts may retain TypeScript namespaces. The
+  // public cache-hook ABI deliberately makes AST optional for that syntax.
+  if (secondTrace.cacheRequest.astType !== undefined) {
+    assert.equal(secondTrace.cacheRequest.astType, 'Program')
+  }
   assert.equal(secondTrace.shareCacheBuildCount, 2)
 
   const child = spawnSync(

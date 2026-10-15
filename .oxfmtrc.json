@@ -1,9 +1,25 @@
 {
+  "$schema": "./packages/arkdown/node_modules/oxfmt/configuration_schema.json",
+  "printWidth": 120,
+  "semi": false,
+  "trailingComma": "all",
+  "singleQuote": true,
+  "arrowParens": "always",
+  "sortPackageJson": false,
   "ignorePatterns": [
     ".worktrees/**",
-    "tests/fixtures/minimal-hap/build/**",
-    "tests/fixtures/minimal-hap/entry/build/**",
-    "tests/fixtures/minimal-hap/oh_modules/**",
-    "tests/fixtures/minimal-hap/.hvigor/**"
+    "**/oh_modules/**",
+    "**/build/**",
+    "**/node_modules/**",
+    "**/target/**",
+    "**/.hvigor/**",
+    "packages/arkdown/index.js",
+    "**/pnpm-lock.yaml",
+    "**/LICENSE*",
+    "**/NOTICE",
+    "**/THIRD_PARTY_NOTICES.md",
+    "**/licenses/**",
+    "**/tsrs-LICENSE.txt",
+    "**/tsrs-NOTICE.txt"
   ]
 }

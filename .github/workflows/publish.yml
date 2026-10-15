@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       publish:
-        description: "Publish assembled platform packages to npm"
+        description: 'Publish assembled platform packages to npm'
         required: false
         default: false
         type: boolean
@@ -17,17 +17,20 @@ permissions:
 
 env:
   APP_NAME: arkdown
-  CARGO_INCREMENTAL: "1"
-  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  CARGO_BUILD_JOBS: '2'
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
   CARGO_TERM_COLOR: always
   DEBUG: napi:*
   LINUX_BUILD_DEPENDENCIES: >-
     build-essential ca-certificates clang cmake libssl-dev ninja-build perl
     pkg-config python3
-  MACOSX_DEPLOYMENT_TARGET: "10.13"
-  PNPM_VERSION: "10.12.1"
-  RUST_BACKTRACE: "1"
-  RUST_TOOLCHAIN: "1.99.0"
+  MACOSX_DEPLOYMENT_TARGET: '10.13'
+  PNPM_VERSION: '10.12.1'
+  RUST_BACKTRACE: '1'
+  RUST_TOOLCHAIN: '1.99.0'
 
 defaults:
   run:
@@ -45,7 +48,8 @@ jobs:
       - name: Install Linux build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends --yes $LINUX_BUILD_DEPENDENCIES
+          read -r -a build_dependencies <<< "$LINUX_BUILD_DEPENDENCIES"
+          sudo apt-get install --no-install-recommends --yes "${build_dependencies[@]}"
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -90,13 +94,17 @@ jobs:
           pnpm --version
 
       - name: Check Rust formatting
-        run: cargo fmt --manifest-path ../../Cargo.toml --check
+        working-directory: .
+        run: cargo fmt --all --check
 
-      - name: Check NAPI package
-        run: cargo check --locked -p arkdown-napi --all-targets
+      - name: Clippy NAPI package
+        run: cargo clippy --locked -p arkdown-napi --all-targets -- -D warnings
+
+      - name: Lint JavaScript and TypeScript
+        run: pnpm lint
 
       - name: Check package formatting
-        run: pnpm exec prettier package.json ../../.github/workflows/publish.yml --check
+        run: pnpm format:check
 
       - name: Test JavaScript package
         run: pnpm test
@@ -132,7 +140,8 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends --yes $LINUX_BUILD_DEPENDENCIES
+          read -r -a build_dependencies <<< "$LINUX_BUILD_DEPENDENCIES"
+          sudo apt-get install --no-install-recommends --yes "${build_dependencies[@]}"
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -198,8 +207,8 @@ jobs:
             target: aarch64-apple-darwin
             architecture: arm64
         node:
-          - "20"
-          - "22"
+          - '20'
+          - '22'
 
     steps:
       - name: Checkout
@@ -244,8 +253,8 @@ jobs:
       fail-fast: false
       matrix:
         node:
-          - "20"
-          - "22"
+          - '20'
+          - '22'
 
     steps:
       - name: Checkout

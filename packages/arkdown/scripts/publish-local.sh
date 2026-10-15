@@ -118,7 +118,7 @@ cargo xwin build \
 cp \
   "$REPO_ROOT/target/x86_64-pc-windows-msvc/release/arkdown_napi.dll" \
   "$PACKAGE_DIR/arkdown.win32-x64-msvc.node"
-pnpm --dir "$PACKAGE_DIR" exec prettier index.d.ts --write
+pnpm --dir "$PACKAGE_DIR" exec oxfmt index.d.ts
 
 MAC_KIND="$(file -b "$PACKAGE_DIR/arkdown.darwin-arm64.node")"
 LINUX_KIND="$(file -b "$PACKAGE_DIR/arkdown.linux-x64-gnu.node")"

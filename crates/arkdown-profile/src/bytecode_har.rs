@@ -3085,10 +3085,10 @@ mod tests {
         let rel: Vec<String> = files
             .iter()
             .map(|path| {
-                path.strip_prefix(tmp.path())
-                    .unwrap_or(path)
-                    .to_string_lossy()
-                    .into_owned()
+                arkdown_path::ArtifactPathSerializer::path_to_slash_string(
+                    path.strip_prefix(tmp.path()).unwrap_or(path),
+                )
+                .expect("serialize collected source path")
             })
             .collect();
         assert!(

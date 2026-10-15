@@ -486,8 +486,7 @@ mod tests {
         let sdk = TestSdk::snapshot("/sdk/ohos/12");
         let resolver = SdkToolResolver::for_host(&sdk, HostPlatform::Linux);
         let path = resolver.llvm_strip().unwrap();
-        assert!(path.path.to_str().unwrap().contains("native/llvm/bin"));
-        assert!(path.path.to_str().unwrap().ends_with("llvm-strip"));
+        assert!(path.path.ends_with("native/llvm/bin/llvm-strip"));
     }
 
     #[test]
