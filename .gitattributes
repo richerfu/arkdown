@@ -1,2 +1,4 @@
 # Preserve upstream legal documents byte-for-byte, including their line endings.
 licenses/** -text
+# The dependency notice inventory fingerprints the exact lockfile bytes.
+Cargo.lock text eol=lf

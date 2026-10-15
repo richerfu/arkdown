@@ -214,12 +214,18 @@ repository root, run `cargo fmt --all --check`,
 `cargo clippy --locked --workspace --all-targets -- -D warnings`, and
 `cargo test --locked --workspace --lib --tests`.
 
-CI installs OpenHarmony SDK 6.0 and runs Clippy, Rust tests, and native Node
-integration tests on Linux, macOS, and Windows. To run the Node integration
+CI installs OpenHarmony SDK 6.0 and a local mock component for the vendor
+checker callback ABI, then runs Clippy, Rust tests, and native Node
+integration tests on Linux, macOS, and Windows. The SDK compiler, resource
+processor, and packaging tools execute normally. To run the Node integration
 suite locally, build the binding, configure `OHOS_SDK_HOME`, enable
 `ARKDOWN_NATIVE_CHECKER_E2E`, `ARKDOWN_NATIVE_PLUGIN_E2E`,
 `ARKDOWN_NATIVE_CACHE_E2E`, and `ARKDOWN_NATIVE_WATCH_E2E` with value `1`, then
 run `pnpm test:e2e`.
+
+For a public SDK without vendor checker plugins, install the test callback
+component with `node packages/arkdown/scripts/prepare-test-sdk.cjs` from the
+repository root, pointing `OHOS_SDK_HOME` at an SDK dedicated to testing.
 
 Strict Hvigor parity needs a self-hosted runner labelled `ohos-sdk` and the
 `HVIGORW_PATH` / `OHOS_SDK_PATH` secrets. Use the CI dispatch input
