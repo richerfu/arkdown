@@ -216,24 +216,23 @@ jobs:
           cargo clippy --version
 
       - name: Cache cargo
-        uses: actions/cache@v5
+        id: cargo-cache
+        uses: actions/cache/restore@v5
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_TOOLCHAIN }}-ci-v2-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_TOOLCHAIN }}-ci-v3-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_TOOLCHAIN }}-ci-v2-
+            ${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_TOOLCHAIN }}-ci-v3-${{ hashFiles('Cargo.lock') }}-
+            ${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_TOOLCHAIN }}-ci-v3-
 
       - name: Clippy workspace and all test targets
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --keep-going -- -D warnings
 
-      - name: Test workspace libraries
-        run: cargo test --locked --workspace --lib
-
-      - name: Test workspace integration tests
-        run: cargo test --locked --workspace --test '*'
+      - name: Test workspace libraries and integration tests
+        run: cargo test --locked --workspace --lib --tests --no-fail-fast
         env:
           ARKDOWN_PARITY_RUN: ''
 
@@ -250,6 +249,18 @@ jobs:
           ARKDOWN_NATIVE_PLUGIN_E2E: '1'
           ARKDOWN_NATIVE_CACHE_E2E: '1'
           ARKDOWN_NATIVE_WATCH_E2E: '1'
+
+      - name: Save Cargo cache after checks
+        if: >-
+          !cancelled() && steps.cargo-cache.outputs.cache-primary-key != '' &&
+          steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   hvigor-parity:
     name: Hvigor Parity
