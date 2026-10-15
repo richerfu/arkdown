@@ -45,7 +45,7 @@ impl CaseCheckPolicy {
         #[cfg(target_os = "linux")]
         {
             let _ = path;
-            return CaseCheckResult::SkippedOnLinux;
+            CaseCheckResult::SkippedOnLinux
         }
 
         #[cfg(not(target_os = "linux"))]
