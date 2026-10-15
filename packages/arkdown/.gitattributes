@@ -16,3 +16,8 @@ arkdown.wasi-browser.js linguist-detectable=false
 arkdown.wasi.cjs        linguist-detectable=false
 wasi-worker-browser.mjs          linguist-detectable=false
 wasi-worker.mjs                  linguist-detectable=false
+
+# Preserve the materialized upstream license copies verbatim.
+tsrs-LICENSE.txt -text
+tsrs-NOTICE.txt -text
+licenses/** -text

@@ -4,15 +4,20 @@ on:
   push:
     branches:
       - main
-      - "fix/**"
-      - "feat/**"
+      - 'fix/**'
+      - 'feat/**'
   pull_request:
     branches:
       - main
   workflow_dispatch:
     inputs:
+      run_hvigor_parity:
+        description: 'Run strict Hvigor parity on a configured self-hosted SDK runner'
+        required: false
+        default: false
+        type: boolean
       publish_package:
-        description: "Publish packages/arkdown after all CI and platform checks pass"
+        description: 'Publish packages/arkdown after all CI and platform checks pass'
         required: false
         default: false
         type: boolean
@@ -25,19 +30,72 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  CARGO_BUILD_JOBS: '2'
+  CARGO_INCREMENTAL: '0'
+  CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
   CARGO_TERM_COLOR: always
-  OHOS_SDK_VERSION: "6.0"
-  RUST_BACKTRACE: 1
-  RUST_TOOLCHAIN: "1.99.0"
+  OHOS_SDK_VERSION: '6.0'
+  RUST_BACKTRACE: '1'
+  RUST_TOOLCHAIN: '1.99.0'
   LINUX_BUILD_DEPENDENCIES: >-
     build-essential ca-certificates clang cmake libssl-dev ninja-build perl
     pkg-config python3
 
 jobs:
+  quality:
+    name: Lint and format
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Validate GitHub Actions workflows
+        uses: docker://rhysd/actionlint:1.7.12
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          package_json_file: packages/arkdown/package.json
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: packages/arkdown/pnpm-lock.yaml
+
+      - name: Install package dependencies
+        working-directory: packages/arkdown
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Rust formatting tools
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt
+
+      - name: Check Rust formatting
+        run: cargo fmt --all --check
+
+      - name: Lint JavaScript and TypeScript
+        working-directory: packages/arkdown
+        run: pnpm lint
+
+      - name: Check JavaScript and workflow formatting
+        working-directory: packages/arkdown
+        run: pnpm format:check
+
+      - name: Test JavaScript package
+        working-directory: packages/arkdown
+        run: pnpm test
+
   rust:
     name: Rust (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -53,14 +111,30 @@ jobs:
         run: git config --global core.longpaths true
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
         with:
+          package_json_file: packages/arkdown/package.json
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: packages/arkdown/pnpm-lock.yaml
+
+      - name: Install package dependencies
+        working-directory: packages/arkdown
+        run: pnpm install --frozen-lockfile
 
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends --yes $LINUX_BUILD_DEPENDENCIES
+          read -r -a build_dependencies <<< "$LINUX_BUILD_DEPENDENCIES"
+          sudo apt-get install --no-install-recommends --yes "${build_dependencies[@]}"
 
       - name: Setup OpenHarmony SDK
         id: setup-ohos-sdk
@@ -139,63 +213,59 @@ jobs:
           cargo clippy --version
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-rust-${{ env.RUST_TOOLCHAIN }}-cargo-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_TOOLCHAIN }}-ci-v2-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-rust-${{ env.RUST_TOOLCHAIN }}-cargo-
+            ${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_TOOLCHAIN }}-ci-v2-
 
-      - name: Check formatting
-        run: cargo fmt --check
-
-      - name: Check workspace
-        run: cargo check --locked --workspace --all-targets
+      - name: Clippy workspace and all test targets
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
       - name: Test workspace libraries
-        if: runner.os != 'Windows'
         run: cargo test --locked --workspace --lib
 
       - name: Test workspace integration tests
-        if: runner.os != 'Windows'
         run: cargo test --locked --workspace --test '*'
         env:
-          ARKDOWN_PARITY_RUN: ""
+          ARKDOWN_PARITY_RUN: ''
 
-      - name: Test Windows portability contracts
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          cargo test --locked -p arkdown-path --lib
-          cargo test --locked -p arkdown-config --lib sdk::tests
-          cargo test --locked -p arkdown-session --lib sdk_tools::tests
-          cargo test --locked -p arkdown-ohpm --lib tarball::tests
-          cargo test --locked -p arkdown-profile --lib test_transitive_dependency_resolves_from_issuer_ohpm_symlink_farm
-          cargo test --locked -p arkdown-resolver --lib test_nested_ohpm_scoped_symlink_dependency_resolves_from_importer_package_store
-          cargo test --locked -p arkdown-ets-transform --lib snapshot_resolves_source_files_through_indexed_aliases
-          cargo test --locked -p arkdown-napi --lib bytecode::compiler
-          cargo test --locked -p arkdown-napi --lib native_declaration_roots_follow_ohpm_symlinks
-          cargo test --locked -p arkdown-napi --lib collect_debug_symbol_prefers_intermediate_map_and_copies_name_cache
-          cargo test --locked -p arkdown-napi --test golden_test test_loader_json_golden_minimal_hap
-          cargo test --locked -p arkdown-napi --test self_consistency_test test_minimal_hap_build_is_deterministic
+      - name: Build native binding
+        working-directory: packages/arkdown
+        run: pnpm exec napi build --platform -- --locked
 
-      - name: Build native binding library
-        run: cargo build --locked -p arkdown-napi --lib
+      - name: Test native binding and JavaScript CLI
+        working-directory: packages/arkdown
+        run: pnpm test && pnpm smoke && pnpm test:e2e
+        shell: bash
+        env:
+          ARKDOWN_NATIVE_CHECKER_E2E: '1'
+          ARKDOWN_NATIVE_PLUGIN_E2E: '1'
+          ARKDOWN_NATIVE_CACHE_E2E: '1'
+          ARKDOWN_NATIVE_WATCH_E2E: '1'
 
   hvigor-parity:
     name: Hvigor Parity
+    # Enable automatic parity with this repository variable once the runner and
+    # SDK secrets exist. Releases always require strict parity.
+    if: >-
+      vars.ARKDOWN_HVIGOR_PARITY == 'true' ||
+      (github.event_name == 'workflow_dispatch' && (inputs.run_hvigor_parity || inputs.publish_package)) ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+        startsWith(github.event.head_commit.message, 'chore(release): publish'))
     runs-on:
       - self-hosted
       - ohos-sdk
     needs: rust
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-        with:
+        uses: actions/checkout@v6
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -234,7 +304,7 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: "10.12.1"
+          version: '10.12.1'
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -251,8 +321,8 @@ jobs:
         working-directory: packages/arkdown
         run: node --test __test__/native-checker.e2e.cjs __test__/native-plugin.e2e.cjs
         env:
-          ARKDOWN_NATIVE_CHECKER_E2E: "1"
-          ARKDOWN_NATIVE_PLUGIN_E2E: "1"
+          ARKDOWN_NATIVE_CHECKER_E2E: '1'
+          ARKDOWN_NATIVE_PLUGIN_E2E: '1'
           OHOS_SDK_HOME: ${{ secrets.OHOS_SDK_PATH }}
 
       - name: Run hvigor parity tests
@@ -260,8 +330,8 @@ jobs:
         env:
           ARKDOWN_PARITY_HVIGORW: ${{ secrets.HVIGORW_PATH }}
           ARKDOWN_PARITY_ARKDOWN_CLI: ${{ github.workspace }}/packages/arkdown/js/arkdown-cli.js
-          ARKDOWN_PARITY_RUN: "1"
-          ARKDOWN_PARITY_STRICT: "1"
+          ARKDOWN_PARITY_RUN: '1'
+          ARKDOWN_PARITY_STRICT: '1'
           ARKDOWN_PARITY_ALLOWLIST: tests/parity_allowlist.json
           OHOS_SDK_HOME: ${{ secrets.OHOS_SDK_PATH }}
 
@@ -277,13 +347,15 @@ jobs:
   package:
     name: Package arkdown
     needs:
+      - quality
       - rust
       - hvigor-parity
     if: >-
       ${{
         always() &&
+        needs.quality.result == 'success' &&
         needs.rust.result == 'success' &&
-        needs.hvigor-parity.result == 'success'
+        (needs.hvigor-parity.result == 'success' || needs.hvigor-parity.result == 'skipped')
       }}
     permissions:
       contents: read

@@ -208,6 +208,25 @@ pnpm build
 pnpm test
 ```
 
+Run `pnpm lint` (oxlint) and `pnpm format:check` (oxfmt) from
+`packages/arkdown`; `pnpm lint:fix` and `pnpm format` apply fixes. From the
+repository root, run `cargo fmt --all --check`,
+`cargo clippy --locked --workspace --all-targets -- -D warnings`, and
+`cargo test --locked --workspace --lib --tests`.
+
+CI installs OpenHarmony SDK 6.0 and runs Clippy, Rust tests, and native Node
+integration tests on Linux, macOS, and Windows. To run the Node integration
+suite locally, build the binding, configure `OHOS_SDK_HOME`, enable
+`ARKDOWN_NATIVE_CHECKER_E2E`, `ARKDOWN_NATIVE_PLUGIN_E2E`,
+`ARKDOWN_NATIVE_CACHE_E2E`, and `ARKDOWN_NATIVE_WATCH_E2E` with value `1`, then
+run `pnpm test:e2e`.
+
+Strict Hvigor parity needs a self-hosted runner labelled `ohos-sdk` and the
+`HVIGORW_PATH` / `OHOS_SDK_PATH` secrets. Use the CI dispatch input
+`run_hvigor_parity`, or set the repository variable `ARKDOWN_HVIGOR_PARITY=true`
+to run it automatically. npm publication always requires strict parity;
+ordinary CI and package validation run on GitHub-hosted runners.
+
 The ArkTS checker is tsrs, fetched by Cargo from `ohos-rs/tsrs` with a full
 Git `rev` in the workspace dependencies and `Cargo.lock`. Cargo links
 `tsrs_api`, `tsrs_core` and `tsrs_vfs` directly into the N-API binding with the

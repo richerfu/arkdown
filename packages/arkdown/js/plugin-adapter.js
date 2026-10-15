@@ -12,11 +12,24 @@ const ESMODULE_DORMANT_HOOKS = Object.freeze(
     ' ',
   ),
 )
-const PLUGIN_HOOKS = Object.freeze(
-  ['beforeBuild', 'buildStart', 'afterBuildStart', 'resolveId', 'load', 'transform',
-    'moduleParsed', 'resolveDynamicImport', 'watchChange', 'beforeBuildEnd', 'buildEnd',
-    'afterBuildEnd', 'bundleEnd', 'cleanUp', 'shouldInvalidCache', ...ESMODULE_DORMANT_HOOKS],
-)
+const PLUGIN_HOOKS = Object.freeze([
+  'beforeBuild',
+  'buildStart',
+  'afterBuildStart',
+  'resolveId',
+  'load',
+  'transform',
+  'moduleParsed',
+  'resolveDynamicImport',
+  'watchChange',
+  'beforeBuildEnd',
+  'buildEnd',
+  'afterBuildEnd',
+  'bundleEnd',
+  'cleanUp',
+  'shouldInvalidCache',
+  ...ESMODULE_DORMANT_HOOKS,
+])
 
 // hvigor-arkts-compose/types.d.ts and arkts-pack.js::doWrapper compile hooks.
 // Explicit plugins use the wider Rolldown surface above.
@@ -62,9 +75,11 @@ function arkdownError(code, message, details = {}) {
 
 function emitDiagnostic(level, diagnostic) {
   if (level === 'error') {
-    throw arkdownError(diagnostic.code, diagnostic.message, {
-      ...(diagnostic.pluginName ? { pluginName: diagnostic.pluginName } : {}),
-    })
+    throw arkdownError(
+      diagnostic.code,
+      diagnostic.message,
+      diagnostic.pluginName ? { pluginName: diagnostic.pluginName } : {},
+    )
   }
   process.emitWarning(`[arkdown] ${diagnostic.code}: ${diagnostic.message}`, {
     code: diagnostic.code,
@@ -100,10 +115,15 @@ class SdkPluginHost {
   heapAfterGc = process.memoryUsage().heapUsed
 
   session(id) {
-    if (!this.sessions.has(id)) this.sessions.set(id, {
-      snapshots: new Map(), asts: new WeakMap(), lru: new Map(), configs: new Map(), plugins: new Map(),
-      stats: { parses: 0, reparses: 0, batches: 0, peakCommitted: 0 },
-    })
+    if (!this.sessions.has(id))
+      this.sessions.set(id, {
+        snapshots: new Map(),
+        asts: new WeakMap(),
+        lru: new Map(),
+        configs: new Map(),
+        plugins: new Map(),
+        stats: { parses: 0, reparses: 0, batches: 0, peakCommitted: 0 },
+      })
     return this.sessions.get(id)
   }
 
@@ -116,20 +136,25 @@ class SdkPluginHost {
   }
 
   register(req) {
-    if (req.path !== undefined) this.session(req.sessionId).plugins.set(req.pluginId, {
-      path: req.path, functionName: req.functionName, className: req.className,
-    })
+    if (req.path !== undefined)
+      this.session(req.sessionId).plugins.set(req.pluginId, {
+        path: req.path,
+        functionName: req.functionName,
+        className: req.className,
+      })
   }
 
   snapshot(id, span) {
     const { snapshots } = this.session(id)
-    if (!snapshots) throw new Error(`SDK checker source ${id}:${span.sourceId}: sources were released before strict diagnostics`)
+    if (!snapshots)
+      throw new Error(`SDK checker source ${id}:${span.sourceId}: sources were released before strict diagnostics`)
     let source = snapshots.get(span.sourceId)
     if (span.source !== undefined && !source) {
       source = { fileName: span.fileName, source: span.source, parses: 0 }
       snapshots.set(span.sourceId, source)
     }
-    if (!source || source.fileName !== span.fileName) throw new Error(`SDK checker source ${id}:${span.sourceId} is not registered`)
+    if (!source || source.fileName !== span.fileName)
+      throw new Error(`SDK checker source ${id}:${span.sourceId} is not registered`)
     return source
   }
 
@@ -143,7 +168,8 @@ class SdkPluginHost {
     let config = configs.get(ref.projectConfigId)
     if (!config && ref.projectConfig !== undefined) {
       config = { ...ref.projectConfig }
-      for (const field of ['syscapIntersection', 'syscapUnion']) config[field + 'Set'] = new Set(config[field + 'Set'] || config[field] || [])
+      for (const field of ['syscapIntersection', 'syscapUnion'])
+        config[field + 'Set'] = new Set(config[field + 'Set'] || config[field] || [])
       configs.set(ref.projectConfigId, config)
     }
     if (!config) throw new Error(`SDK checker project config ${id}:${ref.projectConfigId} is not registered`)
@@ -154,14 +180,15 @@ class SdkPluginHost {
     const text = this.snapshot(id, span)
     const session = this.session(id)
     let files = session.asts.get(ts)
-    if (!files) session.asts.set(ts, files = new Map())
+    if (!files) session.asts.set(ts, (files = new Map()))
     let source = files.get(span.sourceId)
     if (!source) {
       text.source = text.source.toString()
-      const kind = span.fileName.endsWith('.ets') ? ts.ScriptKind.ETS ?? ts.ScriptKind.TS : ts.ScriptKind.TS
+      const kind = span.fileName.endsWith('.ets') ? (ts.ScriptKind.ETS ?? ts.ScriptKind.TS) : ts.ScriptKind.TS
       source = {
         sourceFile: ts.createSourceFile(span.fileName, text.source, ts.ScriptTarget.Latest, true, kind),
-        nodes: new Map(), children: new WeakMap(),
+        nodes: new Map(),
+        children: new WeakMap(),
       }
       session.stats.parses++
       if (text.parses++) session.stats.reparses++
@@ -180,15 +207,16 @@ class SdkPluginHost {
     }
     const sf = source.sourceFile
     const key = `${span.pos}:${span.end}:${span.start}`
-    const matches = (node, start) => span.text === undefined
-      ? start === span.start : node.getText(sf) === span.text
+    const matches = (node, start) => (span.text === undefined ? start === span.start : node.getText(sf) === span.text)
     const cached = source.nodes.get(key)
     if (cached && matches(cached, span.text === undefined ? cached.getStart(sf) : span.start)) return cached
     const childrenOf = (node) => {
       let children = source.children.get(node)
       if (!children) {
         children = []
-        ts.forEachChild(node, (child) => { children.push(child) })
+        ts.forEachChild(node, (child) => {
+          children.push(child)
+        })
         children.sort((a, b) => a.pos - b.pos || a.end - b.end)
         source.children.set(node, children)
       }
@@ -223,11 +251,14 @@ class SdkPluginHost {
   }
 
   prepareNodes(requests) {
+    // Allocate the batch once; every slot is assigned below before callbacks run.
+    // oxlint-disable-next-line unicorn/no-new-array
     const items = new Array(requests.length)
     const groups = new Map()
     // Register even short-circuited callbacks.
     for (let i = 0; i < requests.length; i++) {
-      const req = requests[i], payload = req.args[0]
+      const req = requests[i],
+        payload = req.args[0]
       this.register(req)
       const item = {}
       items[i] = item
@@ -236,23 +267,31 @@ class SdkPluginHost {
         for (const field of ['node', 'declaration']) this.snapshot(req.sessionId, payload[field])
         const ts = this.loadTypeScript(item.config.etsLoaderPath)
         let bySource = groups.get(ts)
-        if (!bySource) groups.set(ts, bySource = new Map())
+        if (!bySource) groups.set(ts, (bySource = new Map()))
         for (const field of ['node', 'declaration']) {
           const key = `${req.sessionId}:${payload[field].sourceId}`
           if (!bySource.has(key)) bySource.set(key, [])
           bySource.get(key).push(i, field)
         }
-      } catch (error) { item.error = error }
-    }
-    // Group node lookup; keep callbacks in wire order.
-    for (const [ts, bySource] of groups) for (const entries of bySource.values()) {
-      for (let j = 0; j < entries.length; j += 2) {
-        const i = entries[j], field = entries[j + 1], req = requests[i]
-        const item = items[i]
-        try { item[field] = this.locateNode(ts, req.sessionId, req.args[0][field]) }
-        catch (error) { item[field + 'Error'] = error }
+      } catch (error) {
+        item.error = error
       }
     }
+    // Group node lookup; keep callbacks in wire order.
+    for (const [ts, bySource] of groups)
+      for (const entries of bySource.values()) {
+        for (let j = 0; j < entries.length; j += 2) {
+          const i = entries[j],
+            field = entries[j + 1],
+            req = requests[i]
+          const item = items[i]
+          try {
+            item[field] = this.locateNode(ts, req.sessionId, req.args[0][field])
+          } catch (error) {
+            item[field + 'Error'] = error
+          }
+        }
+      }
     return items
   }
 
@@ -275,7 +314,7 @@ class SdkPluginHost {
 
   runBatch(requests) {
     if (requests.some((r) => r.operation !== 'syscap')) {
-      return requests.map((r) => r.operation === 'syscap' ? this.runBatch([r])[0] : this.dispatch(r))
+      return requests.map((r) => (r.operation === 'syscap' ? this.runBatch([r])[0] : this.dispatch(r)))
     }
     const prepared = this.prepareNodes(requests)
     const committed = v8.getHeapStatistics().total_physical_size
@@ -287,7 +326,9 @@ class SdkPluginHost {
     const responses = []
     for (let i = 0; i < requests.length; i++) {
       const previous = responses[requests[i].after]
-      const skip = previous && (previous.skipped || (previous.error ? previous.phase !== 'load' : previous.found && !previous.checkResult))
+      const skip =
+        previous &&
+        (previous.skipped || (previous.error ? previous.phase !== 'load' : previous.found && !previous.checkResult))
       responses.push(skip ? { skipped: true } : this.dispatch(requests[i], prepared[i]))
     }
     return responses
@@ -310,7 +351,10 @@ class SdkPluginHost {
       }
       session = null
       this.collectHeap({ reduceMemory: true })
-      return { found: true, stats: { ...stats, committedBefore, retainedCommitted: v8.getHeapStatistics().total_physical_size } }
+      return {
+        found: true,
+        stats: { ...stats, committedBefore, retainedCommitted: v8.getHeapStatistics().total_physical_size },
+      }
     }
     let callback
     const isClass = ['prepareClass', 'syscap'].includes(operation)
@@ -324,10 +368,12 @@ class SdkPluginHost {
         if (!callback) {
           const Checker = require(descriptor.path)[descriptor.className]
           if (typeof Checker !== 'function') return { found: false }
-          this.classInstances.set(key, callback = new Checker())
+          this.classInstances.set(key, (callback = new Checker()))
         }
       } else callback = require(descriptor.path)[descriptor.functionName]
-    } catch (error) { return { found: false, phase: 'load', error: String(error?.stack || error) } }
+    } catch (error) {
+      return { found: false, phase: 'load', error: String(error?.stack || error) }
+    }
     if (isClass ? !callback : typeof callback !== 'function') return { found: false }
     if (operation === 'prepareClass') return { found: true }
     try {
@@ -337,25 +383,40 @@ class SdkPluginHost {
         if (error || nodeError || declarationError) throw error || nodeError || declarationError
         if (!node || !declaration) {
           const missing = args[0][!node ? 'node' : 'declaration']
-          throw new Error(`Unable to recreate SDK checker source node ${missing.fileName}:${missing.pos}-${missing.end} (start ${missing.start})`)
+          throw new Error(
+            `Unable to recreate SDK checker source node ${missing.fileName}:${missing.pos}-${missing.end} (start ${missing.start})`,
+          )
         }
         const value = callback.check(node, declaration, config)
-        return { found: true, checkResult: Boolean(value?.checkResult), checkMessage: String(value?.checkMessage ?? '') }
+        return {
+          found: true,
+          checkResult: Boolean(value?.checkResult),
+          checkMessage: String(value?.checkMessage ?? ''),
+        }
       }
       if (operation === 'regex') {
         const regex = callback()
         if (!(regex instanceof RegExp)) return { found: true, matched: false }
         regex.lastIndex = 0
         const match = regex.exec(args[0])
-        return { found: true, matched: match !== null,
-          groups: match === null ? [] : Array.from(match, (value) => value === undefined ? '' : String(value)) }
+        return {
+          found: true,
+          matched: match !== null,
+          groups: match === null ? [] : Array.from(match, (value) => (value === undefined ? '' : String(value))),
+        }
       }
       const value = callback(...args)
-      if (operation === 'distribution') return {
-        found: true, valid: Boolean(value?.valid), version: String(value?.version ?? ''), message: String(value?.message ?? ''),
-      }
+      if (operation === 'distribution')
+        return {
+          found: true,
+          valid: Boolean(value?.valid),
+          version: String(value?.version ?? ''),
+          message: String(value?.message ?? ''),
+        }
       return { found: true, result: Boolean(value?.result), message: String(value?.message ?? '') }
-    } catch (error) { return { found: true, phase: 'invoke', error: String(error?.stack || error) } }
+    } catch (error) {
+      return { found: true, phase: 'invoke', error: String(error?.stack || error) }
+    }
   }
 }
 
@@ -372,23 +433,34 @@ function createSdkPluginDispatch() {
 const asArray = (value) => (value == null ? [] : Array.isArray(value) ? value : [value])
 
 function validateHookSurface(plugin, hookNames, pluginFile, compilePlugin = false) {
-  const invalid = (kind, hookName, message) => arkdownError(
-    `ARKDOWN_PLUGIN_HOOK_${kind}`, `Plugin "${String(plugin.name || '<anonymous>')}" ${message}`,
-    { hookName, pluginFile },
-  )
-  if (!compilePlugin) for (const hookName of UNSUPPORTED_ROLLUP_HOOKS) {
-    if (plugin[hookName] !== undefined && plugin[hookName] !== null) {
-      throw invalid('UNSUPPORTED', hookName, `uses unsupported hook "${hookName}"`)
+  const invalid = (kind, hookName, message) =>
+    arkdownError(`ARKDOWN_PLUGIN_HOOK_${kind}`, `Plugin "${String(plugin.name || '<anonymous>')}" ${message}`, {
+      hookName,
+      pluginFile,
+    })
+  if (!compilePlugin)
+    for (const hookName of UNSUPPORTED_ROLLUP_HOOKS) {
+      if (plugin[hookName] !== undefined && plugin[hookName] !== null) {
+        throw invalid('UNSUPPORTED', hookName, `uses unsupported hook "${hookName}"`)
+      }
     }
-  }
   for (const hookName of hookNames) {
     const hook = plugin[hookName]
     if (hook == null) continue
-    if (typeof hook !== 'function' && !(compilePlugin === false && typeof hook === 'object' && typeof hook.handler === 'function')) {
+    if (
+      typeof hook !== 'function' &&
+      !(compilePlugin === false && typeof hook === 'object' && typeof hook.handler === 'function')
+    ) {
       const expected = compilePlugin ? 'a function' : 'a function or an object with a handler function'
       throw invalid('INVALID', hookName, `hook "${hookName}" must be ${expected}`)
     }
-    if (!compilePlugin && typeof hook === 'object' && hook.order !== undefined && hook.order !== 'pre' && hook.order !== 'post') {
+    if (
+      !compilePlugin &&
+      typeof hook === 'object' &&
+      hook.order !== undefined &&
+      hook.order !== 'pre' &&
+      hook.order !== 'post'
+    ) {
       throw invalid('ORDER_INVALID', hookName, `hook "${hookName}" order must be "pre" or "post"`)
     }
   }
@@ -617,7 +689,9 @@ function hydrateHvigorShare(rawShare, binding) {
   let state = hvigorShareStateByScope.get(scope)
   if (!state) {
     state = {
-      ...Object.fromEntries([...HVIGOR_CACHE_FIELDS, 'hashOverrides', 'pendingModuleInfos'].map((key) => [key, new Map()])),
+      ...Object.fromEntries(
+        [...HVIGOR_CACHE_FIELDS, 'hashOverrides', 'pendingModuleInfos'].map((key) => [key, new Map()]),
+      ),
       errorFileIds: new Set(),
       arkProjectConfig: {},
       pendingBuildInstanceId: undefined,
@@ -704,9 +778,12 @@ function moduleInfoWithOptions(share, info) {
   if (!info) return info
   const options = share?.[HVIGOR_MODULE_OPTIONS]?.get(info.id)
   const result = {
-    ...info, meta: options?.meta || info.meta || {},
-    moduleSideEffects: options && Object.hasOwn(options, 'moduleSideEffects')
-      ? options.moduleSideEffects : (info.moduleSideEffects ?? null),
+    ...info,
+    meta: options?.meta || info.meta || {},
+    moduleSideEffects:
+      options && Object.hasOwn(options, 'moduleSideEffects')
+        ? options.moduleSideEffects
+        : (info.moduleSideEffects ?? null),
   }
   for (const key of ['description', 'packageJsonPath']) {
     if (options && Object.hasOwn(options, key)) result[key] = options[key]
@@ -796,20 +873,22 @@ function cacheRequest(request) {
   return value
 }
 
-const HOOK_ARGUMENT_FIELDS = new Map([
-  ['beforeBuild afterBuildStart afterBuildEnd bundleEnd cleanUp closeBundle closeWatcher', []],
-  ['buildStart', ['buildStartOptions']],
-  ['resolveId resolveDynamicImport', ['id', 'importer', 'resolveOptions']],
-  ['load', ['id']],
-  ['transform', ['code', 'id', 'transformOptions']],
-  ['moduleParsed', ['moduleInfo']],
-  ['renderStart', ['outputOptions']],
-  ['banner footer intro outro augmentChunkHash', ['chunk']],
-  ['renderDynamicImport resolveFileUrl resolveImportMeta', ['outputHookOptions']],
-  ['renderChunk', ['code', 'chunk', 'outputOptions']],
-  ['renderError', ['error']],
-  ['writeBundle', ['outputOptions', 'bundle']],
-].flatMap(([names, fields]) => names.split(' ').map((name) => [name, fields])))
+const HOOK_ARGUMENT_FIELDS = new Map(
+  [
+    ['beforeBuild afterBuildStart afterBuildEnd bundleEnd cleanUp closeBundle closeWatcher', []],
+    ['buildStart', ['buildStartOptions']],
+    ['resolveId resolveDynamicImport', ['id', 'importer', 'resolveOptions']],
+    ['load', ['id']],
+    ['transform', ['code', 'id', 'transformOptions']],
+    ['moduleParsed', ['moduleInfo']],
+    ['renderStart', ['outputOptions']],
+    ['banner footer intro outro augmentChunkHash', ['chunk']],
+    ['renderDynamicImport resolveFileUrl resolveImportMeta', ['outputHookOptions']],
+    ['renderChunk', ['code', 'chunk', 'outputOptions']],
+    ['renderError', ['error']],
+    ['writeBundle', ['outputOptions', 'bundle']],
+  ].flatMap(([names, fields]) => names.split(' ').map((name) => [name, fields])),
+)
 
 function hookArguments(hookName, request, compilePlugin) {
   if (compilePlugin && hookName === 'buildStart') return []
@@ -817,10 +896,14 @@ function hookArguments(hookName, request, compilePlugin) {
   const fields = HOOK_ARGUMENT_FIELDS.get(hookName)
   if (fields) return fields.map((field) => request[field])
   switch (hookName) {
-    case 'watchChange': return [request.id, { event: request.watchEvent }]
-    case 'beforeBuildEnd': return [undefined]
-    case 'shouldInvalidCache': return [cacheRequest(request.cacheRequest)]
-    case 'generateBundle': return [request.outputOptions, request.bundle, request.isWrite === true]
+    case 'watchChange':
+      return [request.id, { event: request.watchEvent }]
+    case 'beforeBuildEnd':
+      return [undefined]
+    case 'shouldInvalidCache':
+      return [cacheRequest(request.cacheRequest)]
+    case 'generateBundle':
+      return [request.outputOptions, request.bundle, request.isWrite === true]
     case 'buildEnd': {
       const errors = request.buildEndContext?.errors || []
       if (errors.length === 0) return [undefined]
@@ -874,7 +957,15 @@ function normalizePlugin(plugin, binding, options = {}) {
       }
     }
     const hookName = request.hookName
-    const context = pluginContext(request, share, binding, cache, asyncTracker, plugin.name || '<anonymous>', compilePlugin)
+    const context = pluginContext(
+      request,
+      share,
+      binding,
+      cache,
+      asyncTracker,
+      plugin.name || '<anonymous>',
+      compilePlugin,
+    )
     const handler = plugin[hookName] && hookHandler(plugin[hookName])
     const invoke = () => handler?.apply(context, hookArguments(hookName, request, compilePlugin))
     let result
@@ -898,7 +989,10 @@ function normalizePlugin(plugin, binding, options = {}) {
             state.moduleInfos = state.pendingModuleInfos
           }
         }
-        if (hookName === 'cleanUp' || (compilePlugin && hookName === 'buildEnd' && (request.buildEndContext?.errors?.length ?? 0) > 0)) {
+        if (
+          hookName === 'cleanUp' ||
+          (compilePlugin && hookName === 'buildEnd' && (request.buildEndContext?.errors?.length ?? 0) > 0)
+        ) {
           const buildInstanceId = share.__arkdownBuildInstanceId
           if (buildInstanceId != null) hvigorShareByBuildInstance.delete(String(buildInstanceId))
         }
@@ -958,9 +1052,7 @@ function normalizePluginList(value, binding = nativeBinding) {
       throw arkdownError('ARKDOWN_PLUGIN_EXPORT_INVALID', `Expected a plugin object, got ${typeof plugin}`)
     }
     validateHookSurface(plugin, PLUGIN_HOOKS)
-    if (
-      !PLUGIN_HOOKS.some((name) => hasHook(plugin[name]))
-    ) {
+    if (!PLUGIN_HOOKS.some((name) => hasHook(plugin[name]))) {
       throw arkdownError(
         'ARKDOWN_PLUGIN_EXPORT_INVALID',
         `Plugin "${String(plugin.name || '<anonymous>')}" does not declare a supported hook`,

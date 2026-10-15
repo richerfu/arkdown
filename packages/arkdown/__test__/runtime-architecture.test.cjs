@@ -25,8 +25,9 @@ test('public JavaScript is limited to entry, CLI, and plugin compatibility', () 
   // The adapter owns the complete TS/JS plugin ABI, including SDK CommonJS
   // checkers, session-release GC, and V8 structured clone for plugin caches.
   // Build I/O, transformations, type semantics, and orchestration stay native; keep the
-  // complete source-owned compatibility boundary below 45 KiB.
-  assert.ok(Buffer.byteLength(sources['plugin-adapter.js']) < 45 * 1024)
+  // complete source-owned compatibility boundary below 36 KiB, excluding
+  // whitespace so formatter output and platform line endings do not spend it.
+  assert.ok(Buffer.byteLength(sources['plugin-adapter.js'].replace(/\s/g, '')) < 36 * 1024)
 
   for (const removed of [
     'runtime.js',

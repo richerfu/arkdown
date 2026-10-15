@@ -88,5 +88,8 @@ test('package CLI delegates native check and clean commands', async () => {
 
 test('package CLI rejects removed Hvigor task commands', async () => {
   const cli = new ArkdownPackageCli(['assembleHap'], async () => ({ artifacts: [] }))
-  await assert.rejects(() => cli.run(), (error) => error.code === 'ARKDOWN_CLI_COMMAND_UNSUPPORTED')
+  await assert.rejects(
+    () => cli.run(),
+    (error) => error.code === 'ARKDOWN_CLI_COMMAND_UNSUPPORTED',
+  )
 })

@@ -77,22 +77,39 @@ exports.SyscapChecker = class {
 }`,
   )
   const invoke = createSdkPluginHost()
-  assert.deepEqual(invoke({ sessionId: 7, pluginId: 1, path: plugin, functionName: 'value', operation: 'value', args: ['11', '17', 0] }), {
+  assert.deepEqual(
+    invoke({
+      sessionId: 7,
+      pluginId: 1,
+      path: plugin,
+      functionName: 'value',
+      operation: 'value',
+      args: ['11', '17', 0],
+    }),
+    {
+      found: true,
+      result: true,
+      message: 'value',
+    },
+  )
+  assert.deepEqual(
+    invoke({ sessionId: 7, pluginId: 2, path: plugin, functionName: 'regex', operation: 'regex', args: ['5.17'] }),
+    {
+      found: true,
+      matched: true,
+      groups: ['5.17', '5', '17'],
+    },
+  )
+  assert.deepEqual(invoke({ sessionId: 7, pluginId: 1, operation: 'value', args: ['11', '17', 0] }), {
     found: true,
     result: true,
     message: 'value',
   })
-  assert.deepEqual(invoke({ sessionId: 7, pluginId: 2, path: plugin, functionName: 'regex', operation: 'regex', args: ['5.17'] }), {
-    found: true,
-    matched: true,
-    groups: ['5.17', '5', '17'],
-  })
-  assert.deepEqual(invoke({ sessionId: 7, pluginId: 1, operation: 'value', args: ['11', '17', 0] }), {
-    found: true, result: true, message: 'value',
-  })
   const classDescriptor = { path: plugin, functionName: 'SyscapChecker', className: 'SyscapChecker' }
   const classRequest = { sessionId: 7, pluginId: 3 }
-  assert.deepEqual(invoke({ ...classRequest, ...classDescriptor, operation: 'prepareClass', args: [] }), { found: true })
+  assert.deepEqual(invoke({ ...classRequest, ...classDescriptor, operation: 'prepareClass', args: [] }), {
+    found: true,
+  })
   assert.deepEqual(invoke({ ...classRequest, operation: 'prepareClass', args: [] }), { found: true })
   const syscapRequest = {
     ...classRequest,
@@ -166,8 +183,11 @@ exports.SyscapChecker = class {
   global.gc = (...args) => gcCalls.push(args)
   const { stats, ...released } = invoke({ sessionId: 7, operation: 'releaseSession', args: [] })
   assert.deepEqual(released, { found: true })
-  assert.deepEqual(gcCalls, [[{ type: 'major', execution: 'sync', flavor: 'last-resort' }]],
-    'session release requests page reclamation before the next build stage')
+  assert.deepEqual(
+    gcCalls,
+    [[{ type: 'major', execution: 'sync', flavor: 'last-resort' }]],
+    'session release requests page reclamation before the next build stage',
+  )
   invoke({ sessionId: 7, operation: 'releaseSession', args: [] })
   assert.equal(gcCalls.length, 1, 'an already released session does not collect again')
   assert.equal(stats.parses, 2)
@@ -200,7 +220,10 @@ exports.SyscapChecker = class {
     creationsBeforeRelease + 2,
     'released ASTs must be recreated from a newly registered source',
   )
-  for (const [version, sessionId] of [['18.17.0', 8], ['20.0.0', 7]]) {
+  for (const [version, sessionId] of [
+    ['18.17.0', 8],
+    ['20.0.0', 7],
+  ]) {
     Object.defineProperty(process.versions, 'node', { ...previousNodeVersion, value: version })
     invoke({ sessionId, operation: 'releaseSession', args: [] })
     assert.deepEqual(gcCalls.at(-1), [], `Node ${version} release retains no-argument full GC`)
@@ -222,15 +245,24 @@ exports.SyscapChecker = class {
     ],
   )
   assert.equal(
-    invoke({ sessionId: 7, pluginId: 4, path: path.join(root, 'missing.cjs'), functionName: 'value', operation: 'value', args: [] }).phase,
+    invoke({
+      sessionId: 7,
+      pluginId: 4,
+      path: path.join(root, 'missing.cjs'),
+      functionName: 'value',
+      operation: 'value',
+      args: [],
+    }).phase,
     'load',
   )
 })
 
 // Observe the stored representation without exposing production host internals.
 function trackSnapshotBuffers(t, text) {
-  const buffers = [], decoded = []
-  const from = Buffer.from, toString = Buffer.prototype.toString
+  const buffers = [],
+    decoded = []
+  const from = Buffer.from,
+    toString = Buffer.prototype.toString
   t.mock.method(Buffer, 'from', function (value, ...args) {
     const buffer = Reflect.apply(from, Buffer, [value, ...args])
     if (value === text) buffers.push(buffer)
@@ -249,7 +281,9 @@ test('SDK checker AST LRU reparses evicted sources and retains declarations and 
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   const typescriptRoot = path.join(root, 'node_modules', 'typescript')
   fs.mkdirSync(typescriptRoot, { recursive: true })
-  fs.writeFileSync(path.join(typescriptRoot, 'index.js'), `
+  fs.writeFileSync(
+    path.join(typescriptRoot, 'index.js'),
+    `
 const creations = new Map()
 exports.creations = creations
 exports.ScriptKind = { TS: 3, ETS: 99 }
@@ -268,9 +302,12 @@ exports.createSourceFile = (fileName, text, target, setParentNodes, scriptKind) 
   return sourceFile
 }
 exports.forEachChild = (node, visit) => { if (node.child) visit(node.child) }
-`)
+`,
+  )
   const plugin = path.join(root, 'checker.cjs')
-  fs.writeFileSync(plugin, `
+  fs.writeFileSync(
+    plugin,
+    `
 exports.Checker = class {
   check(node, declaration) {
     const sf = node.getSourceFile()
@@ -278,19 +315,29 @@ exports.Checker = class {
     return { checkResult: true, checkMessage: sf.fileName + ':' + node.getStart() + ':' + node.end + ':' + node.getText() }
   }
 }
-`)
+`,
+  )
   const invoke = createSdkPluginHost()
   const descriptor = (sourceId, fileName, source = '/* 中文 😀 */ current') => ({
-    sourceId, fileName, source, pos: 0, end: source.length, start: source.indexOf('current'),
+    sourceId,
+    fileName,
+    source,
+    pos: 0,
+    end: source.length,
+    start: source.indexOf('current'),
   })
   const reference = (snapshot) => ({ ...snapshot, source: undefined })
   const declaration = descriptor(1000, 'api.d.ets')
   const tsDeclaration = descriptor(1001, 'other.d.ts')
   const app = (index) => descriptor(index, `input${index}.ets`)
-  const request = (node, decl = reference(declaration), config) => invoke({
-    sessionId: 1, pluginId: 1, ...(config ? { path: plugin, functionName: 'Checker', className: 'Checker' } : {}), operation: 'syscap',
-    args: [{ node, declaration: decl, projectConfigId: 1, ...(config ? { projectConfig: config } : {}) }],
-  })
+  const request = (node, decl = reference(declaration), config) =>
+    invoke({
+      sessionId: 1,
+      pluginId: 1,
+      ...(config ? { path: plugin, functionName: 'Checker', className: 'Checker' } : {}),
+      operation: 'syscap',
+      args: [{ node, declaration: decl, projectConfigId: 1, ...(config ? { projectConfig: config } : {}) }],
+    })
   const { buffers, decoded } = trackSnapshotBuffers(t, app(2).source)
   const first = request(app(1), declaration, { etsLoaderPath: root })
   assert.equal(first.checkResult, true)
@@ -325,13 +372,14 @@ exports.Checker = class {
   assert.deepEqual(request(reference(app(2))), second, 'old and updated source IDs must stay distinct')
 })
 
-
 function sdkBatchFixture(t, prefix = '') {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'arkdown-sdk-batch-'))
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   const tsRoot = path.join(root, 'node_modules', 'typescript')
   fs.mkdirSync(tsRoot, { recursive: true })
-  fs.writeFileSync(path.join(tsRoot, 'index.js'), `
+  fs.writeFileSync(
+    path.join(tsRoot, 'index.js'),
+    `
 exports.creations = new Map()
 exports.starts = 0
 exports.ScriptKind = { TS: 3, ETS: 99 }
@@ -349,9 +397,12 @@ exports.createSourceFile = (fileName, text, target, parents) => {
   return sf
 }
 exports.forEachChild = (node, visit) => { if (node.child) visit(node.child) }
-`)
+`,
+  )
   const plugin = path.join(root, 'checker.cjs')
-  fs.writeFileSync(plugin, `
+  fs.writeFileSync(
+    plugin,
+    `
 exports.calls = []
 exports.nodes = []
 exports.value = () => ({ result: true, message: 'value' })
@@ -375,17 +426,41 @@ exports.Gate = class {
 exports.Throws = class {
   check() { throw new Error('SDK failure') }
 }
-`)
+`,
+  )
   const dispatch = createSdkPluginDispatch()
   const invoke = (requests) => JSON.parse(dispatch(JSON.stringify(requests)))
-  const snapshot = (id, fileName, full = false) => ({ sourceId: id, fileName, pos: prefix.length, end: prefix.length + 4, start: prefix.length,
-    ...(full ? { source: prefix + 'name; // trailing comment' } : {}) })
-  const request = (i, full = false) => ({ sessionId: 1, pluginId: 1, operation: 'syscap',
-    ...(full ? { path: plugin, functionName: 'Checker', className: 'Checker' } : {}),
-    args: [{ node: snapshot(i, `file${i}.ets`, full), declaration: snapshot(1000, 'api.d.ets', full),
-      projectConfigId: 1, ...(full ? { projectConfig: { etsLoaderPath: root } } : {}) }],
+  const snapshot = (id, fileName, full = false) => ({
+    sourceId: id,
+    fileName,
+    pos: prefix.length,
+    end: prefix.length + 4,
+    start: prefix.length,
+    ...(full ? { source: prefix + 'name; // trailing comment' } : {}),
   })
-  return { invoke, request, plugin, ts: require(tsRoot), calls: require(plugin).calls, configs: require(plugin).configs, nodes: require(plugin).nodes }
+  const request = (i, full = false) => ({
+    sessionId: 1,
+    pluginId: 1,
+    operation: 'syscap',
+    ...(full ? { path: plugin, functionName: 'Checker', className: 'Checker' } : {}),
+    args: [
+      {
+        node: snapshot(i, `file${i}.ets`, full),
+        declaration: snapshot(1000, 'api.d.ets', full),
+        projectConfigId: 1,
+        ...(full ? { projectConfig: { etsLoaderPath: root } } : {}),
+      },
+    ],
+  })
+  return {
+    invoke,
+    request,
+    plugin,
+    ts: require(tsRoot),
+    calls: require(plugin).calls,
+    configs: require(plugin).configs,
+    nodes: require(plugin).nodes,
+  }
 }
 
 test('SDK compaction reparses application and declaration nodes from retained source IDs', (t) => {
@@ -405,7 +480,8 @@ test('SDK compaction reparses application and declaration nodes from retained so
     const gcCalls = []
     global.gc = (...args) => gcCalls.push(args)
     const { invoke, request, plugin, ts, configs, nodes } = sdkBatchFixture(t, prefix)
-    const encodedBefore = buffers.length, decodedBefore = decoded.length
+    const encodedBefore = buffers.length,
+      decodedBefore = decoded.length
     assert.deepEqual(invoke([{ sessionId: 1, operation: 'compactSession' }]), [{ found: true }])
     assert.deepEqual(gcCalls, [], 'an unknown session needs neither allocation nor collection')
     const original = invoke([request(1, true)])
@@ -413,11 +489,16 @@ test('SDK compaction reparses application and declaration nodes from retained so
     assert.equal(buffers.length - encodedBefore, 2, 'compact encodes application and declaration snapshots')
     assert.deepEqual([stats.parses, stats.reparses, stats.batches], [2, 0, 1])
     assert.ok(stats.committedBefore > 0 && stats.retainedCommitted > 0)
-    assert.deepEqual(gcCalls, version.startsWith('22')
-      ? [[{ type: 'major', execution: 'sync', flavor: 'last-resort' }]] : [[]])
+    assert.deepEqual(
+      gcCalls,
+      version.startsWith('22') ? [[{ type: 'major', execution: 'sync', flavor: 'last-resort' }]] : [[]],
+    )
     assert.deepEqual(invoke([request(1)]), original, 'sourceId-only callbacks retain node identity and text')
     assert.deepEqual(decoded.slice(decodedBefore), [text, text])
-    assert.deepEqual(nodes, Array(2).fill([prefix.length, prefix.length + 4, 'name', prefix.length, prefix.length + 4, 'name']))
+    assert.deepEqual(
+      nodes,
+      Array(2).fill([prefix.length, prefix.length + 4, 'name', prefix.length, prefix.length + 4, 'name']),
+    )
     assert.equal(buffers.length - encodedBefore, 2, 'reparsing stores strings without encoding another copy')
     assert.equal(ts.creations.get('file1.ets'), 2)
     assert.equal(ts.creations.get('api.d.ets'), 2, 'declaration ASTs must also be rebuilt')
@@ -433,7 +514,10 @@ test('SDK source release rejects later snapshots but retains function plugins un
   const { invoke, request, plugin } = sdkBatchFixture(t)
   assert.deepEqual(invoke([{ sessionId: 1, operation: 'releaseSources' }]), [{ found: true }])
   const functions = ['value', 'format'].map((operation, index) => ({
-    sessionId: 1, pluginId: index + 2, operation, args: [],
+    sessionId: 1,
+    pluginId: index + 2,
+    operation,
+    args: [],
   }))
   const original = invoke(functions.map((req) => ({ ...req, path: plugin, functionName: req.operation })))
   assert.ok(invoke([request(1, true)])[0].checkResult)
@@ -446,7 +530,13 @@ test('SDK source release rejects later snapshots but retains function plugins un
     assert.match(failed.error, /SDK checker source 1:1: sources were released before strict diagnostics/)
   }
   assert.deepEqual(invoke(functions), original, 'registrations survive source release')
-  assert.deepEqual(original.map((r) => [r.result, r.message]), [[true, 'value'], [true, 'format']])
+  assert.deepEqual(
+    original.map((r) => [r.result, r.message]),
+    [
+      [true, 'value'],
+      [true, 'format'],
+    ],
+  )
   assert.equal(invoke([{ sessionId: 1, operation: 'compactSession' }])[0].found, true)
   assert.equal(invoke([request(1)])[0].phase, 'invoke', 'compaction must not revive released sources')
   assert.equal(invoke([{ sessionId: 1, operation: 'releaseSession' }])[0].found, true)
@@ -455,14 +545,21 @@ test('SDK source release rejects later snapshots but retains function plugins un
 
 test('syscap batches group source IDs, prune before getStart, and retain the 64-entry LRU', (t) => {
   const { invoke, request, ts, calls } = sdkBatchFixture(t)
-  const batch = Array.from({ length: 70 }, (_, i) => request(i, true))
-    .concat(Array.from({ length: 70 }, (_, i) => request(i)))
+  const batch = Array.from({ length: 70 }, (_, i) => request(i, true)).concat(
+    Array.from({ length: 70 }, (_, i) => request(i)),
+  )
   const responses = invoke(batch)
   const names = batch.map((r) => r.args[0].node.fileName)
-  assert.deepEqual(responses.map((r) => r.checkMessage), names)
+  assert.deepEqual(
+    responses.map((r) => r.checkMessage),
+    names,
+  )
   assert.deepEqual(calls, names, 'source grouping must preserve callback order')
   assert.equal(ts.creations.size, 71)
-  assert.ok([...ts.creations.values()].every((count) => count === 1), 'interleaved sources parse once per batch')
+  assert.ok(
+    [...ts.creations.values()].every((count) => count === 1),
+    'interleaved sources parse once per batch',
+  )
   assert.equal(ts.starts, batch.length * 2, 'only the end-matching node and declaration candidates call getStart')
   assert.equal(invoke([request(6)])[0].checkResult, true)
   assert.equal(ts.creations.get('file6.ets'), 1, 'the newest 64 application ASTs remain resident')
@@ -496,7 +593,10 @@ test('SDK batches collect only above 128 MiB and twice the last post-GC heap', (
     used = heap * mb
     const count = calls.length
     const responses = invoke([request(0, count === 0), request(0)])
-    assert.deepEqual(responses.map((r) => r.checkResult), [true, true])
+    assert.deepEqual(
+      responses.map((r) => r.checkResult),
+      [true, true],
+    )
     assert.equal(calls.length, count + 2)
   }
   run(100) // More than 2x the initial heap, below the floor.
@@ -525,8 +625,11 @@ test('syscap batch dependencies short-circuit callbacks but publish skipped desc
   assert.equal(result[0].checkResult, false)
   assert.deepEqual(result[1], { skipped: true })
   assert.deepEqual(calls, [])
-  assert.equal(invoke([{ ...request(1), pluginId: 2 }])[0].checkMessage, 'file1.ets',
-    'a later batch can reference sources and descriptors first sent on a skipped request')
+  assert.equal(
+    invoke([{ ...request(1), pluginId: 2 }])[0].checkMessage,
+    'file1.ets',
+    'a later batch can reference sources and descriptors first sent on a skipped request',
+  )
   const chain = invoke([
     { ...request(0), ...descriptor(3, 'Throws') },
     { ...request(1), pluginId: 2, after: 0 },
@@ -1029,7 +1132,7 @@ test('module metadata returned by plugins is merged for later hooks and context 
 
 test('explicit plugin factories and nested arrays retain deterministic native order', () => {
   const binding = fakeBinding()
-  binding.planRolldownPackagePlugins = (plugins) => ({
+  binding.planRolldownPackagePlugins = () => ({
     placements: [1, 0].map((pluginIndex) => ({ pluginIndex })),
   })
   const plugins = normalizePluginList(
@@ -1185,7 +1288,17 @@ test('in-flight syscap registration resends can arrive out of order and keep rea
   assert.equal(invoke(first)[0].checkMessage, 'file1.ets')
   assert.equal(invoke([request(1)])[0].checkMessage, 'file1.ets')
   assert.deepEqual(calls, ['file2.ets', 'file1.ets', 'file1.ets'])
-  assert.ok(configs.every((config) => config === configs[0]), 'resends preserve the plugin-visible config object identity')
-  assert.deepEqual([...ts.creations], [['file2.ets', 1], ['api.d.ets', 1], ['file1.ets', 1]],
-    'resending full immutable registrations does not reparse retained ASTs')
+  assert.ok(
+    configs.every((config) => config === configs[0]),
+    'resends preserve the plugin-visible config object identity',
+  )
+  assert.deepEqual(
+    [...ts.creations],
+    [
+      ['file2.ets', 1],
+      ['api.d.ets', 1],
+      ['file1.ets', 1],
+    ],
+    'resending full immutable registrations does not reparse retained ASTs',
+  )
 })
