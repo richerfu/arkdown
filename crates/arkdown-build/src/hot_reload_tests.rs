@@ -52,7 +52,8 @@ fn reload_importer_state_records_the_initial_reachable_graph() {
     let layout = ModuleBuildLayout::for_target_product(&module_root, "free", "default");
     let source_root = layout.source().ets();
     let entry = source_root
-        .join("pages/Index.ets")
+        .join("pages")
+        .join("Index.ets")
         .to_string_lossy()
         .into_owned();
     let dependency = source_root
@@ -97,11 +98,13 @@ fn reload_importer_state_filters_new_sources_and_detects_new_imports() {
     let layout = ModuleBuildLayout::for_target_product(&module_root, "free", "default");
     let source_root = layout.source().ets();
     let entry = source_root
-        .join("pages/Index.ets")
+        .join("pages")
+        .join("Index.ets")
         .to_string_lossy()
         .into_owned();
     let new_dependency = source_root
-        .join("model/NewState.ets")
+        .join("model")
+        .join("NewState.ets")
         .to_string_lossy()
         .into_owned();
     write_file(

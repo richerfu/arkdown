@@ -649,7 +649,9 @@ fn pkg_sdk_info_matches_hvigor_tree_order_types_and_hsp_barrier() {
     use arkdown_session::PackageSnapshot;
 
     let temp = TempDir::new().expect("create pkg sdk info fixture root");
-    let project_root = temp.path().canonicalize().expect("canonical project root");
+    let project_root = arkdown_path::AbsPath::canonicalize(temp.path())
+        .expect("canonical project root")
+        .into_path_buf();
     let host_root = project_root.join("entry");
     let package = |root: &std::path::Path, name: &str, version: &str| {
         std::fs::create_dir_all(root).expect("create package root");
@@ -820,8 +822,8 @@ const GOLDEN_UNIT_TEST_DIR: &str = concat!(
 
 #[test]
 fn unit_test_template_matches_hvigor_generated_files_byte_for_byte() {
-    let module_path = std::fs::canonicalize(
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let module_path = arkdown_path::AbsPath::canonicalize(
+        &std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
             .join("tests")
@@ -829,7 +831,8 @@ fn unit_test_template_matches_hvigor_generated_files_byte_for_byte() {
             .join("minimal-hap")
             .join("entry"),
     )
-    .expect("minimal-hap entry fixture must exist");
+    .expect("minimal-hap entry fixture must exist")
+    .into_path_buf();
     let serialized_module_path =
         arkdown_path::ArtifactPathSerializer::path_to_slash_string(&module_path)
             .expect("fixture path must serialize");

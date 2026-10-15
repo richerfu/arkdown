@@ -732,14 +732,14 @@ mod tests {
             .unwrap();
 
         let task = &output.config.unwrap().startup_tasks[0];
-        let expected_abs = tmp
-            .path()
-            .join("src/main/ets/startup/MyTask.ets")
-            .to_string_lossy()
-            .into_owned();
-        let expected_profile = arkdown_path::canonicalize_or_owned(&profile_path)
-            .to_string_lossy()
-            .into_owned();
+        let expected_abs = arkdown_path::ArtifactPathSerializer::path_to_slash_string(
+            &tmp.path().join("src/main/ets/startup/MyTask.ets"),
+        )
+        .unwrap();
+        let expected_profile = arkdown_path::ArtifactPathSerializer::path_to_slash_string(
+            &arkdown_path::canonicalize_or_owned(&profile_path),
+        )
+        .unwrap();
         assert_eq!(
             task.ohmurl.as_deref(),
             Some("@bundle:com.example.app/entry/ets/startup/MyTask")

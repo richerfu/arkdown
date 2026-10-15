@@ -2958,14 +2958,26 @@ struct Index {
 
     #[test]
     fn rolldown_transform_preserves_form_entry_classification_after_path_normalization() {
-        let normalized_id = "/tmp/project/entry/src/main/ets/forms/Card.ets".to_string();
+        let project_root = std::env::temp_dir().join("arkdown-form-path-test");
+        let source_root = project_root
+            .join("entry")
+            .join("src")
+            .join("main")
+            .join("ets");
+        let normalized_id = source_root
+            .join("forms")
+            .join("Card.ets")
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let input_id = source_root.join("pages/../forms/Card.ets");
         let mut form_entry_sources = FxHashSet::default();
         form_entry_sources.insert(normalized_id);
         let plan = RolldownEtsTransformPlan::new(
             "com.example",
             "entry",
-            PathBuf::from("/tmp/project"),
-            PathBuf::from("/tmp/project/entry/src/main/ets"),
+            project_root,
+            source_root,
             Vec::new(),
             12,
             FxHashMap::default(),
@@ -2984,7 +2996,7 @@ struct Card {
     Text("card")
   }
 }"#,
-                "/tmp/project/entry/src/main/ets/pages/../forms/Card.ets",
+                input_id.to_str().unwrap(),
             )
             .unwrap()
             .expect("form entry source must produce transform output");

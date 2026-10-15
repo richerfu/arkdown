@@ -734,12 +734,34 @@ mod tests {
             "{modules_cache}"
         );
         let args = fs::read_to_string(args_log).unwrap();
-        assert!(args.contains("--file-threads\n"), "{args}");
-        assert!(args.contains("--target-api-version=12\n"), "{args}");
-        assert!(args.contains("--target-api-sub-version=beta3\n"), "{args}");
-        assert!(args.contains("--enable-release-column\n"), "{args}");
-        assert!(args.contains("--enable-callable-name\n"), "{args}");
-        assert!(!args.contains("--module\n"), "{args}");
+        assert!(
+            args.lines().any(|argument| argument == "--file-threads"),
+            "{args}"
+        );
+        assert!(
+            args.lines()
+                .any(|argument| argument == "--target-api-version=12"),
+            "{args}"
+        );
+        assert!(
+            args.lines()
+                .any(|argument| argument == "--target-api-sub-version=beta3"),
+            "{args}"
+        );
+        assert!(
+            args.lines()
+                .any(|argument| argument == "--enable-release-column"),
+            "{args}"
+        );
+        assert!(
+            args.lines()
+                .any(|argument| argument == "--enable-callable-name"),
+            "{args}"
+        );
+        assert!(
+            !args.lines().any(|argument| argument == "--module"),
+            "{args}"
+        );
     }
 
     #[test]
@@ -790,7 +812,7 @@ mod tests {
         );
         let args = fs::read_to_string(args_log).unwrap();
         assert!(
-            !args.contains("--cache-file\n"),
+            !args.lines().any(|argument| argument == "--cache-file"),
             "--cache false must not hand stale protoBin records back to es2abc: {args}"
         );
     }
@@ -849,7 +871,12 @@ mod tests {
             "{modules_cache}"
         );
         let args = fs::read_to_string(args_log).unwrap();
-        assert!(!args.contains("--npm-module-entry-list\n"), "{args}");
+        assert!(
+            !args
+                .lines()
+                .any(|argument| argument == "--npm-module-entry-list"),
+            "{args}"
+        );
     }
 
     #[test]

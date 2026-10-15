@@ -2224,19 +2224,27 @@ mod tests {
         assert_eq!(value["selfConfig"]["ruleOptions"]["enable"], true);
         assert_eq!(
             value["selfConfig"]["ruleOptions"]["rules"][0],
-            rule.to_string_lossy().as_ref()
+            arkdown_path::ArtifactPathSerializer::path_to_slash_string(&rule)
+                .unwrap()
+                .as_str()
         );
         assert_eq!(
             value["selfConfig"]["consumerRules"][0],
-            consumer.to_string_lossy().as_ref()
+            arkdown_path::ArtifactPathSerializer::path_to_slash_string(&consumer)
+                .unwrap()
+                .as_str()
         );
         assert_eq!(
             value["dependencies"]["hars"][0],
-            dependency.to_string_lossy().as_ref()
+            arkdown_path::ArtifactPathSerializer::path_to_slash_string(&dependency)
+                .unwrap()
+                .as_str()
         );
         assert_eq!(
             value["obfuscationCacheDir"],
-            cache.to_string_lossy().as_ref()
+            arkdown_path::ArtifactPathSerializer::path_to_slash_string(&cache)
+                .unwrap()
+                .as_str()
         );
         assert_eq!(
             value["sdkApis"],

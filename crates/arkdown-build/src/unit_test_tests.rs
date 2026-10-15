@@ -67,8 +67,8 @@ fn crossplatform_ohos_test_uses_sdk_nomock_runner_template() {
 
 #[test]
 fn unit_test_template_matches_hvigor_generated_files_byte_for_byte() {
-    let module_path = std::fs::canonicalize(
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let module_path = arkdown_path::AbsPath::canonicalize(
+        &std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
             .join("tests")
@@ -76,7 +76,8 @@ fn unit_test_template_matches_hvigor_generated_files_byte_for_byte() {
             .join("minimal-hap")
             .join("entry"),
     )
-    .expect("minimal-hap entry fixture must exist");
+    .expect("minimal-hap entry fixture must exist")
+    .into_path_buf();
     let serialized_module_path =
         arkdown_path::ArtifactPathSerializer::path_to_slash_string(&module_path)
             .expect("fixture path must serialize");

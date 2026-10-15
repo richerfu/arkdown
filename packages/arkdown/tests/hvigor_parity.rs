@@ -1112,7 +1112,7 @@ fn parity_command_args_include_selected_build_mode() {
     ]
   );
   let arkdown = arkdown_args(ArtifactType::Hap, ParityBuildMode::Release);
-  assert!(arkdown[0].ends_with("packages/arkdown/js/arkdown-cli.js"));
+  assert!(Path::new(&arkdown[0]).ends_with("packages/arkdown/js/arkdown-cli.js"));
   assert_eq!(
     &arkdown[1..],
     ["build", "--target", "hap", "--mode", "release"]

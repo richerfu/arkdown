@@ -157,7 +157,9 @@ async fn retained_graph_only_retransforms_changed_modules_and_closes_once() {
     let transform_count = Arc::new(AtomicUsize::new(0));
     let close_count = Arc::new(AtomicUsize::new(0));
     let plugin = Arc::new(TransformProbe {
-        source_root: fs_err::canonicalize(&source_root).expect("canonical source root"),
+        source_root: arkdown_path::AbsPath::canonicalize(&source_root)
+            .expect("canonical source root")
+            .into_path_buf(),
         transform_count: Arc::clone(&transform_count),
         close_count: Arc::clone(&close_count),
     });
@@ -187,7 +189,9 @@ async fn retained_graph_only_retransforms_changed_modules_and_closes_once() {
         .iter()
         .find(|source| {
             Path::new(&source.module_id)
-                == fs_err::canonicalize(&dependency).expect("canonical dependency")
+                == arkdown_path::AbsPath::canonicalize(&dependency)
+                    .expect("canonical dependency")
+                    .as_path()
         })
         .expect("dependency output");
     assert!(fs_err::read_to_string(&dependency_output.path)
