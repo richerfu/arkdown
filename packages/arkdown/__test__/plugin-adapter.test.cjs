@@ -6,6 +6,16 @@ const os = require('node:os')
 const path = require('node:path')
 const test = require('node:test')
 
+// These ABI unit tests inject a binding. Loading the adapter must not require a
+// locally built addon; real binding coverage belongs to the native E2E suite.
+const bindingPath = require.resolve('../index.js')
+const previousBinding = require.cache[bindingPath]
+require.cache[bindingPath] = {
+  id: bindingPath,
+  filename: bindingPath,
+  loaded: true,
+  exports: fakeBinding(),
+}
 const {
   COMPILE_PLUGIN_HOOKS,
   ESMODULE_DORMANT_HOOKS,
@@ -18,6 +28,8 @@ const {
   normalizePluginList,
   parsePluginAst,
 } = require('../js/plugin-adapter.js')
+if (previousBinding) require.cache[bindingPath] = previousBinding
+else delete require.cache[bindingPath]
 
 function fakeBinding() {
   return {
