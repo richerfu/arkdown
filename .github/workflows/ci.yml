@@ -223,7 +223,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_TOOLCHAIN }}-ci-v3-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          key: ${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_TOOLCHAIN }}-ci-v3-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('Cargo.toml', 'crates/**', 'packages/arkdown/Cargo.toml', 'packages/arkdown/build.rs', 'packages/arkdown/src/**', 'packages/arkdown/tests/**', 'tests/**', '.cargo/**', '.github/workflows/ci.yml') }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_TOOLCHAIN }}-ci-v3-${{ hashFiles('Cargo.lock') }}-
             ${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_TOOLCHAIN }}-ci-v3-
@@ -251,6 +251,8 @@ jobs:
           ARKDOWN_NATIVE_WATCH_E2E: '1'
 
       - name: Save Cargo cache after checks
+        timeout-minutes: 15
+        continue-on-error: true
         if: >-
           !cancelled() && steps.cargo-cache.outputs.cache-primary-key != '' &&
           steps.cargo-cache.outputs.cache-hit != 'true'

@@ -98,7 +98,7 @@ test('TypeScript compile plugin executes its complete source-module lifecycle', 
   assert.equal(firstTrace.projectConfig.targetName, '.default')
   assert.equal(typeof firstTrace.projectConfig.compileSdkVersion, 'number')
   assert.equal(typeof firstTrace.projectConfig.compatibleSdkVersion, 'number')
-  const canonicalProject = fs.realpathSync(project)
+  const canonicalProject = fs.realpathSync.native(project)
   assert.equal(firstTrace.projectConfig.modulePath, path.join(canonicalProject, 'entry').replaceAll(path.sep, '/'))
   assert.equal(
     firstTrace.projectConfig.projectPath,
