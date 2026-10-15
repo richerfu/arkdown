@@ -214,6 +214,9 @@ repository root, run `cargo fmt --all --check`,
 `cargo clippy --locked --workspace --all-targets -- -D warnings`, and
 `cargo test --locked --workspace --lib --tests`.
 
+CI runs automatically for pull requests targeting `main` and pushes to `main`.
+Other branches can run CI through `workflow_dispatch` before opening a pull request.
+
 CI installs OpenHarmony SDK 6.0 and a local mock component for the vendor
 checker callback ABI, then runs Clippy, Rust tests, and native Node
 integration tests on Linux, macOS, and Windows. The SDK compiler, resource
