@@ -2248,11 +2248,9 @@ mod tests {
         );
         assert_eq!(
             value["sdkApis"],
-            serde_json::json!([
-                sdk.kits.to_string_lossy(),
-                sdk.api.to_string_lossy(),
-                sdk.arkts.to_string_lossy()
-            ])
+            serde_json::json!([&sdk.kits, &sdk.api, &sdk.arkts].map(|path| {
+                arkdown_path::ArtifactPathSerializer::path_to_slash_string(path).unwrap()
+            }))
         );
         assert!(plan.debugging);
     }
