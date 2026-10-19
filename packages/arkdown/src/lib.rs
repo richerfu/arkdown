@@ -2395,6 +2395,7 @@ pub struct BuildConfig {
 
 #[napi(object)]
 pub struct BuildResult {
+  /// All deliverables published by this build, including unsigned/signed packages and sidecars.
   pub artifacts: Vec<String>,
   pub elapsed_ms: f64,
 }
@@ -2719,7 +2720,7 @@ async fn run_build(
 
   Ok(
     output
-      .artifact_paths
+      .all_artifact_paths()
       .iter()
       .map(|p| arkdown_path::ArtifactPathSerializer::path_to_slash_string(p))
       .collect::<std::result::Result<Vec<_>, _>>()?,

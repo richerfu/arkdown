@@ -504,7 +504,7 @@ impl BuildCoordinator {
           targets = ?target_plan.target_names,
           "multi-target: executing the complete build pipeline once per target"
         );
-        let mut artifact_paths = Vec::new();
+        let mut artifacts = BuildOutput::default();
         for target_name in target_plan.target_names {
             let mut args = self.args.clone();
             args.build_target_name = Some(target_name.clone());
@@ -518,9 +518,9 @@ impl BuildCoordinator {
             }
             .execute_impl(None, None)
             .await?;
-            artifact_paths.extend(output.artifact_paths);
+            artifacts.extend(output);
         }
-        Ok(BuildOutput { artifact_paths })
+        Ok(artifacts)
     }
 
     async fn execute_targets_with_runtimes(
@@ -539,7 +539,7 @@ impl BuildCoordinator {
                 .await;
         }
 
-        let mut artifact_paths = Vec::new();
+        let mut artifacts = BuildOutput::default();
         for target_name in target_plan.target_names {
             let mut args = self.args.clone();
             args.build_target_name = Some(target_name);
@@ -552,8 +552,8 @@ impl BuildCoordinator {
             }
             .execute_impl(Some(&mut *bundle_runtime), Some(&mut *semantic_runtime))
             .await?;
-            artifact_paths.extend(output.artifact_paths);
+            artifacts.extend(output);
         }
-        Ok(BuildOutput { artifact_paths })
+        Ok(artifacts)
     }
 }

@@ -2,6 +2,8 @@
 
 const assert = require('node:assert/strict')
 const test = require('node:test')
+const { setTimeout: delay } = require('node:timers/promises')
+const { stripVTControlCharacters } = require('node:util')
 
 const { ArkdownPackageCli } = require('../js/arkdown-cli.js')
 
@@ -165,6 +167,7 @@ test('progress updates in place only on a terminal outside CI', async () => {
   for (const [args, env, dynamic] of [
     [[], {}, true],
     [[], { CI: 'true' }, false],
+    [[], { TERM: 'dumb' }, false],
     [['--clearScreen', 'false'], {}, false],
   ]) {
     const { output, streams } = captureOutput(true, env)
@@ -182,6 +185,83 @@ test('progress updates in place only on a terminal outside CI', async () => {
     assert.equal(output.stdout.includes('\r\x1b[2K'), dynamic)
     assert.match(output.stderr, /warning/)
   }
+})
+
+test('terminal bars advance only on stage completion and keep running across diagnostics', async () => {
+  const { output, streams } = captureOutput(true, { NO_COLOR: '1' })
+  await new ArkdownPackageCli(
+    ['build'],
+    async ({ onLog }) => {
+      onLog(stage('start'))
+      assert.match(output.stdout, /\| \[======>-------------\] 2\/6 stages \| Bundling/)
+      const firstFrame = output.stdout.length
+      await delay(125)
+      assert.match(output.stdout.slice(firstFrame), /\/ \[======>-------------\] 2\/6 stages \| Bundling/)
+      assert.doesNotMatch(output.stdout, /3\/6 stages|%/)
+      onLog({ level: 'warn', message: 'warning during bundle' })
+      assert.match(output.stderr, /warning during bundle/)
+      const afterWarning = output.stdout.length
+      await delay(125)
+      assert.ok(output.stdout.length > afterWarning, 'progress resumes after a diagnostic')
+      onLog(stage('end'))
+      assert.match(output.stdout, /✓ \[==========----------\] 3\/6 stages \| Bundling \(1\.23s\)\n/)
+      return { artifacts: ['entry.hap'], elapsedMs: 1500 }
+    },
+    streams,
+  ).run()
+  const settled = output.stdout
+  await delay(125)
+  assert.equal(output.stdout, settled, 'completion stops the redraw timer')
+  assert.equal(output.stdout.includes('\x1b[36m'), false, 'NO_COLOR keeps the progress bar uncolored')
+})
+
+test('failed watch cycles and failed builds stop the bar without advancing the unfinished stage', async () => {
+  for (const watch of [false, true]) {
+    const { output, streams } = captureOutput(true)
+    const result = await new ArkdownPackageCli(
+      ['build', ...(watch ? ['--watch'] : [])],
+      async ({ onLog }) => {
+        onLog({ ...stage('start'), fields: { ...stage('start').fields, step: 6, label: 'Packaging' } })
+        if (watch) {
+          onLog({ level: 'error', message: 'watch rebuild failed', fields: { error: 'signing failed' } })
+          const failed = output.stdout
+          await delay(125)
+          assert.equal(output.stdout, failed, 'failed watch cycles stop rendering while waiting for changes')
+          onLog({ level: 'info', message: 'watch rebuild started' })
+          onLog(stage('start'))
+          assert.match(stripVTControlCharacters(output.stdout), /2\/6 stages \| Bundling/)
+        }
+        throw new Error('signing failed')
+      },
+      streams,
+    ).run()
+    assert.equal(result, 1)
+    const settled = output.stdout
+    await delay(125)
+    assert.equal(output.stdout, settled, 'build failure releases the redraw timer')
+    assert.doesNotMatch(output.stdout, /6\/6 stages/)
+    assert.match(output.stderr, /signing failed/)
+  }
+})
+
+test('terminal progress fits narrow output without wrapping', async () => {
+  const { output, streams } = captureOutput(true)
+  streams.stdout.columns = 48
+  await new ArkdownPackageCli(
+    ['build'],
+    async ({ onLog }) => {
+      const update = stage('start')
+      update.fields.label = 'Processing profiles and resources'
+      const start = output.stdout.length
+      onLog(update)
+      const text = stripVTControlCharacters(output.stdout.slice(start))
+      assert.ok(text.length < streams.stdout.columns)
+      assert.match(text, /2\/6 stages/)
+      assert.match(text, /… \(\d+ms\)$/)
+      return { artifacts: [], elapsedMs: 1 }
+    },
+    streams,
+  ).run()
 })
 
 test('logLevel filters progress and diagnostics while silent failures still exit with one', async () => {
@@ -215,7 +295,8 @@ test('watch builds report artifact completion before the long-lived service reso
   await new ArkdownPackageCli(
     ['build', '--watch'],
     async ({ onLog }) => {
-      onLog({ level: 'info', message: 'build succeeded', fields: { artifact: 'entry.hap', elapsed_seconds: 1.5 } })
+      onLog({ level: 'info', message: 'build artifact', fields: { artifact: 'entry.hap' } })
+      onLog({ level: 'info', message: 'build succeeded', fields: { elapsed_seconds: 1.5 } })
       assert.match(output.stdout, /entry\.hap\n✓ built in 1\.50s/)
       return { artifacts: [], elapsedMs: 1500 }
     },
@@ -241,8 +322,8 @@ test('terminal builds color stages, diagnostics and artifacts while preserving r
     '\x1b[90m(1.23s)\x1b[39m',
     '\x1b[36m[arkdown]\x1b[39m event-info',
     '\x1b[90m[arkdown:debug] event-debug\x1b[39m',
-    '\x1b[36mentry.hap\x1b[39m',
-    '\x1b[32m✓ built in 2.04s\x1b[39m',
+    '\x1b[36m\x1b[1mentry.hap\x1b[22m\x1b[39m',
+    '\x1b[32m\x1b[1m✓ built in 2.04s\x1b[22m\x1b[39m',
   ])
     assert.ok(output.stdout.includes(text), JSON.stringify(text))
   assert.ok(output.stderr.includes('\x1b[33m[arkdown:warn] event-warn\x1b[39m'))
@@ -302,4 +383,49 @@ test('stdout and stderr color support is detected separately and failures reset 
       assert.ok(output.stderr.includes('\x1b[39m\n\x1b[31merror: broken package\x1b[39m\n'))
     }
   }
+})
+
+test('final summaries list signed and unsigned packages plus sidecars once with a highlighted heading', async () => {
+  const { output, streams } = captureOutput(true)
+  const artifacts = ['entry-unsigned.hap', 'mapping/sourceMaps.map', 'entry-signed.hap', 'entry-signed.hap']
+  await new ArkdownPackageCli(
+    ['build'],
+    async ({ onLog }) => {
+      for (const artifact of artifacts) onLog({ level: 'info', message: 'build artifact', fields: { artifact } })
+      return { artifacts, elapsedMs: 15 }
+    },
+    streams,
+  ).run()
+  assert.ok(output.stdout.includes('\x1b[36m\x1b[1mBuild outputs (3):\x1b[22m\x1b[39m'))
+  for (const artifact of new Set(artifacts)) {
+    assert.equal(output.stdout.split(artifact).length - 1, 1)
+    assert.ok(output.stdout.includes(`\x1b[36m\x1b[1m${artifact}\x1b[22m\x1b[39m`))
+  }
+  assert.equal(output.stdout.split('✓ built in ').length - 1, 1)
+})
+
+test('watch summaries accumulate the whole cycle and reset between rebuilds', async () => {
+  const { output, streams } = captureOutput()
+  await new ArkdownPackageCli(
+    ['build', '--watch'],
+    async ({ onLog }) => {
+      for (const artifacts of [
+        ['signed.hap', 'unsigned.hap', 'mapping/sourceMaps.map'],
+        ['signed.hap', 'unsigned.hap'],
+      ]) {
+        const start = output.stdout.length
+        onLog({ level: 'info', message: 'watch rebuild started' })
+        for (const artifact of artifacts) onLog({ level: 'info', message: 'build artifact', fields: { artifact } })
+        assert.equal(output.stdout.slice(start).includes('Build outputs'), false)
+        onLog({ level: 'info', message: 'build succeeded', fields: { elapsed_seconds: 1 } })
+        const summary = output.stdout.slice(start)
+        assert.ok(summary.includes(`Build outputs (${artifacts.length}):`))
+        for (const artifact of artifacts) assert.ok(summary.includes(artifact))
+        assert.equal(summary.split('✓ built in ').length - 1, 1)
+        assert.equal(summary.includes('mapping/sourceMaps.map'), artifacts.length === 3)
+      }
+      return { artifacts: [], elapsedMs: 1 }
+    },
+    streams,
+  ).run()
 })

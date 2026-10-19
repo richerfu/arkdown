@@ -4,7 +4,16 @@ const { AsyncLocalStorage } = require('node:async_hooks')
 
 const buildLogs = new AsyncLocalStorage()
 const LOG_LEVELS = Object.freeze({ silent: 0, error: 1, warn: 2, info: 3, debug: 4 })
-const COLOR_CODES = Object.freeze({ info: 36, success: 32, warn: 33, error: 31, debug: 90, muted: 90, artifact: 36 })
+const COLOR_CODES = Object.freeze({
+  info: 36,
+  success: 32,
+  warn: 33,
+  error: 31,
+  debug: 90,
+  muted: 90,
+  artifact: 36,
+  bold: 1,
+})
 
 class TerminalColors {
   constructor(stream, env = process.env) {
@@ -21,7 +30,7 @@ class TerminalColors {
     const text = String(value)
     if (!this.enabled) return text
     const open = `\x1b[${COLOR_CODES[style]}m`
-    const close = '\x1b[39m'
+    const close = style === 'bold' ? '\x1b[22m' : '\x1b[39m'
     // Restore the outer color after nested styles and reset it on every line.
     return `${open}${text.replaceAll(close, open).replaceAll('\n', `${close}\n${open}`)}${close}`
   }

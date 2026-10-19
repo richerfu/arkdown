@@ -2229,6 +2229,7 @@ impl BuildCoordinator {
 
         // ── Step 6: Packaging + Signing ───────────────────────────────────
         let mut output_paths = Vec::new();
+        let mut additional_artifacts = Vec::new();
         if let Some(output) = self
             .run_package_sign_stage(PackageSignStageInput {
                 args,
@@ -2248,6 +2249,7 @@ impl BuildCoordinator {
                 module_obfuscation_contexts: &module_obfuscation_contexts,
                 bundle_package_outs: &bundle_package_outs,
                 output_paths: &mut output_paths,
+                additional_artifacts: &mut additional_artifacts,
                 start,
             })
             .await?
@@ -2275,8 +2277,6 @@ impl BuildCoordinator {
             .await?;
         }
 
-        Ok(BuildOutput {
-            artifact_paths: output_paths,
-        })
+        Ok(BuildOutput::new(output_paths).with_additional_artifacts(additional_artifacts))
     }
 }

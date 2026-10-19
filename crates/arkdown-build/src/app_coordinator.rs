@@ -85,7 +85,8 @@ impl AppBuildCoordinator {
         // same ordering through module dependency edges.
         let mut child_artifacts = self.execute_child(OutputTarget::Hsp, "hsp").await?;
         child_artifacts.extend(self.execute_child(OutputTarget::Hap, "hap").await?);
-        let mut app_artifacts = self.local_app_artifacts(child_artifacts)?;
+        let mut additional_artifacts = child_artifacts.all_artifact_paths();
+        let mut app_artifacts = self.local_app_artifacts(child_artifacts.artifact_paths)?;
         app_artifacts.extend(self.remote_app_artifacts().await?);
 
         let output_layout = AppProjectOutputLayout::new(
@@ -147,29 +148,34 @@ impl AppBuildCoordinator {
                 pack_res_path.as_deref(),
             )
             .await?;
-        if let Err(error) = self.collect_project_debug_symbols().await {
-            tracing::warn!(
+        match self.collect_project_debug_symbols().await {
+            Ok(paths) => additional_artifacts.extend(paths),
+            Err(error) => tracing::warn!(
               error = %format!("{error:#}"),
               "packing app-symbol.zip failed"
-            );
+            ),
         }
         drop(staged);
 
-        self.sign_packages_from_app(&package_runner, &output_layout)
-            .await?;
+        additional_artifacts.extend(
+            self.sign_packages_from_app(&package_runner, &output_layout)
+                .await?,
+        );
 
         let final_apps = self.sign_apps(&output_layout).await?;
+        additional_artifacts.push(output_layout.unsigned_app());
+        additional_artifacts.push(output_layout.pack_info());
+        additional_artifacts.extend(privacy_profile.map(|output| output.processed_path));
+        additional_artifacts.extend(pack_res_path);
 
-        Ok(BuildOutput {
-            artifact_paths: final_apps,
-        })
+        Ok(BuildOutput::new(final_apps).with_additional_artifacts(additional_artifacts))
     }
 
     async fn execute_child(
         &self,
         output_target: OutputTarget,
         target: &str,
-    ) -> Result<Vec<PathBuf>> {
+    ) -> Result<BuildOutput> {
         let selected_module = self.args.module.as_deref();
         let has_module = self.config.modules.iter().any(|module| {
             module.module_type.matches_output_target(&output_target)
@@ -178,7 +184,7 @@ impl AppBuildCoordinator {
                     .unwrap_or(true)
         });
         if !has_module {
-            return Ok(Vec::new());
+            return Ok(BuildOutput::default());
         }
 
         let mut config = self.config.as_ref().clone();
@@ -191,7 +197,7 @@ impl AppBuildCoordinator {
         let coordinator = BuildCoordinator::new(self.session.clone(), config, args)
             .with_package_plugins(self.package_plugins.clone())
             .within_task_cycle();
-        Ok(coordinator.execute().await?.artifact_paths)
+        coordinator.execute().await
     }
 
     fn local_app_artifacts(&self, paths: Vec<PathBuf>) -> Result<Vec<AppArtifactInput>> {
@@ -435,7 +441,7 @@ impl AppBuildCoordinator {
         Ok((select(&staged.hap_paths), select(&staged.hsp_paths)))
     }
 
-    async fn collect_project_debug_symbols(&self) -> Result<()> {
+    async fn collect_project_debug_symbols(&self) -> Result<Vec<PathBuf>> {
         let collector = ProjectDebugSymbolCollector::new(
             self.config.project_root.clone(),
             self.config.product.name.clone(),
@@ -447,17 +453,21 @@ impl AppBuildCoordinator {
             self.config.modules.clone(),
             self.args.collect_debug_symbol,
         );
-        crate::service::BuildService::spawn_blocking(move || collector.collect())
+        let output = crate::service::BuildService::spawn_blocking(move || collector.collect())
             .await
             .context("project debug-symbol worker failed")??;
-        Ok(())
+        Ok(output
+            .archive
+            .into_iter()
+            .chain(output.module_links)
+            .collect())
     }
 
     async fn sign_packages_from_app(
         &self,
         runner: &AppPackageRunner,
         output_layout: &AppProjectOutputLayout<'_>,
-    ) -> Result<()> {
+    ) -> Result<Option<PathBuf>> {
         for stale in [
             output_layout.all_unsigned_app(),
             output_layout.all_signed_app(),
@@ -467,13 +477,13 @@ impl AppBuildCoordinator {
             }
         }
         if !self.args.enable_sign_task {
-            return Ok(());
+            return Ok(None);
         }
         let Some(signing_config) = self.config.product.signing_config.clone() else {
-            return Ok(());
+            return Ok(None);
         };
         if !self.config.product.build_option.app_with_signed_pkg {
-            return Ok(());
+            return Ok(None);
         }
 
         let unsigned_app = output_layout.unsigned_app();
@@ -523,7 +533,7 @@ impl AppBuildCoordinator {
         .context("SignPackagesFromApp cleanup worker failed")?;
         result?;
         cleanup?;
-        Ok(())
+        Ok(Some(output_layout.all_unsigned_app()))
     }
 
     async fn sign_unpacked_packages(
