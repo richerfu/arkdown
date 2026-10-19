@@ -1,5 +1,5 @@
 {
-  "cargo_lock_sha256": "84855973b0928cf577553ce4bf27ba15a31820b455db59da9034e4e00e022c47",
+  "cargo_lock_sha256": "96dc6f3f8db86332b1a8e6227803ffd4c3f178f45846247edcc3aa7f17152e92",
   "scope": "All non-workspace packages resolved by cargo metadata --locked, including build, development, optional and platform dependencies. This is a conservative inventory, not a claim that every package is linked into every native binary.",
   "packages": [
     {
