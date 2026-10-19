@@ -69,7 +69,8 @@ test(
     for (const message of ['R11 first rebuild', 'R11 second rebuild']) {
       const logStart = log.length
       fs.writeFileSync(source, original.replace('Hello World', message))
-      await waitFor(() => /build succeeded/.test(log.slice(logStart)))
+      // Watch keeps the service promise pending; the CLI renders a summary for each completed cycle.
+      await waitFor(() => log.slice(logStart).includes('✓ built in '))
       assert.match(log.slice(logStart), /watch rebuild started/)
       const next = fs.readFileSync(abc)
       assert.notDeepEqual(next, previous, 'the edited source must change bytecode')
