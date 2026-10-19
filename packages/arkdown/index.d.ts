@@ -410,6 +410,7 @@ export interface BuildLog {
 }
 
 export interface BuildResult {
+  /** All deliverables published by this build, including unsigned/signed packages and sidecars. */
   artifacts: Array<string>
   elapsedMs: number
 }

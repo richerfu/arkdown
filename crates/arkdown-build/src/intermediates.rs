@@ -1462,11 +1462,12 @@ impl IntermediateArtifactWriter {
         &self,
         source_maps: Option<&Path>,
         output: &Path,
-    ) -> Result<()> {
+    ) -> Result<Option<PathBuf>> {
         if let Some(source_maps) = source_maps.filter(|path| path.is_file()) {
             self.copy_if_exists(source_maps, output)?;
+            return Ok(Some(output.to_path_buf()));
         }
-        Ok(())
+        Ok(None)
     }
 
     /// Materialize the source-map handoffs consumed by CompileArkTS,

@@ -208,6 +208,7 @@ class BuildCliReporter {
     this.stderrColors = new TerminalColors(this.stderr, output.env)
     this.tty = Boolean(this.stdout.isTTY && !(output.env ?? process.env).CI && config.clearScreen !== false)
     this.started = performance.now()
+    this.artifacts = new Set()
   }
 
   enabled(level) {
@@ -249,14 +250,16 @@ class BuildCliReporter {
       }
       return
     }
-    // The completed service result below owns the artifact list and total time.
+    if (log.message === 'build artifact') {
+      if (this.watch) this.artifacts.add(fields.artifact)
+      return
+    }
+    if (log.message === 'watch rebuild started' || log.message === 'watch rebuild failed') this.artifacts.clear()
+    // Watch renders a summary after all artifacts for the completed cycle arrive.
     if (log.message === 'build succeeded' || log.message === 'build succeeded with no output files produced') {
       if (this.watch) {
-        if (fields.artifact) this.write('info', this.stdoutColors.format('artifact', fields.artifact))
-        this.write(
-          'info',
-          this.stdoutColors.format('success', `✓ built in ${this.duration(fields.elapsed_seconds * 1000)}`),
-        )
+        this.summary([...this.artifacts], fields.elapsed_seconds * 1000)
+        this.artifacts.clear()
       }
       return
     }
@@ -272,14 +275,20 @@ class BuildCliReporter {
   }
 
   finish(result) {
-    for (const artifact of result.artifacts ?? []) this.write('info', this.stdoutColors.format('artifact', artifact))
-    this.write(
-      'info',
-      this.stdoutColors.format(
-        'success',
-        `✓ built in ${this.duration(result.elapsedMs ?? performance.now() - this.started)}`,
-      ),
-    )
+    this.summary(result.artifacts ?? [], result.elapsedMs ?? performance.now() - this.started)
+  }
+
+  highlight(style, value) {
+    return this.stdoutColors.format(style, this.stdoutColors.format('bold', value))
+  }
+
+  summary(artifacts, elapsedMs) {
+    const paths = [...new Set(artifacts)].sort()
+    if (paths.length > 0) {
+      this.write('info', `\n${this.highlight('info', `Build outputs (${paths.length}):`)}`)
+      for (const artifact of paths) this.write('info', `  ${this.highlight('artifact', artifact)}`)
+    }
+    this.write('info', this.highlight('success', `✓ built in ${this.duration(elapsedMs)}`))
     this.clear()
   }
 

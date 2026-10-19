@@ -158,11 +158,8 @@ mod package_sign_stage;
 // Public types
 // ---------------------------------------------------------------------------
 
-/// Typed output of a complete build run.
-pub struct BuildOutput {
-    /// Absolute paths to all produced artifacts (signed HAP/HSP/HAR files).
-    pub artifact_paths: Vec<PathBuf>,
-}
+mod output;
+pub use output::BuildOutput;
 
 type ModuleBuildRecord = (
     ModuleConfig,

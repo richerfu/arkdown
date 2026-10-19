@@ -10,6 +10,46 @@ const { build } = require('..')
 
 const enabled = process.env.ARKDOWN_NATIVE_LOG_E2E === '1'
 
+for (const [fixture, target, extensions] of [
+  ['minimal-har', 'har', ['.har']],
+  ['minimal-hsp', 'hsp', ['-unsigned.hsp', '.har', '.tgz']],
+  ['minimal-hap', 'app', ['-unsigned.hap', '-unsigned.app']],
+]) {
+  test(`real ${target} build reports all published outputs`, { skip: !enabled, timeout: 120000 }, async (context) => {
+    const project = fs.mkdtempSync(path.join(os.tmpdir(), `arkdown-artifacts-${target}-`))
+    context.after(() => fs.rmSync(project, { recursive: true, force: true }))
+    fs.cpSync(path.resolve(__dirname, '../../../tests/fixtures', fixture), project, {
+      recursive: true,
+      filter: (source) => !['build', '.hvigor'].includes(path.basename(source)),
+    })
+    fs.writeFileSync(
+      path.join(project, 'oh-package.json5'),
+      JSON.stringify({ modelVersion: '6.0.0', dependencies: {}, devDependencies: {} }),
+    )
+    if (target === 'hsp') {
+      const profile = path.join(project, 'entry/build-profile.json5')
+      const config = JSON.parse(fs.readFileSync(profile, 'utf8'))
+      config.buildOption.generateSharedTgz = true
+      fs.writeFileSync(profile, JSON.stringify(config))
+    }
+    const result = await build({ project, target, cache: false, logLevel: 'silent' })
+    for (const extension of extensions) {
+      assert.ok(
+        result.artifacts.some((artifact) => artifact.endsWith(extension)),
+        `${extension}: ${result.artifacts}`,
+      )
+    }
+    if (target !== 'har') {
+      assert.ok(result.artifacts.some((artifact) => artifact.endsWith('/mapping/sourceMaps.map')))
+    }
+    assert.deepEqual(result.artifacts, [...new Set(result.artifacts)].sort())
+    for (const artifact of result.artifacts) assert.ok(fs.existsSync(artifact), artifact)
+    if (target === 'app') {
+      assert.ok(result.artifacts.some((artifact) => artifact.endsWith('/build/outputs/default/pack.info')))
+    }
+  })
+}
+
 test(
   'real native build flushes ordered progress and plugin logs before resolving',
   { skip: !enabled, timeout: 120000 },
@@ -25,6 +65,9 @@ test(
       JSON.stringify({ modelVersion: '6.0.0', dependencies: {}, devDependencies: {} }),
     )
     const logs = []
+    const stale = path.join(project, 'entry/build/default/outputs/default/stale.hap')
+    fs.mkdirSync(path.dirname(stale), { recursive: true })
+    fs.writeFileSync(stale, 'previous build')
     const result = await build(
       { project, cache: false, logLevel: 'debug', onLog: (log) => logs.push(log) },
       {
@@ -36,6 +79,22 @@ test(
       },
     )
     assert.ok(result.artifacts.some((artifact) => artifact.endsWith('.hap')))
+    assert.ok(result.artifacts.some((artifact) => artifact.endsWith('-unsigned.hap')))
+    assert.ok(result.artifacts.some((artifact) => artifact.endsWith('/mapping/sourceMaps.map')))
+    assert.ok(result.artifacts.some((artifact) => artifact.endsWith('/pack.info')))
+    assert.equal(
+      result.artifacts.some((artifact) => artifact.endsWith('/stale.hap')),
+      false,
+    )
+    assert.deepEqual(result.artifacts, [...new Set(result.artifacts)].sort())
+    for (const artifact of result.artifacts) assert.ok(fs.existsSync(artifact), artifact)
+    assert.deepEqual(
+      logs
+        .filter((log) => log.message === 'build artifact')
+        .map((log) => log.fields.artifact)
+        .sort(),
+      result.artifacts,
+    )
     assert.ok(logs.some((log) => log.message === 'plugin debug is enabled'))
     assert.ok(logs.some((log) => log.message === 'plugin warning is delivered'))
     const stages = logs.filter((log) => log.fields.source === 'rust_stage')
@@ -64,13 +123,16 @@ test(
     assert.equal(output.status, 0, output.stdout + output.stderr)
     assert.match(output.stdout, /\[1\/6\] Preparing project/)
     assert.match(output.stdout, /\[6\/6\] Packaging/)
-    assert.match(output.stdout, /\.hap\n✓ built in /)
+    assert.ok(output.stdout.includes(`Build outputs (${result.artifacts.length}):`))
+    for (const artifact of result.artifacts) assert.ok(output.stdout.includes(artifact), artifact)
+    assert.match(output.stdout, /✓ built in /)
     assert.equal((output.stdout + output.stderr).includes('\x1b'), false)
     assert.equal((output.stdout + output.stderr).includes('\r'), false)
     const colored = run([], { FORCE_COLOR: '1' })
     assert.equal(colored.status, 0, colored.stderr)
     assert.ok(colored.stdout.includes('\x1b[36m[1/6] Preparing project...\x1b[39m'))
-    assert.ok(colored.stdout.includes('\x1b[32m✓ built in '))
+    assert.ok(colored.stdout.includes('\x1b[36m\x1b[1mBuild outputs ('))
+    assert.ok(colored.stdout.includes('\x1b[32m\x1b[1m✓ built in '))
     assert.equal(colored.stdout.includes('\r'), false, 'forced color does not animate redirected progress')
     const disabled = run([], { FORCE_COLOR: undefined, NO_COLOR: '1' })
     assert.equal(disabled.status, 0, disabled.stderr)

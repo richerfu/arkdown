@@ -717,9 +717,7 @@ impl BuildCoordinator {
             Some(QuickFixTaskBoundary::ColdReload)
         ) {
             return Ok(CoordinatorBytecodeStageOutput {
-                early_output: Some(BuildOutput {
-                    artifact_paths: Vec::new(),
-                }),
+                early_output: Some(BuildOutput::new(Vec::new())),
                 bundle_package_outs: Vec::new(),
             });
         }
@@ -730,9 +728,7 @@ impl BuildCoordinator {
                 // HotReloadArkTS task and therefore never emit a second task cycle or
                 // enter packaging.
                 return Ok(CoordinatorBytecodeStageOutput {
-                    early_output: Some(BuildOutput {
-                        artifact_paths: Vec::new(),
-                    }),
+                    early_output: Some(BuildOutput::new(Vec::new())),
                     bundle_package_outs: Vec::new(),
                 });
             }
@@ -755,18 +751,14 @@ impl BuildCoordinator {
             .await?;
 
             return Ok(CoordinatorBytecodeStageOutput {
-                early_output: Some(BuildOutput {
-                    artifact_paths: Vec::new(),
-                }),
+                early_output: Some(BuildOutput::new(Vec::new())),
                 bundle_package_outs: Vec::new(),
             });
         }
 
         if matches!(config.output_target, OutputTarget::Preview) {
             return Ok(CoordinatorBytecodeStageOutput {
-                early_output: Some(BuildOutput {
-                    artifact_paths: Vec::new(),
-                }),
+                early_output: Some(BuildOutput::new(Vec::new())),
                 bundle_package_outs: Vec::new(),
             });
         }

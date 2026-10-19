@@ -21,6 +21,7 @@ pub(super) struct PackageSignStageInput<'a> {
     pub(super) module_obfuscation_contexts: &'a [ModuleObfuscationContext],
     pub(super) bundle_package_outs: &'a [(BundlePackageOutput,)],
     pub(super) output_paths: &'a mut Vec<PathBuf>,
+    pub(super) additional_artifacts: &'a mut Vec<PathBuf>,
     pub(super) start: Instant,
 }
 
@@ -47,6 +48,7 @@ impl BuildCoordinator {
             module_obfuscation_contexts,
             bundle_package_outs,
             output_paths,
+            additional_artifacts,
             start,
         } = input;
 
@@ -97,9 +99,7 @@ impl BuildCoordinator {
                 })?;
             }
             progress.done();
-            return Ok(Some(BuildOutput {
-                artifact_paths: Vec::new(),
-            }));
+            return Ok(Some(BuildOutput::new(Vec::new())));
         }
         // hvigor `FastPackageHap` (`packOptions.fastBuildApp`): skip the HAP
         // packaging and copy the compiled intermediates into
@@ -137,15 +137,15 @@ impl BuildCoordinator {
                     .hvigor_properties
                     .source_map_output(&config.project_root, &module.name)
                     .unwrap_or_else(|| module_layout.output_mapping_source_maps());
-                intermediate_writer.publish_package_source_maps(
+                additional_artifacts.extend(intermediate_writer.publish_package_source_maps(
                     package_out.source_maps_path.as_deref(),
                     &source_map_output,
-                )?;
+                )?);
                 let source_map_primary = package_out
                     .source_maps_path
                     .clone()
                     .unwrap_or_else(|| module_layout.loader_out_source_maps());
-                DebugSymbolCollector::new(
+                let symbols = DebugSymbolCollector::new(
                     module.src_path.clone(),
                     module.name.clone(),
                     config.build_mode.clone(),
@@ -159,11 +159,15 @@ impl BuildCoordinator {
                 .with_output_variant(&config.product.name, module_target_name)
                 .collect()
                 .map_err(|error| anyhow::anyhow!("CollectDebugSymbol failed: {error}"))?;
+                additional_artifacts.extend(symbols.source_map);
+                additional_artifacts.extend(symbols.name_cache);
+                additional_artifacts.extend(symbols.native_lib_links);
             }
             progress.done();
-            return Ok(Some(BuildOutput {
-                artifact_paths: paths,
-            }));
+            return Ok(Some(
+                BuildOutput::new(paths)
+                    .with_additional_artifacts(std::mem::take(additional_artifacts)),
+            ));
         }
         for (
             (
@@ -499,6 +503,7 @@ impl BuildCoordinator {
                         *quickfix_version_advanced = true;
                     }
                     if final_hqf.is_file() {
+                        additional_artifacts.push(unsigned_hqf);
                         output_paths.push(final_hqf);
                     }
                     continue;
@@ -1103,9 +1108,11 @@ impl BuildCoordinator {
                                         obfuscated: module_obfuscation
                                             .is_enabled(&config.build_mode),
                                     };
-                                    packager.pack_hsp_interface_har(interface_input).map_err(
-                                        |e| anyhow::anyhow!("PackageSharedHar failed: {}", e),
-                                    )?;
+                                    let interface_har =
+                                        packager.pack_hsp_interface_har(interface_input).map_err(
+                                            |e| anyhow::anyhow!("PackageSharedHar failed: {}", e),
+                                        )?;
+                                    additional_artifacts.push(interface_har);
                                 }
                                 tracing::info!(
                                   module = %module.name,
@@ -1261,6 +1268,7 @@ impl BuildCoordinator {
                                 "pack.info",
                                 &artifact.pack_info_path,
                             )?;
+                            additional_artifacts.push(artifact.pack_info_path.clone());
                         }
                         tracing::info!(
                           module = %module.name,
@@ -1272,15 +1280,15 @@ impl BuildCoordinator {
                         .hvigor_properties
                         .source_map_output(&config.project_root, &module.name)
                         .unwrap_or_else(|| module_layout.output_mapping_source_maps());
-                    intermediate_writer.publish_package_source_maps(
+                    additional_artifacts.extend(intermediate_writer.publish_package_source_maps(
                         package_out.source_maps_path.as_deref(),
                         &source_map_output,
-                    )?;
+                    )?);
                     let source_map_primary = package_out
                         .source_maps_path
                         .clone()
                         .unwrap_or_else(|| module_layout.loader_out_source_maps());
-                    DebugSymbolCollector::new(
+                    let symbols = DebugSymbolCollector::new(
                         module.src_path.clone(),
                         module.name.clone(),
                         config.build_mode.clone(),
@@ -1294,6 +1302,9 @@ impl BuildCoordinator {
                     .with_output_variant(&config.product.name, artifact_target_label)
                     .collect()
                     .map_err(|error| anyhow::anyhow!("CollectDebugSymbol failed: {error}"))?;
+                    additional_artifacts.extend(symbols.source_map);
+                    additional_artifacts.extend(symbols.name_cache);
+                    additional_artifacts.extend(symbols.native_lib_links);
                     if matches!(module_config.output_target, OutputTarget::Hsp) {
                         let shared_tgz_output = output_dir.join(output_name.shared_tgz());
                         if module_build_option.generate_shared_tgz.is_some()
@@ -1305,7 +1316,7 @@ impl BuildCoordinator {
                             .generate_shared_tgz
                             .unwrap_or(matches!(config.build_mode, BuildMode::Release));
                         if should_generate_shared_tgz {
-                            packager
+                            let shared_tgz = packager
                                 .pack_hsp_tgz(HspTgzInput {
                                     hsp_path: out[0].clone(),
                                     interface_har_path: output_dir
@@ -1315,9 +1326,11 @@ impl BuildCoordinator {
                                 .map_err(|error| {
                                     anyhow::anyhow!("PackageSharedTgz failed: {error}")
                                 })?;
+                            additional_artifacts.push(shared_tgz);
                         }
                     }
                     output_paths.extend(final_paths.iter().cloned());
+                    additional_artifacts.extend(out);
 
                     if artifact_target_label == "default"
                         && TargetBuildExecutionPlan::is_device_test(args)
@@ -1381,13 +1394,19 @@ impl BuildCoordinator {
                 "build succeeded with no output files produced"
             );
         } else {
-            for path in output_paths.iter() {
+            let mut artifacts = output_paths
+                .iter()
+                .chain(additional_artifacts.iter())
+                .collect::<Vec<_>>();
+            artifacts.sort();
+            artifacts.dedup();
+            for path in artifacts {
                 tracing::info!(
-                    artifact = %path.display(),
-                    elapsed_seconds = elapsed.as_secs_f32(),
-                    "build succeeded"
+                    artifact = %ArtifactPathSerializer::path_to_slash_string(path)?,
+                    "build artifact"
                 );
             }
+            tracing::info!(elapsed_seconds = elapsed.as_secs_f32(), "build succeeded");
         }
 
         Ok(None)

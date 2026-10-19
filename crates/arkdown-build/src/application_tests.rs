@@ -1085,3 +1085,62 @@ fn unit_test_post_compile_handoffs_use_the_typed_module_layout() {
             .expect("portable artifact path")
     );
 }
+
+#[test]
+fn published_artifacts_merge_without_changing_app_package_inputs() {
+    use crate::coordinator::BuildOutput;
+    let root = TempDir::new().expect("artifact roots");
+    let shared = root.path().join("library-signed.hsp");
+    let entry = root.path().join("entry-signed.hap");
+    let unsigned = root.path().join("entry-unsigned.hap");
+    let mapping = root.path().join("mapping/sourceMaps.map");
+    let mut output =
+        BuildOutput::new(vec![shared.clone()]).with_additional_artifacts(vec![mapping.clone()]);
+    output.extend(
+        BuildOutput::new(vec![entry.clone()]).with_additional_artifacts(vec![
+            unsigned.clone(),
+            mapping.clone(),
+            entry.clone(),
+        ]),
+    );
+    assert_eq!(
+        output.artifact_paths,
+        vec![shared.clone(), entry.clone()],
+        "APP assembly consumes only the selected primary packages"
+    );
+    let mut expected = vec![shared, entry, unsigned, mapping];
+    expected.sort();
+    assert_eq!(
+        output.all_artifact_paths(),
+        expected,
+        "public results include unsigned packages and sidecars once, in deterministic order"
+    );
+}
+
+#[test]
+fn source_map_publication_reports_current_output_and_ignores_stale_destination() {
+    let root = TempDir::new().expect("source maps");
+    let source = root.path().join("compiler.map");
+    let target = root.path().join("mapping/sourceMaps.map");
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::write(&target, "stale").unwrap();
+    let writer = IntermediateArtifactWriter::new(std::path::Path::new("restool"));
+    assert_eq!(
+        writer.publish_package_source_maps(None, &target).unwrap(),
+        None
+    );
+    assert_eq!(
+        writer
+            .publish_package_source_maps(Some(&source), &target)
+            .unwrap(),
+        None
+    );
+    std::fs::write(&source, "current").unwrap();
+    assert_eq!(
+        writer
+            .publish_package_source_maps(Some(&source), &target)
+            .unwrap(),
+        Some(target.clone())
+    );
+    assert_eq!(std::fs::read_to_string(target).unwrap(), "current");
+}

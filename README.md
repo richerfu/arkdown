@@ -126,6 +126,10 @@ npx arkdown build --project ./my-app --target hap --mode debug
 ```
 
 Builds print stage progress, stage durations, artifact paths, and total elapsed time by default.
+The final `Build outputs` summary lists all deliverables published by this invocation: unsigned
+and signed packages, HSP interface HAR/TGZ files, source maps, pack metadata, and collected symbols
+when enabled. Paths are deduplicated and sorted; files left over from other builds are excluded.
+The summary heading, output paths, and completion message are highlighted in bold on color terminals.
 Like Vite/Rolldown, `--logLevel info` is the default; use `--logLevel debug` for detailed
 diagnostics, `warn` or `error` to reduce output, or `silent` (also `--silent`) to suppress it.
 `--log-level` and `-l` are aliases. Failed builds still exit with code 1 in silent mode.
@@ -189,8 +193,9 @@ const result = await build({
 console.log(result.artifacts);
 ```
 
-The API accepts the same `logLevel` values and an optional synchronous `onLog(log)` callback
-that replaces default console output. Each log has `level`, `message`, `target`, and structured
+The API returns the same complete output list in `result.artifacts`. It accepts the same `logLevel`
+values and an optional synchronous `onLog(log)` callback that replaces default console output.
+Each log has `level`, `message`, `target`, and structured
 `fields`; stage events use `fields.source === "rust_stage"` with `phase` (`start`/`end`),
 `step`, `total`, `label`, and an `elapsed_ms` duration on completion. Filters and callbacks are
 scoped to each build, including plugin logs. Logs are delivered before the build promise settles.
