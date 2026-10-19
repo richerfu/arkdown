@@ -247,7 +247,7 @@ impl WatchStage {
 
         let rt = tokio::runtime::Handle::current();
 
-        tokio::task::spawn_blocking(move || {
+        crate::service::BuildService::spawn_blocking(move || {
             let watch_result = watcher.watch(|events| {
                 let invalidation =
                     WatchInvalidationBatch::from_watch_events(events, &fingerprint_baseline);

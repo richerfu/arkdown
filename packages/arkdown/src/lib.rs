@@ -79,6 +79,7 @@ mod hvigor_plugin_plan;
 mod js_callback;
 mod plugin_module;
 mod runtime_observe;
+pub use runtime_observe::BuildLog;
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -2333,6 +2334,9 @@ pub struct ArkdownPlugin {
 
 #[napi(object)]
 pub struct BuildConfig {
+  /// Console verbosity. Defaults to info; silent still rejects failed builds.
+  #[napi(ts_type = "'debug' | 'info' | 'warn' | 'error' | 'silent'")]
+  pub log_level: Option<String>,
   pub project: Option<String>,
   pub target: Option<String>,
   pub mode: Option<String>,
@@ -2433,9 +2437,13 @@ pub fn build<'a>(
   config: BuildConfig,
   #[napi(ts_arg_type = "Array<ArkdownPlugin> | undefined | null")] plugins: Option<Array<'a>>,
   sdk_plugin_dispatch: Function<'a, (String,), String>,
+  on_log: Function<'a, BuildLog, ()>,
 ) -> napi::Result<Object<'a>> {
-  runtime_observe::RuntimeObservability::install_build_safety_net(&config)
-    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+  use tracing::instrument::WithSubscriber;
+  let observability =
+    runtime_observe::RuntimeObservability::new(on_log, config.log_level.as_deref())?;
+  let dispatch = observability.dispatch();
+  let _log_guard = tracing::dispatcher::set_default(&dispatch);
   let sdk_plugin_host = Some(NapiSdkPluginHost::from_dispatch(sdk_plugin_dispatch)?);
 
   // 1. Wrap JS plugins synchronously (Env + Array are not Send).
@@ -2468,6 +2476,7 @@ pub fn build<'a>(
 
   // Extract all config values (Send types only).
   let BuildConfig {
+    log_level: _,
     project,
     target,
     mode,
@@ -2567,7 +2576,7 @@ pub fn build<'a>(
     env.raw(),
     async move {
       let start = std::time::Instant::now();
-      let artifacts = run_build(
+      let result = run_build(
         project,
         target,
         mode,
@@ -2577,13 +2586,16 @@ pub fn build<'a>(
         js_plugins,
       )
       .await
-      .map_err(|e| napi::Error::from_reason(format!("{e:#}")))?;
+      .map_err(|e| napi::Error::from_reason(format!("{e:#}")));
+      observability.flush().await?;
+      let artifacts = result?;
       let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
       Ok::<_, napi::Error>(BuildResult {
         artifacts,
         elapsed_ms,
       })
-    },
+    }
+    .with_subscriber(dispatch.clone()),
     |env_raw, result| unsafe { napi::bindgen_prelude::ToNapiValue::to_napi_value(env_raw, result) },
   )?;
   unsafe { Object::from_napi_value(env.raw(), raw_promise) }

@@ -246,6 +246,7 @@ jobs:
           ARKDOWN_NATIVE_CHECKER_E2E: '1'
           ARKDOWN_NATIVE_PLUGIN_E2E: '1'
           ARKDOWN_NATIVE_CACHE_E2E: '1'
+          ARKDOWN_NATIVE_LOG_E2E: '1'
           ARKDOWN_NATIVE_WATCH_E2E: '1'
 
       - name: Save Cargo cache after checks

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 const packageManifest = require('../package.json')
+const { TerminalColors } = require('./build-logger.js')
 
 const BUILD_VALUE_OPTIONS = new Map([
   ['--project', 'project'],
@@ -20,6 +21,9 @@ const BUILD_VALUE_OPTIONS = new Map([
   ['--coverage-mode', 'coverageMode'],
   ['--unit-test-replace-page', 'unitTestReplacePage'],
   ['--cache-file', 'cacheFile'],
+  ['--logLevel', 'logLevel'],
+  ['--log-level', 'logLevel'],
+  ['-l', 'logLevel'],
 ])
 const BUILD_FLAG_OPTIONS = new Map([
   ['--watch', 'watch'],
@@ -54,6 +58,20 @@ class JsCliArgumentParser {
     for (let index = 0; index < this.args.length; index += 1) {
       const option = this.args[index]
       if (option === '--help' || option === '-h') continue
+      if (/^--(?:logLevel|log-level)=/.test(option)) {
+        config.logLevel = option.slice(option.indexOf('=') + 1)
+        continue
+      }
+      if (option === '--silent') {
+        config.logLevel = 'silent'
+        continue
+      }
+      if (option === '--clearScreen' || option === '--clear-screen') {
+        const value = this.value(++index, option)
+        if (!['true', 'false'].includes(value)) this.invalid(option, value, 'true or false')
+        config.clearScreen = value === 'true'
+        continue
+      }
       if (BUILD_VALUE_OPTIONS.has(option)) {
         const key = BUILD_VALUE_OPTIONS.get(option)
         config[key] = this.value(++index, option)
@@ -76,6 +94,7 @@ class JsCliArgumentParser {
       this.unknown(option)
     }
     this.oneOf(config, 'analyze', ['normal', 'default', 'verbose', 'false', 'trace'])
+    this.oneOf(config, 'logLevel', ['debug', 'info', 'warn', 'error', 'silent'])
     this.oneOf(config, 'action', [
       'assemble',
       'hot-reload-compile',
@@ -176,13 +195,105 @@ function writeStdout(message) {
 }
 
 function writeStderr(message) {
-  process.stderr.write(`${message}\n`)
+  process.stderr.write(`${new TerminalColors(process.stderr).format('error', message)}\n`)
+}
+
+class BuildCliReporter {
+  constructor(config, output = {}) {
+    this.level = config.logLevel ?? 'info'
+    this.watch = config.watch || config.preview || ['hot-reload-compile', 'hot-reload-build'].includes(config.action)
+    this.stdout = output.stdout ?? process.stdout
+    this.stderr = output.stderr ?? process.stderr
+    this.stdoutColors = new TerminalColors(this.stdout, output.env)
+    this.stderrColors = new TerminalColors(this.stderr, output.env)
+    this.tty = Boolean(this.stdout.isTTY && !(output.env ?? process.env).CI && config.clearScreen !== false)
+    this.started = performance.now()
+  }
+
+  enabled(level) {
+    const levels = { silent: 0, error: 1, warn: 2, info: 3, debug: 4 }
+    return levels[this.level] >= levels[level]
+  }
+
+  duration(ms) {
+    return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(2)}s`
+  }
+
+  clear() {
+    if (this.pending) this.stdout.write('\r\x1b[2K')
+    this.pending = false
+  }
+
+  write(level, message) {
+    if (!this.enabled(level)) return
+    this.clear()
+    const stream = ['warn', 'error'].includes(level) ? this.stderr : this.stdout
+    const colors = stream === this.stderr ? this.stderrColors : this.stdoutColors
+    stream.write(`${level === 'info' ? message : colors.format(level, message)}\n`)
+  }
+
+  log(log) {
+    if (!this.enabled(log.level)) return
+    const fields = log.fields ?? {}
+    if (fields.source === 'rust_stage') {
+      const stage = `[${fields.step}/${fields.total}] ${fields.label}`
+      if (fields.phase === 'start') {
+        this.clear()
+        this.stdout.write(`${this.stdoutColors.format('info', `${stage}...`)}${this.tty ? '' : '\n'}`)
+        this.pending = this.tty
+      } else {
+        this.write(
+          'info',
+          `${this.stdoutColors.format('success', '✓')} ${stage} ${this.stdoutColors.format('muted', `(${this.duration(fields.elapsed_ms)})`)}`,
+        )
+      }
+      return
+    }
+    // The completed service result below owns the artifact list and total time.
+    if (log.message === 'build succeeded' || log.message === 'build succeeded with no output files produced') {
+      if (this.watch) {
+        if (fields.artifact) this.write('info', this.stdoutColors.format('artifact', fields.artifact))
+        this.write(
+          'info',
+          this.stdoutColors.format('success', `✓ built in ${this.duration(fields.elapsed_seconds * 1000)}`),
+        )
+      }
+      return
+    }
+    const details = Object.entries(fields)
+      .filter(([key]) => this.level === 'debug' || ['module', 'plugin', 'code', 'diagnostic', 'error'].includes(key))
+      .map(([key, value]) => `${key}=${typeof value === 'string' ? value : JSON.stringify(value)}`)
+      .join(' ')
+    const prefix = log.level === 'info' ? '[arkdown]' : `[arkdown:${log.level}]`
+    this.write(
+      log.level,
+      `${log.level === 'info' ? this.stdoutColors.format('info', prefix) : prefix} ${log.message}${details ? ` ${details}` : ''}`,
+    )
+  }
+
+  finish(result) {
+    for (const artifact of result.artifacts ?? []) this.write('info', this.stdoutColors.format('artifact', artifact))
+    this.write(
+      'info',
+      this.stdoutColors.format(
+        'success',
+        `✓ built in ${this.duration(result.elapsedMs ?? performance.now() - this.started)}`,
+      ),
+    )
+    this.clear()
+  }
+
+  fail(error) {
+    this.write('error', `✗ Build failed in ${this.duration(performance.now() - this.started)}\nerror: ${error.message}`)
+    this.clear()
+  }
 }
 
 class ArkdownPackageCli {
-  constructor(argv, operations) {
+  constructor(argv, operations, output) {
     this.argv = argv
     this.operations = typeof operations === 'function' ? { build: operations } : (operations ?? {})
+    this.output = output
   }
 
   async run() {
@@ -193,8 +304,19 @@ class ArkdownPackageCli {
         return 0
       }
       const config = this.parseBuildArgs(args)
-      const result = await this.operation('build')(config)
-      for (const artifact of result.artifacts ?? []) writeStdout(artifact)
+      const reporter = new BuildCliReporter(config, this.output)
+      const { clearScreen: _, ...request } = config
+      reporter.write(
+        'info',
+        `${reporter.stdoutColors.format('info', `arkdown v${packageManifest.version}`)} building ${config.mode ?? 'debug'} ${config.target ?? 'hap'}...`,
+      )
+      try {
+        const result = await this.operation('build')({ ...request, onLog: (log) => reporter.log(log) })
+        reporter.finish(result)
+      } catch (error) {
+        reporter.fail(error)
+        return 1
+      }
       return 0
     }
     if (command === 'check') {
@@ -272,6 +394,13 @@ Options:
   --action <action>   Build action. Defaults to assemble. Reload, QuickFix,
                       and device-test actions select their complete Rust flow.
   --analyze <mode>    Hook metrics: normal, verbose, false, or trace.
+  -l, --logLevel <level>
+                      Console logging: debug, info (default), warn, error, silent.
+                      Also accepts --log-level. Silent keeps failure exit codes.
+  --clearScreen <boolean>
+                      Update progress in place on a terminal (default true).
+                      Use false for persistent progress lines. No animation in CI.
+  --silent            Suppress all build output.
   --module, -m <name> Scope build to one module.
   --product <name>    Product name from build-profile.json5.
   --build-target-name <name>

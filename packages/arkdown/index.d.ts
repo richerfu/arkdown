@@ -336,6 +336,8 @@ export interface ArkdownPlugin {
 }
 
 export interface BuildConfig {
+  /** Console verbosity. Defaults to info; silent still rejects failed builds. */
+  logLevel?: 'debug' | 'info' | 'warn' | 'error' | 'silent'
   project?: string
   target?: string
   mode?: string
@@ -397,6 +399,14 @@ export interface BuildConfig {
   nodeExecutable?: string
   compilePluginPath?: string | string[]
   hvigorPluginFile?: string | string[]
+}
+
+/** A build-scoped diagnostic or stage event. Console presentation belongs to JavaScript. */
+export interface BuildLog {
+  level: 'debug' | 'info' | 'warn' | 'error'
+  target: string
+  message: string
+  fields: Record<string, string | number | boolean | null>
 }
 
 export interface BuildResult {
