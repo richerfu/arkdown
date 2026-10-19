@@ -100,7 +100,7 @@ impl AppBuildCoordinator {
             let artifacts = app_artifacts.clone();
             let pack_info_path = output_layout.pack_info();
             let align_device_types = self.args.align_device_types.clone();
-            let output = tokio::task::spawn_blocking(move || {
+            let output = crate::service::BuildService::spawn_blocking(move || {
                 ProjectPackInfoBuilder::new(&artifacts)
                     .with_aligned_device_types(&align_device_types)
                     .write(&pack_info_path)
@@ -116,7 +116,7 @@ impl AppBuildCoordinator {
             let schema_path = config
                 .sdk_config
                 .pac_schema_path_for_runtime(&config.product.runtime_os);
-            let output = tokio::task::spawn_blocking(move || {
+            let output = crate::service::BuildService::spawn_blocking(move || {
                 PrivacyProfileProcessor::new().process_project_privacy_profile(
                     ProjectPrivacyProfileInput {
                         project_root: &config.project_root,
@@ -278,7 +278,7 @@ impl AppBuildCoordinator {
             .join("cache")
             .join(&self.config.product.name)
             .join("integrated_hsp");
-        tokio::task::spawn_blocking(move || {
+        crate::service::BuildService::spawn_blocking(move || {
             RemoteHspCollector::new(&project_root, &scopes).collect_for_app(
                 &bundle_name,
                 version_code,
@@ -335,7 +335,7 @@ impl AppBuildCoordinator {
         let runner = runner.clone();
         let pack_info = output_layout.pack_info();
         let worker_output = output.clone();
-        tokio::task::spawn_blocking(move || {
+        crate::service::BuildService::spawn_blocking(move || {
             runner.generate_pack_res(&entry_card, &pack_info, &worker_output)
         })
         .await
@@ -353,10 +353,11 @@ impl AppBuildCoordinator {
         pack_res_path: Option<&Path>,
     ) -> Result<StagedAppArtifacts> {
         let artifacts = artifacts.to_vec();
-        let staged =
-            tokio::task::spawn_blocking(move || AppArtifactStager::new(&artifacts).stage())
-                .await
-                .context("PackageApp staging worker failed")??;
+        let staged = crate::service::BuildService::spawn_blocking(move || {
+            AppArtifactStager::new(&artifacts).stage()
+        })
+        .await
+        .context("PackageApp staging worker failed")??;
         let (hap_paths, hsp_paths) = self
             .normalize_app_artifacts(runner, output_layout, &staged, selected_package_file_names)
             .await?;
@@ -373,7 +374,7 @@ impl AppBuildCoordinator {
         plan.pack_res_path = pack_res_path.map(Path::to_path_buf);
         plan.compress_level = self.app_compress_level();
         let runner = runner.clone();
-        tokio::task::spawn_blocking(move || runner.pack(&plan))
+        crate::service::BuildService::spawn_blocking(move || runner.pack(&plan))
             .await
             .context("PackageApp worker failed")??;
         Ok(staged)
@@ -410,7 +411,7 @@ impl AppBuildCoordinator {
             output_layout.normalized_packages(),
         );
         let runner = runner.clone();
-        tokio::task::spawn_blocking(move || runner.normalize_device_types(&plan))
+        crate::service::BuildService::spawn_blocking(move || runner.normalize_device_types(&plan))
             .await
             .context("PackageApp generalNormalize worker failed")??;
 
@@ -446,7 +447,7 @@ impl AppBuildCoordinator {
             self.config.modules.clone(),
             self.args.collect_debug_symbol,
         );
-        tokio::task::spawn_blocking(move || collector.collect())
+        crate::service::BuildService::spawn_blocking(move || collector.collect())
             .await
             .context("project debug-symbol worker failed")??;
         Ok(())
@@ -477,10 +478,11 @@ impl AppBuildCoordinator {
 
         let unsigned_app = output_layout.unsigned_app();
         let worker_app = unsigned_app.clone();
-        let unpacked =
-            tokio::task::spawn_blocking(move || AppArchiveUnpacker::new(&worker_app).unpack())
-                .await
-                .context("SignPackagesFromApp unpack worker failed")??;
+        let unpacked = crate::service::BuildService::spawn_blocking(move || {
+            AppArchiveUnpacker::new(&worker_app).unpack()
+        })
+        .await
+        .context("SignPackagesFromApp unpack worker failed")??;
 
         let signed = self
             .sign_unpacked_packages(&unpacked, &signing_config)
@@ -504,7 +506,7 @@ impl AppBuildCoordinator {
                 plan.replace_pack_info = Some(false);
                 plan.compress_level = self.app_compress_level();
                 let runner = runner.clone();
-                tokio::task::spawn_blocking(move || runner.pack(&plan))
+                crate::service::BuildService::spawn_blocking(move || runner.pack(&plan))
                     .await
                     .context("SignPackagesFromApp pack worker failed")?
                     .map_err(anyhow::Error::from)
@@ -514,7 +516,7 @@ impl AppBuildCoordinator {
 
         let cleanup_app = unsigned_app;
         let cleanup_unpacked = unpacked;
-        let cleanup = tokio::task::spawn_blocking(move || {
+        let cleanup = crate::service::BuildService::spawn_blocking(move || {
             AppArchiveUnpacker::new(&cleanup_app).cleanup(&cleanup_unpacked)
         })
         .await
@@ -537,7 +539,7 @@ impl AppBuildCoordinator {
             .collect::<Vec<_>>();
         let signed_dir = unpacked.root_path.join("signed");
         let config = signing_config.clone();
-        let signed = tokio::task::spawn_blocking(move || {
+        let signed = crate::service::BuildService::spawn_blocking(move || {
             fs_err::create_dir_all(&signed_dir)?;
             inputs
                 .iter()
@@ -578,7 +580,7 @@ impl AppBuildCoordinator {
         let worker_unsigned = unsigned.clone();
         let worker_signed = signed.clone();
         let normal_signing_config = signing_config.clone();
-        tokio::task::spawn_blocking(move || {
+        crate::service::BuildService::spawn_blocking(move || {
             SignBackendRunner::new().sign_or_skip(
                 &worker_unsigned,
                 &worker_signed,
@@ -600,7 +602,7 @@ impl AppBuildCoordinator {
             let worker_config = signing_config;
             let worker_unsigned = all_unsigned;
             let worker_signed = all_signed.clone();
-            tokio::task::spawn_blocking(move || {
+            crate::service::BuildService::spawn_blocking(move || {
                 SignBackendRunner::new().sign_or_skip(
                     &worker_unsigned,
                     &worker_signed,

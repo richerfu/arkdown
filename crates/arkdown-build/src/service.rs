@@ -18,6 +18,16 @@ pub struct BuildService {
 }
 
 impl BuildService {
+    /// Keep request diagnostics attached when handing synchronous work to Tokio.
+    pub(crate) fn spawn_blocking<F, R>(work: F) -> tokio::task::JoinHandle<R>
+    where
+        F: FnOnce() -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        let dispatch = tracing::dispatcher::get_default(Clone::clone);
+        tokio::task::spawn_blocking(move || tracing::dispatcher::with_default(&dispatch, work))
+    }
+
     pub fn new(request: BuildRequest) -> Self {
         Self {
             request,
@@ -72,6 +82,8 @@ impl BuildService {
         use arkdown_session::BuildSessionBuilder;
 
         let request = self.request;
+        let mut progress = crate::progress::Progress::new();
+        progress.step(1, 6, "Preparing project");
         let package_plugins = self.package_plugins;
         let project_root = request
             .project
@@ -105,7 +117,7 @@ impl BuildService {
         if let Some(parameter_file_override) = request.parameter_file_override.clone() {
             session_builder = session_builder.with_parameter_file_override(parameter_file_override);
         }
-        let session = tokio::task::spawn_blocking(move || {
+        let session = Self::spawn_blocking(move || {
             session_builder
                 .build()
                 .map(Arc::new)
@@ -113,6 +125,7 @@ impl BuildService {
         })
         .await
         .map_err(|error| anyhow::anyhow!("build startup worker failed: {error}"))??;
+        progress.done();
 
         if request.target == "app" {
             let coordinator =

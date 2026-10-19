@@ -4,6 +4,7 @@ const Module = require('node:module')
 const path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const v8 = require('node:v8')
+const { BuildLogDispatcher } = require('./build-logger.js')
 
 const nativeBinding = require('../index.js')
 
@@ -81,10 +82,7 @@ function emitDiagnostic(level, diagnostic) {
       diagnostic.pluginName ? { pluginName: diagnostic.pluginName } : {},
     )
   }
-  process.emitWarning(`[arkdown] ${diagnostic.code}: ${diagnostic.message}`, {
-    code: diagnostic.code,
-    type: 'ArkdownWarning',
-  })
+  BuildLogDispatcher.emit('warn', diagnostic.message, { code: diagnostic.code, plugin: diagnostic.pluginName })
 }
 
 function emitPlanDiagnostics(response) {
@@ -558,11 +556,7 @@ const hvigorShareScope = (config) =>
 function createHvigorLogger(prefix, errorFileIds) {
   const write = (method, values) => {
     const message = values.map(pluginLogMessage).join(' ')
-    if (method === 'warn') process.emitWarning(`[${prefix}] ${message}`, { type: 'ArkdownWarning' })
-    else if (method === 'error') process.stderr.write(`[${prefix}] ${message}\n`)
-    else if (method !== 'debug' || process.env.ARKDOWN_LOG === 'debug' || process.env.ARKDOWN_LOG === 'trace') {
-      process.stdout.write(`[${prefix}] ${message}\n`)
-    }
+    BuildLogDispatcher.emit(method, message, { plugin: prefix })
   }
   const logger = {
     printErrorAndExit(value) {
@@ -603,9 +597,8 @@ function restoreHvigorCacheState(state, snapshot) {
   try {
     restored = v8.deserialize(Buffer.from(snapshot))
   } catch (cause) {
-    process.emitWarning(`[arkdown] ignored unreadable plugin context cache: ${String(cause?.message || cause)}`, {
+    BuildLogDispatcher.emit('warn', `ignored unreadable plugin context cache: ${String(cause?.message || cause)}`, {
       code: 'ARKDOWN_PLUGIN_CACHE_DECODE',
-      type: 'ArkdownWarning',
     })
     return
   }
@@ -800,9 +793,12 @@ function pluginContext(request, share, binding, cache, asyncTracker, pluginName,
   }
   const log = (level, value) => {
     const message = pluginLogMessage(value)
-    if (context) context[level](message)
-    else if (level === 'warn') process.emitWarning(message, { code: 'PLUGIN_WARNING', type: 'ArkdownWarning' })
-    else process[level === 'debug' ? 'stderr' : 'stdout'].write(`${message}\n`)
+    if (context && !BuildLogDispatcher.current()) context[level](message)
+    else
+      BuildLogDispatcher.emit(level, message, {
+        plugin: pluginName,
+        code: level === 'warn' ? 'PLUGIN_WARNING' : 'PLUGIN_LOG',
+      })
   }
   const getModuleIds = () =>
     context?.getModuleIds().values() ?? state?.moduleInfos.keys() ?? (moduleInfo?.id ? [moduleInfo.id] : []).values()
@@ -851,9 +847,7 @@ function pluginContext(request, share, binding, cache, asyncTracker, pluginName,
     getFileName,
     info: (value) => log('info', value),
     warn: (value) => log('warn', value),
-    debug(value) {
-      if (process.env.ARKDOWN_LOG === 'debug' || process.env.ARKDOWN_LOG === 'trace') log('debug', value)
-    },
+    debug: (value) => log('debug', value),
     error(value) {
       const error = value instanceof Error ? value : new Error(pluginLogMessage(value))
       if (isObject(value) && !(value instanceof Error)) Object.assign(error, value)
@@ -1018,10 +1012,13 @@ function normalizePlugin(plugin, binding, options = {}) {
     return result && typeof result.then === 'function' ? Promise.resolve(result).then(wrap) : wrap(result)
   }
 
+  const logger = BuildLogDispatcher.current()
   Object.defineProperties(normalized, {
     __arkdownPluginHooks: { value: hookNames },
     __arkdownPluginHookMeta: { value: hookMeta },
-    __arkdownDispatchPluginHook: { value: dispatch },
+    __arkdownDispatchPluginHook: {
+      value: logger ? (request) => BuildLogDispatcher.run(logger, () => dispatch(request)) : dispatch,
+    },
     __arkdownPluginCacheIdentity: { value: cacheIdentity },
   })
   if (compilePlugin) {
@@ -1223,8 +1220,17 @@ class PluginAdapter {
 
 function createBuild(nativeBuild = nativeBinding.build, binding = nativeBinding) {
   return async (config = {}, plugins) => {
-    const prepared = await new PluginAdapter(binding).prepare(config, plugins)
-    return nativeBuild(prepared.config, prepared.plugins, createSdkPluginDispatch())
+    const logger = new BuildLogDispatcher(config)
+    return BuildLogDispatcher.run(logger, async () => {
+      const prepared = await new PluginAdapter(binding).prepare(config, plugins)
+      delete prepared.config.onLog
+      prepared.config.logLevel = logger.level
+      const result = await nativeBuild(prepared.config, prepared.plugins, createSdkPluginDispatch(), (log) =>
+        logger.emit(log),
+      )
+      if (logger.error) throw logger.error
+      return result
+    })
   }
 }
 

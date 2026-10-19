@@ -125,6 +125,13 @@ Build a HAP from an OpenHarmony project:
 npx arkdown build --project ./my-app --target hap --mode debug
 ```
 
+Builds print stage progress, stage durations, artifact paths, and total elapsed time by default.
+Like Vite/Rolldown, `--logLevel info` is the default; use `--logLevel debug` for detailed
+diagnostics, `warn` or `error` to reduce output, or `silent` (also `--silent`) to suppress it.
+`--log-level` and `-l` are aliases. Failed builds still exit with code 1 in silent mode.
+Progress updates in place only on a terminal outside CI; redirected output uses plain lines.
+Pass `--clearScreen false` to keep progress lines on a terminal, too.
+
 `--target` accepts `hap`, `hsp`, `har`, `app`, or `test`; `--mode` accepts `debug` or `release`. Use `--module`, `--product`,
 or `--build-target-name` to select a more specific build configuration. Run `npx arkdown build --help` for
 the complete option list. Pass `--enable-zig` to compile native C/C++ sources with `zig cc` and `zig c++`;
@@ -175,6 +182,14 @@ const result = await build({
 
 console.log(result.artifacts);
 ```
+
+The API accepts the same `logLevel` values and an optional synchronous `onLog(log)` callback
+that replaces default console output. Each log has `level`, `message`, `target`, and structured
+`fields`; stage events use `fields.source === "rust_stage"` with `phase` (`start`/`end`),
+`step`, `total`, `label`, and an `elapsed_ms` duration on completion. Filters and callbacks are
+scoped to each build, including plugin logs. Logs are delivered before the build promise settles.
+`ARKDOWN_LOG` (or `RUST_LOG`) can further narrow native diagnostics by tracing target; it does
+not override `logLevel`. Build logs are no longer persisted implicitly under `.hvigor`.
 
 ### TS/JS plugins
 

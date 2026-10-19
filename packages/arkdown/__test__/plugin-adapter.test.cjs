@@ -22,6 +22,7 @@ const {
   PLUGIN_HOOKS,
   PluginAdapter,
   PluginModuleLoader,
+  createBuild,
   createSdkPluginDispatch,
   createSdkPluginHost,
   normalizePlugin,
@@ -1313,4 +1314,67 @@ test('in-flight syscap registration resends can arrive out of order and keep rea
     ],
     'resending full immutable registrations does not reparse retained ASTs',
   )
+})
+
+test('build-local logging isolates interleaved native callbacks and plugin loggers', async () => {
+  const pending = []
+  const nativeBuild = (config, plugins, _sdk, onLog) =>
+    new Promise((resolve) => {
+      assert.equal(config.onLog, undefined, 'JS callbacks are passed separately from native request values')
+      const plugin = plugins[0]
+      pending.push(async () => {
+        onLog({ level: 'debug', target: 'arkdown_build', message: `debug-${config.project}`, fields: {} })
+        onLog({ level: 'warn', target: 'arkdown_build', message: `warning-${config.project}`, fields: {} })
+        onLog({ level: 'debug', target: 'arkdown::log_flush', message: '', fields: null })
+        await dispatch(plugin, 'seedContext', {
+          share: { __arkdownBuildInstanceId: config.project, projectConfig: { moduleName: config.project } },
+        })
+        await dispatch(plugin, 'beforeBuild')
+        resolve({ artifacts: [], elapsedMs: 1 })
+      })
+    })
+  const build = createBuild(nativeBuild, fakeBinding())
+  const first = []
+  const second = []
+  const plugin = (name) => ({
+    name,
+    beforeBuild() {
+      this.debug(`plugin-debug-${name}`)
+      this.share.getLogger(name).warn(`plugin-warning-${name}`)
+    },
+  })
+  const a = build({ project: 'first', logLevel: 'debug', onLog: (event) => first.push(event.message) }, plugin('first'))
+  const b = build(
+    { project: 'second', logLevel: 'warn', onLog: (event) => second.push(event.message) },
+    plugin('second'),
+  )
+  while (pending.length < 2) await new Promise((resolve) => setImmediate(resolve))
+  await pending[1]()
+  await pending[0]()
+  await Promise.all([a, b])
+  assert.deepEqual(first, ['debug-first', 'warning-first', 'plugin-debug-first', 'plugin-warning-first'])
+  assert.deepEqual(second, ['warning-second', 'plugin-warning-second'])
+})
+
+test('invalid logging configuration fails before dispatch and callback exceptions reject safely', async () => {
+  let calls = 0
+  const build = createBuild(async (_config, _plugins, _sdk, onLog) => {
+    calls += 1
+    onLog({ level: 'warn', target: 'arkdown_build', message: 'warning', fields: {} })
+    return { artifacts: [], elapsedMs: 1 }
+  }, fakeBinding())
+  await assert.rejects(build({ logLevel: 'verbose' }), { code: 'INVALID_ARKDOWN_LOG_LEVEL' })
+  await assert.rejects(build({ onLog: true }), { code: 'INVALID_ARKDOWN_LOG_HANDLER' })
+  assert.equal(calls, 0)
+  await assert.rejects(
+    build({
+      onLog() {
+        throw new Error('log sink failed')
+      },
+    }),
+    /log sink failed/,
+  )
+  const logs = []
+  await build({ logLevel: 'silent', onLog: (event) => logs.push(event) })
+  assert.deepEqual(logs, [])
 })

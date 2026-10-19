@@ -261,7 +261,7 @@ impl BuildCoordinator {
         }
 
         // ── Step 2: Profile + Resource (per module) ───────────────────────
-        progress.step(2, 6, "Processing profiles");
+        progress.step(2, 6, "Processing profiles and resources");
 
         let permission_validator = arkdown_profile::PermissionValidator::new();
         let privacy_profile_processor = arkdown_profile::PrivacyProfileProcessor::new();
@@ -523,7 +523,7 @@ impl BuildCoordinator {
             if project_remote_hsp_exists && args.enable_sign_task {
                 let signer = RemoteHspSigner::new(config.clone(), session.clone());
                 let module_name = module.name.clone();
-                tokio::task::spawn_blocking(move || {
+                crate::service::BuildService::spawn_blocking(move || {
                     signer.run_for_module(&module_name, RemoteHspSignScope::Project)
                 })
                 .await
@@ -532,7 +532,7 @@ impl BuildCoordinator {
             if (project_remote_hsp_exists || module_remote_hsp_exists) && args.enable_sign_task {
                 let signer = RemoteHspSigner::new(config.clone(), session.clone());
                 let module_name = module.name.clone();
-                tokio::task::spawn_blocking(move || {
+                crate::service::BuildService::spawn_blocking(move || {
                     signer.run_for_module(&module_name, RemoteHspSignScope::Module)
                 })
                 .await
@@ -1988,6 +1988,7 @@ impl BuildCoordinator {
         let module_obfuscation_contexts = bundle_stage_output.module_obfuscation_contexts;
 
         // ── Obfuscation (release builds only) ────────────────────────────
+        progress.step(4, 6, "Processing generated code");
         let mut pending_bytecode_obfuscations = (0..bundle_outs.len())
             .map(|_| None)
             .collect::<Vec<Option<PendingBytecodeObfuscation>>>();
@@ -2181,6 +2182,7 @@ impl BuildCoordinator {
             }
         }
 
+        progress.done();
         self.release_source_texts(
             crate::request::BuildHeapBoundary::BeforeBytecode,
             bundle_runtime.is_some() || semantic_runtime.is_some(),
