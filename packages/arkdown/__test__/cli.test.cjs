@@ -2,6 +2,8 @@
 
 const assert = require('node:assert/strict')
 const test = require('node:test')
+const { setTimeout: delay } = require('node:timers/promises')
+const { stripVTControlCharacters } = require('node:util')
 
 const { ArkdownPackageCli } = require('../js/arkdown-cli.js')
 
@@ -165,6 +167,7 @@ test('progress updates in place only on a terminal outside CI', async () => {
   for (const [args, env, dynamic] of [
     [[], {}, true],
     [[], { CI: 'true' }, false],
+    [[], { TERM: 'dumb' }, false],
     [['--clearScreen', 'false'], {}, false],
   ]) {
     const { output, streams } = captureOutput(true, env)
@@ -182,6 +185,83 @@ test('progress updates in place only on a terminal outside CI', async () => {
     assert.equal(output.stdout.includes('\r\x1b[2K'), dynamic)
     assert.match(output.stderr, /warning/)
   }
+})
+
+test('terminal bars advance only on stage completion and keep running across diagnostics', async () => {
+  const { output, streams } = captureOutput(true, { NO_COLOR: '1' })
+  await new ArkdownPackageCli(
+    ['build'],
+    async ({ onLog }) => {
+      onLog(stage('start'))
+      assert.match(output.stdout, /\| \[======>-------------\] 2\/6 stages \| Bundling/)
+      const firstFrame = output.stdout.length
+      await delay(125)
+      assert.match(output.stdout.slice(firstFrame), /\/ \[======>-------------\] 2\/6 stages \| Bundling/)
+      assert.doesNotMatch(output.stdout, /3\/6 stages|%/)
+      onLog({ level: 'warn', message: 'warning during bundle' })
+      assert.match(output.stderr, /warning during bundle/)
+      const afterWarning = output.stdout.length
+      await delay(125)
+      assert.ok(output.stdout.length > afterWarning, 'progress resumes after a diagnostic')
+      onLog(stage('end'))
+      assert.match(output.stdout, /✓ \[==========----------\] 3\/6 stages \| Bundling \(1\.23s\)\n/)
+      return { artifacts: ['entry.hap'], elapsedMs: 1500 }
+    },
+    streams,
+  ).run()
+  const settled = output.stdout
+  await delay(125)
+  assert.equal(output.stdout, settled, 'completion stops the redraw timer')
+  assert.equal(output.stdout.includes('\x1b[36m'), false, 'NO_COLOR keeps the progress bar uncolored')
+})
+
+test('failed watch cycles and failed builds stop the bar without advancing the unfinished stage', async () => {
+  for (const watch of [false, true]) {
+    const { output, streams } = captureOutput(true)
+    const result = await new ArkdownPackageCli(
+      ['build', ...(watch ? ['--watch'] : [])],
+      async ({ onLog }) => {
+        onLog({ ...stage('start'), fields: { ...stage('start').fields, step: 6, label: 'Packaging' } })
+        if (watch) {
+          onLog({ level: 'error', message: 'watch rebuild failed', fields: { error: 'signing failed' } })
+          const failed = output.stdout
+          await delay(125)
+          assert.equal(output.stdout, failed, 'failed watch cycles stop rendering while waiting for changes')
+          onLog({ level: 'info', message: 'watch rebuild started' })
+          onLog(stage('start'))
+          assert.match(stripVTControlCharacters(output.stdout), /2\/6 stages \| Bundling/)
+        }
+        throw new Error('signing failed')
+      },
+      streams,
+    ).run()
+    assert.equal(result, 1)
+    const settled = output.stdout
+    await delay(125)
+    assert.equal(output.stdout, settled, 'build failure releases the redraw timer')
+    assert.doesNotMatch(output.stdout, /6\/6 stages/)
+    assert.match(output.stderr, /signing failed/)
+  }
+})
+
+test('terminal progress fits narrow output without wrapping', async () => {
+  const { output, streams } = captureOutput(true)
+  streams.stdout.columns = 48
+  await new ArkdownPackageCli(
+    ['build'],
+    async ({ onLog }) => {
+      const update = stage('start')
+      update.fields.label = 'Processing profiles and resources'
+      const start = output.stdout.length
+      onLog(update)
+      const text = stripVTControlCharacters(output.stdout.slice(start))
+      assert.ok(text.length < streams.stdout.columns)
+      assert.match(text, /2\/6 stages/)
+      assert.match(text, /… \(\d+ms\)$/)
+      return { artifacts: [], elapsedMs: 1 }
+    },
+    streams,
+  ).run()
 })
 
 test('logLevel filters progress and diagnostics while silent failures still exit with one', async () => {

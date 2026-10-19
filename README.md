@@ -126,6 +126,10 @@ npx arkdown build --project ./my-app --target hap --mode debug
 ```
 
 Builds print stage progress, stage durations, artifact paths, and total elapsed time by default.
+Interactive terminals show an animated progress bar with the number of completed stages and the
+current stage's elapsed time. The bar advances when a stage finishes; it measures completed stages,
+not elapsed-time percentage. CI, redirected output, `TERM=dumb`, and `--clearScreen false` retain
+the persistent stage logs.
 The final `Build outputs` summary lists all deliverables published by this invocation: unsigned
 and signed packages, HSP interface HAR/TGZ files, source maps, pack metadata, and collected symbols
 when enabled. Paths are deduplicated and sorted; files left over from other builds are excluded.

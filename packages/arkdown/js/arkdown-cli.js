@@ -206,7 +206,12 @@ class BuildCliReporter {
     this.stderr = output.stderr ?? process.stderr
     this.stdoutColors = new TerminalColors(this.stdout, output.env)
     this.stderrColors = new TerminalColors(this.stderr, output.env)
-    this.tty = Boolean(this.stdout.isTTY && !(output.env ?? process.env).CI && config.clearScreen !== false)
+    this.tty = Boolean(
+      this.stdout.isTTY &&
+      !(output.env ?? process.env).CI &&
+      (output.env ?? process.env).TERM !== 'dumb' &&
+      config.clearScreen !== false,
+    )
     this.started = performance.now()
     this.artifacts = new Set()
   }
@@ -225,12 +230,57 @@ class BuildCliReporter {
     this.pending = false
   }
 
+  stopProgress() {
+    clearInterval(this.progressTimer)
+    this.progressTimer = undefined
+    this.activeStage = undefined
+    this.clear()
+  }
+
+  progressText(fields, complete = false) {
+    const completed = complete ? fields.step : fields.step - 1
+    const columns = this.stdout.columns > 1 ? this.stdout.columns : 80
+    const width = Math.max(4, Math.min(20, columns - 44))
+    const filled = Math.floor((completed / fields.total) * width)
+    const marker = complete ? '✓' : ['|', '/', '-', '\\'][this.progressFrame % 4]
+    const active = !complete && filled < width ? '>' : ''
+    const bar = `${'='.repeat(filled)}${active}${'-'.repeat(width - filled - active.length)}`
+    const elapsed = complete ? fields.elapsed_ms : performance.now() - this.stageStarted
+    const prefix = `${marker} [${bar}] ${completed}/${fields.total} stages | `
+    const suffix = ` (${this.duration(elapsed)})`
+    const available = columns - 1 - prefix.length - suffix.length
+    const label =
+      fields.label.length > available ? `${fields.label.slice(0, Math.max(0, available - 1))}…` : fields.label
+    return `${prefix}${label}${suffix}`.slice(0, Math.max(0, columns - 1))
+  }
+
+  renderProgress() {
+    if (!this.activeStage) return
+    this.clear()
+    this.stdout.write(this.stdoutColors.format('info', this.progressText(this.activeStage)))
+    this.pending = true
+  }
+
+  startProgress(fields) {
+    this.stopProgress()
+    this.activeStage = fields
+    this.stageStarted = performance.now()
+    this.progressFrame = 0
+    this.renderProgress()
+    this.progressTimer = setInterval(() => {
+      this.progressFrame++
+      this.renderProgress()
+    }, 100)
+    this.progressTimer.unref()
+  }
+
   write(level, message) {
     if (!this.enabled(level)) return
     this.clear()
     const stream = ['warn', 'error'].includes(level) ? this.stderr : this.stdout
     const colors = stream === this.stderr ? this.stderrColors : this.stdoutColors
     stream.write(`${level === 'info' ? message : colors.format(level, message)}\n`)
+    this.renderProgress()
   }
 
   log(log) {
@@ -239,9 +289,11 @@ class BuildCliReporter {
     if (fields.source === 'rust_stage') {
       const stage = `[${fields.step}/${fields.total}] ${fields.label}`
       if (fields.phase === 'start') {
-        this.clear()
-        this.stdout.write(`${this.stdoutColors.format('info', `${stage}...`)}${this.tty ? '' : '\n'}`)
-        this.pending = this.tty
+        if (this.tty) this.startProgress(fields)
+        else this.write('info', this.stdoutColors.format('info', `${stage}...`))
+      } else if (this.tty) {
+        this.stopProgress()
+        this.write('info', this.stdoutColors.format('success', this.progressText(fields, true)))
       } else {
         this.write(
           'info',
@@ -254,7 +306,10 @@ class BuildCliReporter {
       if (this.watch) this.artifacts.add(fields.artifact)
       return
     }
-    if (log.message === 'watch rebuild started' || log.message === 'watch rebuild failed') this.artifacts.clear()
+    if (log.message === 'watch rebuild started' || log.message === 'watch rebuild failed') {
+      this.stopProgress()
+      this.artifacts.clear()
+    }
     // Watch renders a summary after all artifacts for the completed cycle arrive.
     if (log.message === 'build succeeded' || log.message === 'build succeeded with no output files produced') {
       if (this.watch) {
@@ -283,6 +338,7 @@ class BuildCliReporter {
   }
 
   summary(artifacts, elapsedMs) {
+    this.stopProgress()
     const paths = [...new Set(artifacts)].sort()
     if (paths.length > 0) {
       this.write('info', `\n${this.highlight('info', `Build outputs (${paths.length}):`)}`)
@@ -293,6 +349,7 @@ class BuildCliReporter {
   }
 
   fail(error) {
+    this.stopProgress()
     this.write('error', `✗ Build failed in ${this.duration(performance.now() - this.started)}\nerror: ${error.message}`)
     this.clear()
   }
