@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 const packageManifest = require('../package.json')
+const { TerminalColors } = require('./build-logger.js')
 
 const BUILD_VALUE_OPTIONS = new Map([
   ['--project', 'project'],
@@ -194,7 +195,7 @@ function writeStdout(message) {
 }
 
 function writeStderr(message) {
-  process.stderr.write(`${message}\n`)
+  process.stderr.write(`${new TerminalColors(process.stderr).format('error', message)}\n`)
 }
 
 class BuildCliReporter {
@@ -203,6 +204,8 @@ class BuildCliReporter {
     this.watch = config.watch || config.preview || ['hot-reload-compile', 'hot-reload-build'].includes(config.action)
     this.stdout = output.stdout ?? process.stdout
     this.stderr = output.stderr ?? process.stderr
+    this.stdoutColors = new TerminalColors(this.stdout, output.env)
+    this.stderrColors = new TerminalColors(this.stderr, output.env)
     this.tty = Boolean(this.stdout.isTTY && !(output.env ?? process.env).CI && config.clearScreen !== false)
     this.started = performance.now()
   }
@@ -225,7 +228,8 @@ class BuildCliReporter {
     if (!this.enabled(level)) return
     this.clear()
     const stream = ['warn', 'error'].includes(level) ? this.stderr : this.stdout
-    stream.write(`${message}\n`)
+    const colors = stream === this.stderr ? this.stderrColors : this.stdoutColors
+    stream.write(`${level === 'info' ? message : colors.format(level, message)}\n`)
   }
 
   log(log) {
@@ -235,18 +239,24 @@ class BuildCliReporter {
       const stage = `[${fields.step}/${fields.total}] ${fields.label}`
       if (fields.phase === 'start') {
         this.clear()
-        this.stdout.write(`${stage}...${this.tty ? '' : '\n'}`)
+        this.stdout.write(`${this.stdoutColors.format('info', `${stage}...`)}${this.tty ? '' : '\n'}`)
         this.pending = this.tty
       } else {
-        this.write('info', `✓ ${stage} (${this.duration(fields.elapsed_ms)})`)
+        this.write(
+          'info',
+          `${this.stdoutColors.format('success', '✓')} ${stage} ${this.stdoutColors.format('muted', `(${this.duration(fields.elapsed_ms)})`)}`,
+        )
       }
       return
     }
     // The completed service result below owns the artifact list and total time.
     if (log.message === 'build succeeded' || log.message === 'build succeeded with no output files produced') {
       if (this.watch) {
-        if (fields.artifact) this.write('info', fields.artifact)
-        this.write('info', `✓ built in ${this.duration(fields.elapsed_seconds * 1000)}`)
+        if (fields.artifact) this.write('info', this.stdoutColors.format('artifact', fields.artifact))
+        this.write(
+          'info',
+          this.stdoutColors.format('success', `✓ built in ${this.duration(fields.elapsed_seconds * 1000)}`),
+        )
       }
       return
     }
@@ -255,12 +265,21 @@ class BuildCliReporter {
       .map(([key, value]) => `${key}=${typeof value === 'string' ? value : JSON.stringify(value)}`)
       .join(' ')
     const prefix = log.level === 'info' ? '[arkdown]' : `[arkdown:${log.level}]`
-    this.write(log.level, `${prefix} ${log.message}${details ? ` ${details}` : ''}`)
+    this.write(
+      log.level,
+      `${log.level === 'info' ? this.stdoutColors.format('info', prefix) : prefix} ${log.message}${details ? ` ${details}` : ''}`,
+    )
   }
 
   finish(result) {
-    for (const artifact of result.artifacts ?? []) this.write('info', artifact)
-    this.write('info', `✓ built in ${this.duration(result.elapsedMs ?? performance.now() - this.started)}`)
+    for (const artifact of result.artifacts ?? []) this.write('info', this.stdoutColors.format('artifact', artifact))
+    this.write(
+      'info',
+      this.stdoutColors.format(
+        'success',
+        `✓ built in ${this.duration(result.elapsedMs ?? performance.now() - this.started)}`,
+      ),
+    )
     this.clear()
   }
 
@@ -289,7 +308,7 @@ class ArkdownPackageCli {
       const { clearScreen: _, ...request } = config
       reporter.write(
         'info',
-        `arkdown v${packageManifest.version} building ${config.mode ?? 'debug'} ${config.target ?? 'hap'}...`,
+        `${reporter.stdoutColors.format('info', `arkdown v${packageManifest.version}`)} building ${config.mode ?? 'debug'} ${config.target ?? 'hap'}...`,
       )
       try {
         const result = await this.operation('build')({ ...request, onLog: (log) => reporter.log(log) })

@@ -131,6 +131,12 @@ diagnostics, `warn` or `error` to reduce output, or `silent` (also `--silent`) t
 `--log-level` and `-l` are aliases. Failed builds still exit with code 1 in silent mode.
 Progress updates in place only on a terminal outside CI; redirected output uses plain lines.
 Pass `--clearScreen false` to keep progress lines on a terminal, too.
+Terminal output uses cyan for progress and artifact paths, green for completed stages and
+success summaries, yellow for warnings, red for errors, and gray for debug logs and timings.
+CI, redirected streams, and `TERM=dumb` use plain text by default. A non-empty `NO_COLOR`
+disables color; `FORCE_COLOR=0` also disables it, while `FORCE_COLOR=1` enables it even in CI
+or redirected output. `NO_COLOR` takes precedence. Color detection is independent for stdout
+and stderr, and `--clearScreen false` does not disable color.
 
 `--target` accepts `hap`, `hsp`, `har`, `app`, or `test`; `--mode` accepts `debug` or `release`. Use `--module`, `--product`,
 or `--build-target-name` to select a more specific build configuration. Run `npx arkdown build --help` for
@@ -188,6 +194,7 @@ that replaces default console output. Each log has `level`, `message`, `target`,
 `fields`; stage events use `fields.source === "rust_stage"` with `phase` (`start`/`end`),
 `step`, `total`, `label`, and an `elapsed_ms` duration on completion. Filters and callbacks are
 scoped to each build, including plugin logs. Logs are delivered before the build promise settles.
+Color is added only when rendering to the console; `onLog` receives the original structured data.
 `ARKDOWN_LOG` (or `RUST_LOG`) can further narrow native diagnostics by tracing target; it does
 not override `logLevel`. Build logs are no longer persisted implicitly under `.hvigor`.
 

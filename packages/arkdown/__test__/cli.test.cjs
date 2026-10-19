@@ -95,7 +95,7 @@ test('package CLI rejects removed Hvigor task commands', async () => {
   )
 })
 
-function captureOutput(tty = false, env = {}) {
+function captureOutput(tty = false, env = {}, stderrTty = tty) {
   const output = { stdout: '', stderr: '' }
   return {
     output,
@@ -107,6 +107,7 @@ function captureOutput(tty = false, env = {}) {
         },
       },
       stderr: {
+        isTTY: stderrTty,
         write: (line) => {
           output.stderr += line
         },
@@ -220,4 +221,85 @@ test('watch builds report artifact completion before the long-lived service reso
     },
     streams,
   ).run()
+})
+
+test('terminal builds color stages, diagnostics and artifacts while preserving readable text', async () => {
+  const { output, streams } = captureOutput(true)
+  await new ArkdownPackageCli(
+    ['build', '--logLevel', 'debug', '--clearScreen', 'false'],
+    async ({ onLog }) => {
+      onLog(stage('start'))
+      for (const level of ['info', 'debug', 'warn', 'error']) onLog({ level, message: `event-${level}` })
+      onLog(stage('end'))
+      return { artifacts: ['entry.hap'], elapsedMs: 2045 }
+    },
+    streams,
+  ).run()
+  for (const text of [
+    '\x1b[36m[3/6] Bundling...\x1b[39m',
+    '\x1b[32m✓\x1b[39m',
+    '\x1b[90m(1.23s)\x1b[39m',
+    '\x1b[36m[arkdown]\x1b[39m event-info',
+    '\x1b[90m[arkdown:debug] event-debug\x1b[39m',
+    '\x1b[36mentry.hap\x1b[39m',
+    '\x1b[32m✓ built in 2.04s\x1b[39m',
+  ])
+    assert.ok(output.stdout.includes(text), JSON.stringify(text))
+  assert.ok(output.stderr.includes('\x1b[33m[arkdown:warn] event-warn\x1b[39m'))
+  assert.ok(output.stderr.includes('\x1b[31m[arkdown:error] event-error\x1b[39m'))
+  assert.equal(output.stdout.includes('\r'), false, 'persistent progress can retain color')
+})
+
+test('color environment controls keep CI and pipes plain unless explicitly forced', async () => {
+  for (const [tty, env, colored] of [
+    [false, {}, false],
+    [true, { CI: 'true' }, false],
+    [true, { TERM: 'dumb' }, false],
+    [true, { NO_COLOR: '1' }, false],
+    [true, { NO_COLOR: '0' }, false],
+    [true, { NO_COLOR: '' }, true],
+    [true, { FORCE_COLOR: '0' }, false],
+    [false, { FORCE_COLOR: '1' }, true],
+    [false, { FORCE_COLOR: '' }, true],
+    [true, { CI: 'true', TERM: 'dumb', FORCE_COLOR: '1' }, true],
+    [true, { NO_COLOR: '1', FORCE_COLOR: '1' }, false],
+  ]) {
+    const { output, streams } = captureOutput(tty, env)
+    await new ArkdownPackageCli(
+      ['build', '--clearScreen', 'false'],
+      async ({ onLog }) => {
+        onLog(stage('start'))
+        onLog({ level: 'warn', message: 'warning' })
+        onLog(stage('end'))
+        return { artifacts: ['entry.hap'], elapsedMs: 1 }
+      },
+      streams,
+    ).run()
+    assert.equal(output.stdout.includes('\x1b['), colored, JSON.stringify({ tty, env }))
+    assert.equal(output.stderr.includes('\x1b['), colored, JSON.stringify({ tty, env }))
+    assert.equal(output.stdout.includes('\r'), false)
+  }
+})
+
+test('stdout and stderr color support is detected separately and failures reset every line', async () => {
+  for (const [stdoutTty, stderrTty] of [
+    [true, false],
+    [false, true],
+  ]) {
+    const { output, streams } = captureOutput(stdoutTty, {}, stderrTty)
+    const result = await new ArkdownPackageCli(
+      ['build', '--clearScreen', 'false'],
+      async () => {
+        throw new Error('broken package')
+      },
+      streams,
+    ).run()
+    assert.equal(result, 1)
+    assert.equal(output.stdout.includes('\x1b[36m'), stdoutTty)
+    assert.equal(output.stderr.includes('\x1b[31m'), stderrTty)
+    if (stderrTty) {
+      assert.ok(output.stderr.startsWith('\x1b[31m✗ Build failed'))
+      assert.ok(output.stderr.includes('\x1b[39m\n\x1b[31merror: broken package\x1b[39m\n'))
+    }
+  }
 })

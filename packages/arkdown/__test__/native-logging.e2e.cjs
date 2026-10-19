@@ -54,10 +54,11 @@ test(
     assert.equal(fs.existsSync(path.join(project, '.hvigor/outputs/build-logs/build.log')), false)
 
     const cli = path.resolve(__dirname, '../js/arkdown-cli.js')
-    const run = (args) =>
+    const run = (args, colorEnv = {}) =>
       spawnSync(process.execPath, ['--expose-gc', cli, 'build', '--project', project, ...args], {
         encoding: 'utf8',
         timeout: 120000,
+        env: { ...process.env, NO_COLOR: '', FORCE_COLOR: '0', ...colorEnv },
       })
     const output = run([])
     assert.equal(output.status, 0, output.stdout + output.stderr)
@@ -66,7 +67,15 @@ test(
     assert.match(output.stdout, /\.hap\n✓ built in /)
     assert.equal((output.stdout + output.stderr).includes('\x1b'), false)
     assert.equal((output.stdout + output.stderr).includes('\r'), false)
-    const quiet = run(['--logLevel', 'silent'])
+    const colored = run([], { FORCE_COLOR: '1' })
+    assert.equal(colored.status, 0, colored.stderr)
+    assert.ok(colored.stdout.includes('\x1b[36m[1/6] Preparing project...\x1b[39m'))
+    assert.ok(colored.stdout.includes('\x1b[32m✓ built in '))
+    assert.equal(colored.stdout.includes('\r'), false, 'forced color does not animate redirected progress')
+    const disabled = run([], { FORCE_COLOR: undefined, NO_COLOR: '1' })
+    assert.equal(disabled.status, 0, disabled.stderr)
+    assert.equal((disabled.stdout + disabled.stderr).includes('\x1b'), false)
+    const quiet = run(['--logLevel', 'silent'], { FORCE_COLOR: '1' })
     assert.equal(quiet.status, 0, quiet.stderr)
     assert.equal(quiet.stdout + quiet.stderr, '')
     const failed = run(['--silent', '--module', 'missing-module'])
