@@ -681,7 +681,7 @@ fn test_write_module_json_merges_dependency_extension_abilities() {
     )
     .expect("write dependency package");
     std::fs::write(
-        dep_main.join("module.json5"),
+        dep_main.join("module.json"),
         r#"{
           "app": { "minAPIVersion": 12 },
           "module": {
@@ -1568,7 +1568,7 @@ fn test_write_module_json_merges_dependency_profile_arrays_and_filters_permissio
     let dep_har = module_src.join("oh_modules/dep-har/src/main");
     std::fs::create_dir_all(&dep_har).expect("create dep har dirs");
     std::fs::write(
-        dep_har.join("module.json5"),
+        dep_har.join("module.json"),
         r#"{
           "app": {
             "minAPIVersion": 12
@@ -1589,12 +1589,12 @@ fn test_write_module_json_merges_dependency_profile_arrays_and_filters_permissio
           }
         }"#,
     )
-    .expect("write dep har module.json5");
+    .expect("write dep har module.json");
 
     let dep_hsp = module_src.join("oh_modules/shared-hsp/src/main");
     std::fs::create_dir_all(&dep_hsp).expect("create dep hsp dirs");
     std::fs::write(
-        dep_hsp.join("module.json5"),
+        dep_hsp.join("module.json"),
         r#"{
           "app": {
             "minAPIVersion": 12
@@ -1607,7 +1607,7 @@ fn test_write_module_json_merges_dependency_profile_arrays_and_filters_permissio
           }
         }"#,
     )
-    .expect("write dep hsp module.json5");
+    .expect("write dep hsp module.json");
 
     let mut config = (*default_config()).clone();
     config.project_root = tmp.path().to_path_buf();
@@ -1702,7 +1702,7 @@ fn test_write_module_json_dependency_profile_arrays_follow_declared_transitive_s
     )
     .expect("write source har oh-package");
     std::fs::write(
-        source_har.join("src/main/module.json5"),
+        source_har.join("src/main/module.json"),
         r#"{
           "app": { "minAPIVersion": 12 },
           "module": {
@@ -1713,12 +1713,12 @@ fn test_write_module_json_dependency_profile_arrays_follow_declared_transitive_s
           }
         }"#,
     )
-    .expect("write source har module.json5");
+    .expect("write source har module.json");
 
     let scoped_hsp = source_har.join("oh_modules/@scope/shared-hsp/src/main");
     std::fs::create_dir_all(&scoped_hsp).expect("create scoped hsp dirs");
     std::fs::write(
-        scoped_hsp.join("module.json5"),
+        scoped_hsp.join("module.json"),
         r#"{
           "app": { "minAPIVersion": 12 },
           "module": {
@@ -1730,12 +1730,12 @@ fn test_write_module_json_dependency_profile_arrays_follow_declared_transitive_s
           }
         }"#,
     )
-    .expect("write scoped hsp module.json5");
+    .expect("write scoped hsp module.json");
 
     let undeclared_hsp = module_src.join("oh_modules/undeclared-hsp/src/main");
     std::fs::create_dir_all(&undeclared_hsp).expect("create undeclared hsp dirs");
     std::fs::write(
-        undeclared_hsp.join("module.json5"),
+        undeclared_hsp.join("module.json"),
         r#"{
           "app": { "minAPIVersion": 13 },
           "module": {
@@ -1747,7 +1747,7 @@ fn test_write_module_json_dependency_profile_arrays_follow_declared_transitive_s
           }
         }"#,
     )
-    .expect("write undeclared hsp module.json5");
+    .expect("write undeclared hsp module.json");
 
     let mut config = (*default_config()).clone();
     config.project_root = tmp.path().to_path_buf();
@@ -1826,7 +1826,7 @@ fn test_write_module_json_rejects_dependency_with_higher_min_api() {
     let dep_har = module_src.join("oh_modules/dep-har/src/main");
     std::fs::create_dir_all(&dep_har).expect("create dep dirs");
     std::fs::write(
-        dep_har.join("module.json5"),
+        dep_har.join("module.json"),
         r#"{
           "app": {
             "minAPIVersion": 13
@@ -1839,7 +1839,7 @@ fn test_write_module_json_rejects_dependency_with_higher_min_api() {
           }
         }"#,
     )
-    .expect("write dep module.json5");
+    .expect("write dep module.json");
 
     let mut config = (*default_config()).clone();
     config.project_root = tmp.path().to_path_buf();
@@ -1903,7 +1903,7 @@ fn test_write_module_json_rejects_hsp_dependency_device_type_mismatch() {
     let dep_hsp = module_src.join("oh_modules/shared-hsp/src/main");
     std::fs::create_dir_all(&dep_hsp).expect("create dep dirs");
     std::fs::write(
-        dep_hsp.join("module.json5"),
+        dep_hsp.join("module.json"),
         r#"{
           "app": {
             "minAPIVersion": 12
@@ -1916,7 +1916,7 @@ fn test_write_module_json_rejects_hsp_dependency_device_type_mismatch() {
           }
         }"#,
     )
-    .expect("write dep module.json5");
+    .expect("write dep module.json");
 
     let mut config = (*default_config()).clone();
     config.project_root = tmp.path().to_path_buf();
@@ -1951,6 +1951,224 @@ fn test_write_module_json_rejects_hsp_dependency_device_type_mismatch() {
             .contains("CURRENT_MODULE_NOT_SUPPORT_THE_DEVICE_TYPE"),
         "unexpected error: {err}"
     );
+}
+
+/// MergeProfile.mergeDependsLibs / transformJson2Opts select processed profiles,
+/// not the source module.json5 shipped by an ordinary OHPM source package.
+struct DependencyProfileFixture {
+    _temp: tempfile::TempDir,
+    config: ArkdownConfig,
+    dependency: PathBuf,
+}
+
+impl DependencyProfileFixture {
+    fn new() -> Self {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let entry = temp.path().join("entry");
+        let dependency = entry.join("oh_modules/source-package");
+        std::fs::create_dir_all(entry.join("src/main")).unwrap();
+        std::fs::create_dir_all(dependency.join("src/main")).unwrap();
+        std::fs::write(
+            entry.join("oh-package.json5"),
+            r#"{"name":"entry","dependencies":{"source-package":"1.0.0"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dependency.join("oh-package.json5"),
+            r#"{"name":"source-package","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            entry.join("src/main/module.json5"),
+            r#"{"module":{"name":"entry","type":"entry","deviceTypes":["phone"]}}"#,
+        )
+        .unwrap();
+        let mut config = (*default_config()).clone();
+        config.project_root = temp.path().to_path_buf();
+        config.modules = vec![ModuleConfig {
+            name: "entry".into(),
+            src_path: entry,
+            module_type: OhosModuleType::Entry,
+        }];
+        Self {
+            _temp: temp,
+            config,
+            dependency,
+        }
+    }
+
+    fn write(&self, relative: &str, value: &serde_json::Value) {
+        let path = self.dependency.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, serde_json::to_vec(value).unwrap()).unwrap();
+    }
+
+    fn build(&self) -> Result<serde_json::Value, arkdown_core::ArkdownError> {
+        let processor = ProfileProcessor::new(Arc::new(self.config.clone()));
+        let manifest = ProcessProfileProcessor::new().process_profile(
+            &single_ability_json5("entry"),
+            12,
+            &self.config.product.bundle_name,
+            arkdown_core::CompileMode::EsModule,
+        );
+        let output = self.config.project_root.join("module.json");
+        processor.write_module_json(&manifest, &output, None)?;
+        Ok(serde_json::from_slice(&std::fs::read(output).unwrap()).unwrap())
+    }
+}
+
+#[test]
+fn installed_source_profile_is_not_a_merge_profile_fallback() {
+    let fixture = DependencyProfileFixture::new();
+    let source = serde_json::json!({
+        "module": {
+            "name": "source_package", "type": "har", "deviceTypes": ["phone"],
+            "requestPermissions": [{"name": "ohos.permission.SET_WINDOW_TRANSPARENT"}],
+            "metadata": [{"name": "source_only"}]
+        }
+    });
+    fixture.write("src/main/module.json5", &source);
+    // Neither a package-root file nor a stale build output is an installed
+    // dependency's MergeProfile input.
+    let mut stale = source.clone();
+    stale["app"] = serde_json::json!({"minAPIVersion": 99});
+    for path in [
+        "module.json",
+        "module.json5",
+        "build/default/intermediates/merge_profile/default/module.json",
+        "build/default/intermediates/res/default/module.json",
+    ] {
+        fixture.write(path, &stale);
+    }
+    let output = fixture
+        .build()
+        .expect("missing published profile is skipped");
+    assert!(output["module"].get("requestPermissions").is_none());
+    assert!(output["module"].get("metadata").is_none());
+
+    // The removed second graph scan must not validate source-only API fields.
+    fixture.write("src/main/module.json5", &stale);
+    fixture
+        .build()
+        .expect("source API fields are not merge inputs");
+}
+
+#[test]
+fn installed_processed_profile_wins_over_source_and_stale_build_profiles() {
+    let fixture = DependencyProfileFixture::new();
+    let published = serde_json::json!({
+        "app": {"minAPIVersion": 12},
+        "module": {
+            "name": "source_package", "type": "har", "deviceTypes": ["phone"],
+            "requestPermissions": [{"name": "ohos.permission.LOCATION"}],
+            "metadata": [{"name": "published"}]
+        }
+    });
+    fixture.write("src/main/module.json", &published);
+    let mut stale = published.clone();
+    stale["app"]["minAPIVersion"] = serde_json::json!(99);
+    fixture.write("src/main/module.json5", &stale);
+    fixture.write(
+        "build/default/intermediates/merge_profile/default/module.json",
+        &stale,
+    );
+    let output = fixture.build().unwrap();
+    assert_eq!(
+        output["module"]["metadata"],
+        published["module"]["metadata"]
+    );
+    assert_eq!(
+        output["module"]["requestPermissions"],
+        published["module"]["requestPermissions"]
+    );
+}
+
+#[test]
+fn processed_dependency_api_is_validated_without_mergeable_arrays() {
+    let fixture = DependencyProfileFixture::new();
+    for (app, expected) in [
+        (serde_json::json!({}), "EMPTY_MIN_API_VERSION"),
+        (
+            serde_json::json!({"minAPIVersion": 13}),
+            "HAR_UNSUPPORTED_API_VERSION",
+        ),
+    ] {
+        fixture.write(
+            "src/main/module.json",
+            &serde_json::json!({
+                "app": app,
+                "module": {"name": "source_package", "type": "har", "deviceTypes": ["phone"]}
+            }),
+        );
+        let error = fixture
+            .build()
+            .expect_err("processed profile must be checked");
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+}
+
+#[test]
+fn malformed_processed_dependency_profile_is_not_silently_skipped() {
+    let fixture = DependencyProfileFixture::new();
+    std::fs::write(fixture.dependency.join("src/main/module.json"), "{").unwrap();
+    assert!(matches!(
+        fixture.build(),
+        Err(arkdown_core::ArkdownError::ParseError { .. })
+    ));
+}
+
+#[test]
+fn local_dependency_uses_selected_product_merge_profile_output() {
+    let mut fixture = DependencyProfileFixture::new();
+    fixture.config.product.name = "tablet".into();
+    fixture.config.modules.push(ModuleConfig {
+        name: "source_package".into(),
+        src_path: fixture.dependency.clone(),
+        module_type: OhosModuleType::Har,
+    });
+    let processed = serde_json::json!({
+        "app": {"minAPIVersion": 12},
+        "module": {
+            "name": "source_package", "type": "har", "deviceTypes": ["phone"],
+            "metadata": [{"name": "local_generated"}]
+        }
+    });
+    let mut source = processed.clone();
+    source["app"]["minAPIVersion"] = serde_json::json!(99);
+    fixture.write("src/main/module.json5", &source);
+    fixture.write("src/main/module.json", &source);
+    fixture.write(
+        "build/default/intermediates/merge_profile/default/module.json",
+        &source,
+    );
+    fixture.write(
+        "build/tablet/intermediates/merge_profile/default/module.json",
+        &processed,
+    );
+    assert_eq!(
+        fixture.build().unwrap()["module"]["metadata"],
+        processed["module"]["metadata"]
+    );
+}
+
+#[test]
+fn legacy_api_profiles_write_minimum_minor_and_patch_from_product_version() {
+    let mut fixture = DependencyProfileFixture::new();
+    let app_scope = fixture.config.project_root.join("AppScope");
+    std::fs::create_dir_all(&app_scope).unwrap();
+    std::fs::write(
+        app_scope.join("app.json5"),
+        r#"{"app":{"bundleName":"com.example.profiletest","minMinorAPIVersion":7,"minPatchAPIVersion":9}}"#,
+    )
+    .unwrap();
+    // sdk-util.parseApiVersion: these are API components, not the 0 and 2
+    // platform-version components in "6.0.2(22)".
+    for version in ["22", "6.0.2(22)"] {
+        fixture.config.product.compatible_sdk_version = version.into();
+        let output = fixture.build().unwrap();
+        assert_eq!(output["app"]["minMinorAPIVersion"], 0);
+        assert_eq!(output["app"]["minPatchAPIVersion"], 0);
+    }
 }
 
 /// `installationFree` is `true` when `bundleType` is `atomicService`.

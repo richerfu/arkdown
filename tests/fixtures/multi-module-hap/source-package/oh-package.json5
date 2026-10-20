@@ -1,0 +1,6 @@
+{
+  "name": "source-package",
+  "version": "1.0.0",
+  "main": "Index.ets",
+  "dependencies": {}
+}

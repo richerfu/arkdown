@@ -293,6 +293,8 @@ impl ModuleJsonWriter {
             "targetPatchAPIVersion",
             "compileSdkVersion",
             "compileSdkType",
+            "minMinorAPIVersion",
+            "minPatchAPIVersion",
             "appEnvironments",
             "bundleType",
             "buildMode",
@@ -475,6 +477,11 @@ impl ModuleJsonWriter {
         obj.insert("compileSdkType".into(), "HarmonyOS".into());
         obj.insert("targetMinorAPIVersion".into(), 0u64.into());
         obj.insert("targetPatchAPIVersion".into(), 0u64.into());
+        // MergeProfile.resolveApi also writes the minimum API components.
+        // sdk-util.parseApiVersion assigns zero minor/patch components to the
+        // integer and legacy "platform(API)" versions accepted by our config.
+        obj.insert("minMinorAPIVersion".into(), 0u64.into());
+        obj.insert("minPatchAPIVersion".into(), 0u64.into());
         obj.insert(
             "appEnvironments".into(),
             src.get("appEnvironments")
@@ -1086,78 +1093,20 @@ impl ModuleJsonWriter {
 
         let dependency_profiles = Self::read_dependency_module_profiles(
             &module_cfg.src_path,
-            &config.project_root,
+            config,
+            dependency_graph,
             dependency_profile_roots,
         )?;
         let compatible_api = parse_api_version(&config.product.compatible_sdk_version)
             .unwrap_or(config.sdk_config.compile_api_version);
 
-        // Validate ALL local dependency nodes (SourceHar + SharedHsp) for API/device
-        // compatibility, not just those that contribute metadata/requestPermissions.
-        // Matches hvigor's checkHarApiStatus() / checkHarDeviceTypes() behavior
-        // which validates the entire dependency graph, not just the merging subset.
-        {
-            use arkdown_session::dependency_graph::snapshot::DependencyNodeType;
-            let owned_graph;
-            let graph = if let Some(graph) = dependency_graph {
-                graph
-            } else {
-                owned_graph =
-                    arkdown_session::dependency_graph::builder::DependencyGraphBuilder::new(
-                        &module_cfg.name,
-                        &config.project_root,
-                        &module_cfg.src_path,
-                    )
-                    .build();
-                &owned_graph
-            };
-            for node in graph.nodes.values() {
-                if !matches!(
-                    node.node_type,
-                    DependencyNodeType::SourceHar
-                        | DependencyNodeType::SharedHsp
-                        | DependencyNodeType::IntegratedHsp
-                ) {
-                    continue;
-                }
-                let Some(package_root) = node.package_root.as_ref() else {
-                    continue;
-                };
-                // Read module profile for this node and validate API/device.
-                let profile_path = ProfileModuleLayout::new(package_root).module_json5();
-                if !profile_path.is_file() {
-                    continue;
-                }
-                let Ok(content) = std::fs::read_to_string(&profile_path) else {
-                    continue;
-                };
-                // Only validate API/device; skip nodes without minAPIVersion info.
-                if let Ok(profile_json) = json5::from_str::<serde_json::Value>(&content) {
-                    let app_min_api = profile_json
-                        .pointer("/app/minAPIVersion")
-                        .or_else(|| profile_json.pointer("/module/minAPIVersion"));
-                    if let Some(min_api) = app_min_api.and_then(|v| v.as_u64()) {
-                        if min_api > compatible_api as u64 {
-                            return Err(ArkdownError::Bundler(format!(
-                                "HAR_UNSUPPORTED_API_VERSION: dependency '{}' requires \
-                                 minAPIVersion {}, current compatible API is {}",
-                                node.package_name, min_api, compatible_api
-                            )));
-                        }
-                    }
-                }
-            }
-        }
-
         if dependency_profiles.is_empty() {
             return Ok(DependencyProfileMerge::default());
         }
 
-        for profile in dependency_profiles.iter().filter(|profile| {
-            !profile.metadata.is_empty()
-                || !profile.request_permissions.is_empty()
-                || !profile.extension_abilities.is_empty()
-        }) {
+        // MergeProfile.mergeAllHarModuleOpt validates every selected processed
+        // profile, including dependencies with no metadata or permissions.
+        for profile in &dependency_profiles {
             Self::validate_dependency_module_profile(
                 profile,
                 &manifest.device_types,
@@ -1223,7 +1172,8 @@ impl ModuleJsonWriter {
 
     fn read_dependency_module_profiles(
         module_root: &Path,
-        project_root: &Path,
+        config: &ArkdownConfig,
+        dependency_graph: Option<&arkdown_session::DependencyGraphSnapshot>,
         dependency_profile_roots: Option<&[PathBuf]>,
     ) -> Result<Vec<DependencyModuleProfile>, ArkdownError> {
         let mut profiles = Vec::new();
@@ -1231,11 +1181,34 @@ impl ModuleJsonWriter {
         let package_dirs = if let Some(roots) = dependency_profile_roots {
             roots
         } else {
-            discovered_roots = Self::collect_dependency_package_dirs(module_root, project_root)?;
+            discovered_roots =
+                Self::collect_dependency_package_dirs(module_root, &config.project_root)?;
             &discovered_roots
         };
+        let canonical_root = |root: &Path| {
+            dependency_graph.map_or_else(
+                || arkdown_path::canonicalize_or_owned(root),
+                |graph| graph.canonical_package_root(root).into_owned(),
+            )
+        };
+        let local_modules: FxHashSet<_> = config
+            .modules
+            .iter()
+            .map(|module| canonical_root(&module.src_path))
+            .collect();
         for package_dir in package_dirs {
-            if let Some(profile) = Self::read_dependency_module_profile(package_dir) {
+            let layout = ProfileModuleLayout::for_product(package_dir, &config.product.name);
+            // MergeProfile.mergeDependsLibs selects generated MergeProfile
+            // output for project modules, and src/main/module.json for installed
+            // packages. transformJson2Opts skips a missing file; it never falls
+            // back to a source module.json5, resource output, or package-root file.
+            let profile_path = if local_modules.contains(&canonical_root(package_dir)) {
+                layout.merge_profile_module_json()
+            } else {
+                layout.module_json()
+            };
+            if let Some(profile) = Self::read_dependency_module_profile(package_dir, &profile_path)?
+            {
                 profiles.push(profile);
             }
         }
@@ -1301,80 +1274,87 @@ impl ModuleJsonWriter {
         candidate.is_dir().then_some(candidate)
     }
 
-    fn read_dependency_module_profile(package_dir: &Path) -> Option<DependencyModuleProfile> {
+    fn read_dependency_module_profile(
+        package_dir: &Path,
+        profile_path: &Path,
+    ) -> Result<Option<DependencyModuleProfile>, ArkdownError> {
+        let content = match std::fs::read_to_string(profile_path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                tracing::warn!(
+                    "{} does not exist; this library profile will not be merged",
+                    profile_path.display()
+                );
+                return Ok(None);
+            }
+            Err(error) => return Err(ArkdownError::Io(error)),
+        };
+        let raw: serde_json::Value =
+            json5::from_str(&content).map_err(|error| ArkdownError::ParseError {
+                file: ModuleJsonPathText::new(profile_path).string(),
+                message: error.to_string(),
+            })?;
         let package_json = Self::read_dependency_package_json(package_dir);
-        for candidate in Self::dependency_module_json_candidates(package_dir) {
-            if !candidate.is_file() {
-                continue;
-            }
-            let Ok(content) = std::fs::read_to_string(&candidate) else {
-                continue;
-            };
-            let Ok(raw) = json5::from_str::<serde_json::Value>(&content) else {
-                continue;
-            };
-            let Some(module) = raw.get("module").and_then(|value| value.as_object()) else {
-                continue;
-            };
-            let Some(module_type) = module.get("type").and_then(|value| value.as_str()) else {
-                continue;
-            };
-            if module_type != "har" && module_type != "shared" {
-                return None;
-            }
-            let app = raw.get("app").and_then(|value| value.as_object());
-            let module_name = module
-                .get("packageName")
-                .or_else(|| module.get("name"))
-                .and_then(|value| value.as_str())
-                .map(str::to_string)
-                .or_else(|| package_json.as_ref().and_then(|pkg| pkg.name.clone()))
-                .or_else(|| {
-                    package_dir
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .map(str::to_string)
-                })
-                .unwrap_or_else(|| "unknown".to_string());
-            let package_name = package_json
-                .as_ref()
-                .and_then(|pkg| pkg.name.clone())
-                .unwrap_or_else(|| module_name.clone());
-            let package_version = package_json
-                .as_ref()
-                .and_then(|pkg| pkg.version.clone())
-                .unwrap_or_default();
-            let module_value = serde_json::Value::Object(module.clone());
-            let extension_abilities = Self::normalize_dependency_extension_abilities(
-                package_dir,
-                &package_name,
-                &package_version,
-                &candidate,
-                Self::array_field(Some(&module_value), "extensionAbilities"),
-            );
-            return Some(DependencyModuleProfile {
-                module_name,
-                module_type: module_type.to_string(),
-                source_path: candidate,
-                min_api_version: app
-                    .and_then(|app| app.get("minAPIVersion"))
-                    .and_then(Self::parse_dependency_min_api_version),
-                device_types: module
-                    .get("deviceTypes")
-                    .and_then(|value| value.as_array())
-                    .map(|values| {
-                        values
-                            .iter()
-                            .filter_map(|value| value.as_str().map(str::to_string))
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                metadata: Self::array_field(Some(&module_value), "metadata"),
-                request_permissions: Self::array_field(Some(&module_value), "requestPermissions"),
-                extension_abilities,
-            });
+        let Some(module) = raw.get("module").and_then(|value| value.as_object()) else {
+            return Ok(None);
+        };
+        let Some(module_type) = module.get("type").and_then(|value| value.as_str()) else {
+            return Ok(None);
+        };
+        if module_type != "har" && module_type != "shared" {
+            return Ok(None);
         }
-        None
+        let app = raw.get("app").and_then(|value| value.as_object());
+        let module_name = module
+            .get("packageName")
+            .or_else(|| module.get("name"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+            .or_else(|| package_json.as_ref().and_then(|pkg| pkg.name.clone()))
+            .or_else(|| {
+                package_dir
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| "unknown".to_string());
+        let package_name = package_json
+            .as_ref()
+            .and_then(|pkg| pkg.name.clone())
+            .unwrap_or_else(|| module_name.clone());
+        let package_version = package_json
+            .as_ref()
+            .and_then(|pkg| pkg.version.clone())
+            .unwrap_or_default();
+        let module_value = serde_json::Value::Object(module.clone());
+        let extension_abilities = Self::normalize_dependency_extension_abilities(
+            package_dir,
+            &package_name,
+            &package_version,
+            profile_path,
+            Self::array_field(Some(&module_value), "extensionAbilities"),
+        );
+        Ok(Some(DependencyModuleProfile {
+            module_name,
+            module_type: module_type.to_string(),
+            source_path: profile_path.to_path_buf(),
+            min_api_version: app
+                .and_then(|app| app.get("minAPIVersion"))
+                .and_then(Self::parse_dependency_min_api_version),
+            device_types: module
+                .get("deviceTypes")
+                .and_then(|value| value.as_array())
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(|value| value.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            metadata: Self::array_field(Some(&module_value), "metadata"),
+            request_permissions: Self::array_field(Some(&module_value), "requestPermissions"),
+            extension_abilities,
+        }))
     }
 
     fn normalize_dependency_extension_abilities(
@@ -1439,18 +1419,6 @@ impl ModuleJsonWriter {
             .join(&rel_stem)
             .into_string();
         Some(OhmUrl::normalized_non_so("", "", &normalized_import, package_version).into_string())
-    }
-
-    fn dependency_module_json_candidates(package_dir: &Path) -> Vec<PathBuf> {
-        let layout = ProfileModuleLayout::new(package_dir);
-        vec![
-            layout.merge_profile_module_json(),
-            layout.res_module_json(),
-            layout.module_json5(),
-            layout.module_json(),
-            layout.package_module_json5(),
-            layout.package_module_json(),
-        ]
     }
 
     fn array_field(raw_module: Option<&serde_json::Value>, field: &str) -> Vec<serde_json::Value> {

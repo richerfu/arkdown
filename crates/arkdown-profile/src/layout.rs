@@ -290,10 +290,6 @@ impl<'a> ProfileModuleLayout<'a> {
         self.default_intermediate_file("merge_profile", "module.json")
     }
 
-    pub(crate) fn res_module_json(&self) -> PathBuf {
-        self.default_intermediate_file("res", "module.json")
-    }
-
     pub(crate) fn compiled_res_profile_dir(&self) -> PathBuf {
         self.default_intermediate_dir("res")
             .join("resources")

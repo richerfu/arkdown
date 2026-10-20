@@ -682,6 +682,9 @@ fn bc_har_dep_hap_hvigor_parity_report() {
 /// Multi-module parity: an entry HAP depending on a source HAR module.
 /// Validates module.json app/module field order, loader.json module maps,
 /// cross-module cache TS, and the merged ABC against hvigor.
+/// The installed source package is not a project module and ships only
+/// module.json5. MergeProfile.mergeDependsLibs / transformJson2Opts must skip
+/// its unpublished profile, including its permissions and metadata.
 #[test]
 fn multi_module_hap_hvigor_parity_report() {
   run_parity_report_test(

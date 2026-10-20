@@ -3058,3 +3058,38 @@ fn app_archive_unpacker_extracts_signable_packages_and_cleans_exact_output() {
     unpacker.cleanup(&unpacked).unwrap();
     assert!(!unpacked.root_path.exists());
 }
+
+/// AbstractGeneratePkgModuleJson.doTaskAction only stringifies the processed
+/// profile. Schema-based reordering changes Fastjson's later hash-bucket ties
+/// (notably minPatchAPIVersion and debug), so even unknown fields keep position.
+#[test]
+fn package_intermediate_preserves_processed_profile_field_order() {
+    let input = r#"{
+        "app": {
+            "bundleName": "com.example",
+            "minMinorAPIVersion": 0,
+            "minPatchAPIVersion": 0,
+            "customField": true,
+            "debug": false
+        },
+        "module": {
+            "pages": "$profile:main_pages",
+            "deviceTypes": ["phone"],
+            "name": "entry",
+            "abilities": [{"exported": true, "name": "EntryAbility"}]
+        }
+    }"#;
+    assert_eq!(
+        arkdown_pack::minify_package_intermediate_module_json(input).unwrap(),
+        r#"{"app":{"bundleName":"com.example","minMinorAPIVersion":0,"minPatchAPIVersion":0,"customField":true,"debug":false},"module":{"pages":"$profile:main_pages","deviceTypes":["phone"],"name":"entry","abilities":[{"exported":true,"name":"EntryAbility"}]}}"#
+    );
+}
+
+#[test]
+fn ohos_test_package_intermediate_retains_merge_profile_insertion_order() {
+    let input = r#"{"app":{"bundleName":"com.example"},"module":{"description":"$string:module_test_desc","mainElement":"TestAbility","pages":"$profile:test_pages","abilities":[],"name":"entry_test","type":"feature","deviceTypes":["phone"],"deliveryWithInstall":true,"installationFree":false,"packageName":"entry","virtualMachine":"ark12.0.6.0","compileMode":"esmodule","dependencies":[]}}"#;
+    assert_eq!(
+        arkdown_pack::minify_package_intermediate_module_json(input).unwrap(),
+        input
+    );
+}
