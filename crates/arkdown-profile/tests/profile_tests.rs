@@ -2151,6 +2151,26 @@ fn local_dependency_uses_selected_product_merge_profile_output() {
     );
 }
 
+#[test]
+fn legacy_api_profiles_write_minimum_minor_and_patch_from_product_version() {
+    let mut fixture = DependencyProfileFixture::new();
+    let app_scope = fixture.config.project_root.join("AppScope");
+    std::fs::create_dir_all(&app_scope).unwrap();
+    std::fs::write(
+        app_scope.join("app.json5"),
+        r#"{"app":{"bundleName":"com.example.profiletest","minMinorAPIVersion":7,"minPatchAPIVersion":9}}"#,
+    )
+    .unwrap();
+    // sdk-util.parseApiVersion: these are API components, not the 0 and 2
+    // platform-version components in "6.0.2(22)".
+    for version in ["22", "6.0.2(22)"] {
+        fixture.config.product.compatible_sdk_version = version.into();
+        let output = fixture.build().unwrap();
+        assert_eq!(output["app"]["minMinorAPIVersion"], 0);
+        assert_eq!(output["app"]["minPatchAPIVersion"], 0);
+    }
+}
+
 /// `installationFree` is `true` when `bundleType` is `atomicService`.
 #[test]
 fn test_write_module_json_installation_free_for_atomic_service() {

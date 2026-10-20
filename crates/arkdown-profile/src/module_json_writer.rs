@@ -293,6 +293,8 @@ impl ModuleJsonWriter {
             "targetPatchAPIVersion",
             "compileSdkVersion",
             "compileSdkType",
+            "minMinorAPIVersion",
+            "minPatchAPIVersion",
             "appEnvironments",
             "bundleType",
             "buildMode",
@@ -475,6 +477,11 @@ impl ModuleJsonWriter {
         obj.insert("compileSdkType".into(), "HarmonyOS".into());
         obj.insert("targetMinorAPIVersion".into(), 0u64.into());
         obj.insert("targetPatchAPIVersion".into(), 0u64.into());
+        // MergeProfile.resolveApi also writes the minimum API components.
+        // sdk-util.parseApiVersion assigns zero minor/patch components to the
+        // integer and legacy "platform(API)" versions accepted by our config.
+        obj.insert("minMinorAPIVersion".into(), 0u64.into());
+        obj.insert("minPatchAPIVersion".into(), 0u64.into());
         obj.insert(
             "appEnvironments".into(),
             src.get("appEnvironments")
