@@ -1,0 +1,9 @@
+{
+  "module": {
+    "name": "source_package",
+    "type": "har",
+    "deviceTypes": ["phone"],
+    "metadata": [{ "name": "source_only", "value": "not_a_published_profile" }],
+    "requestPermissions": [{ "name": "ohos.permission.INTERNET" }]
+  }
+}

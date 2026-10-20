@@ -6,5 +6,8 @@
   "main": "",
   "author": "",
   "license": "",
-  "dependencies": { "library": "file:../library" }
+  "dependencies": {
+    "library": "file:../library",
+    "source-package": "file:../source-package"
+  }
 }
