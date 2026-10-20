@@ -19,3 +19,8 @@ The real Hvigor matrix exercises this fixture through
 `multi_module_hap_hvigor_parity_report`. Focused profile tests additionally cover
 competing source/stale profiles, invalid JSON, missing or excessive minimum API
 versions, and product-specific local MergeProfile output.
+
+The current SDK's `MergeProfile.resolveApi` also emits minimum API minor/patch
+components. `AbstractGeneratePkgModuleJson.doTaskAction` preserves the processed
+profile's field order when serializing it for the package tool; the fixture
+compares both the intermediate JSON and final archive bytes.
