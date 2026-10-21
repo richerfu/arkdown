@@ -686,13 +686,23 @@ impl<'a> HvigorStandardSourceMapBuilder<'a> {
     }
 
     pub fn build(&self) -> Option<String> {
-        let generated_tokens = SourceMapTokenCollector::new(self.generated, self.id).collect()?;
-        let original_tokens = SourceMapTokenCollector::new(self.original, self.id).collect()?;
-        let generated_import_end =
-            SourceMapImportPrefix::new(self.generated, self.id).generated_end();
-        let original_import_end = SourceMapImportPrefix::new(self.original, self.id).original_end();
-        let original_bindings =
-            OriginalImportBindingCollector::new(self.original, self.id).collect();
+        // process_module_files.ts::genContentAndSourceMapInfo passes one
+        // SourceFile to the TypeScript printer. Collect our token and syntax
+        // facts from the same parse as well; only owned facts survive it.
+        let (generated_tokens, (generated_import_end, final_statement_is_class)) =
+            SourceMapTokenCollector::new(self.generated, self.id).collect_with(|program| {
+                (
+                    SourceMapImportPrefix::new(self.generated).generated_end(program),
+                    Self::final_statement_is_class(program),
+                )
+            })?;
+        let (original_tokens, (original_import_end, original_bindings)) =
+            SourceMapTokenCollector::new(self.original, self.id).collect_with(|program| {
+                (
+                    SourceMapImportPrefix::new(self.original).original_end(program),
+                    OriginalImportBindingCollector::collect(program),
+                )
+            })?;
         let original_line_offsets = SourceMapLineOffsets::new(self.original);
         let mut entries = MapEntryCollector::default();
         let original_import_tokens = original_tokens
@@ -745,7 +755,6 @@ impl<'a> HvigorStandardSourceMapBuilder<'a> {
             .unwrap_or(original_tokens.len());
         let generated_text = GeneratedSourceMapText::new(self.generated);
         let final_generated_line = generated_text.final_line();
-        let final_statement_is_class = self.final_statement_is_class();
 
         for (index, token) in body_tokens.iter().enumerate() {
             while original_index < original_tokens.len()
@@ -822,15 +831,8 @@ impl<'a> HvigorStandardSourceMapBuilder<'a> {
         Some(EtsSourceMapBuilder::new(self.id, generated_text.line_count(), &entries).build())
     }
 
-    fn final_statement_is_class(&self) -> bool {
-        let allocator = Allocator::default();
-        let source_type =
-            SourceType::from_path(self.id).unwrap_or_else(|_| SourceType::ts().with_module(true));
-        let parsed = Parser::new(&allocator, self.generated, source_type).parse();
-        if !parsed.diagnostics.is_empty() {
-            return false;
-        }
-        let Some(statement) = parsed.program.body.last() else {
+    fn final_statement_is_class(program: &oxc_ast::ast::Program<'_>) -> bool {
+        let Some(statement) = program.body.last() else {
             return false;
         };
         match statement {
@@ -869,6 +871,13 @@ impl<'a> SourceMapTokenCollector<'a> {
     }
 
     fn collect(&self) -> Option<Vec<TokenInfo<'a>>> {
+        self.collect_with(|_| ()).map(|(tokens, ())| tokens)
+    }
+
+    fn collect_with<Metadata>(
+        &self,
+        inspect: impl FnOnce(&oxc_ast::ast::Program<'_>) -> Metadata,
+    ) -> Option<(Vec<TokenInfo<'a>>, Metadata)> {
         let allocator = Allocator::default();
         let source_type =
             SourceType::from_path(self.id).unwrap_or_else(|_| SourceType::ts().with_module(true));
@@ -905,40 +914,31 @@ impl<'a> SourceMapTokenCollector<'a> {
                 end_col,
             });
         }
-        Some(tokens)
+        Some((tokens, inspect(&parsed.program)))
     }
 }
 
 struct SourceMapImportPrefix<'a> {
     source: &'a str,
-    id: &'a str,
 }
 
 impl<'a> SourceMapImportPrefix<'a> {
-    fn new(source: &'a str, id: &'a str) -> Self {
-        Self { source, id }
+    fn new(source: &'a str) -> Self {
+        Self { source }
     }
 
-    fn generated_end(&self) -> u32 {
-        self.end(false)
+    fn generated_end(&self, program: &oxc_ast::ast::Program<'_>) -> u32 {
+        self.end(program, false)
     }
 
-    fn original_end(&self) -> u32 {
-        self.end(true)
+    fn original_end(&self, program: &oxc_ast::ast::Program<'_>) -> u32 {
+        self.end(program, true)
     }
 
-    fn end(&self, include_trailing_blank_lines: bool) -> u32 {
-        let allocator = Allocator::default();
-        let source_type =
-            SourceType::from_path(self.id).unwrap_or_else(|_| SourceType::ts().with_module(true));
-        let parsed = Parser::new(&allocator, self.source, source_type).parse();
-        if !parsed.diagnostics.is_empty() {
-            return 0;
-        }
-
+    fn end(&self, program: &oxc_ast::ast::Program<'_>, include_trailing_blank_lines: bool) -> u32 {
         let source_text = SourceMapSourceText::new(self.source);
         let mut end = 0usize;
-        for statement in &parsed.program.body {
+        for statement in &program.body {
             if matches!(statement, Statement::ImportDeclaration(_)) {
                 end = source_text.line_end_after(statement.span().end as usize);
                 continue;
@@ -953,27 +953,12 @@ impl<'a> SourceMapImportPrefix<'a> {
     }
 }
 
-struct OriginalImportBindingCollector<'a> {
-    source: &'a str,
-    id: &'a str,
-}
+struct OriginalImportBindingCollector;
 
-impl<'a> OriginalImportBindingCollector<'a> {
-    fn new(source: &'a str, id: &'a str) -> Self {
-        Self { source, id }
-    }
-
-    fn collect(&self) -> FxHashMap<String, (u32, u32)> {
-        let allocator = Allocator::default();
-        let source_type =
-            SourceType::from_path(self.id).unwrap_or_else(|_| SourceType::ts().with_module(true));
-        let parsed = Parser::new(&allocator, self.source, source_type).parse();
-        if !parsed.diagnostics.is_empty() {
-            return FxHashMap::default();
-        }
-
+impl OriginalImportBindingCollector {
+    fn collect(program: &oxc_ast::ast::Program<'_>) -> FxHashMap<String, (u32, u32)> {
         let mut bindings = FxHashMap::default();
-        for statement in &parsed.program.body {
+        for statement in &program.body {
             let Statement::ImportDeclaration(import) = statement else {
                 continue;
             };
