@@ -9,11 +9,6 @@ on:
       - main
   workflow_dispatch:
     inputs:
-      run_hvigor_parity:
-        description: 'Run strict Hvigor parity on a configured self-hosted SDK runner'
-        required: false
-        default: false
-        type: boolean
       publish_package:
         description: 'Publish packages/arkdown after all CI and platform checks pass'
         required: false
@@ -263,115 +258,11 @@ jobs:
             target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
-  hvigor-parity:
-    name: Hvigor Parity
-    # Enable automatic parity with this repository variable once the runner and
-    # SDK secrets exist. Releases always require strict parity.
-    if: >-
-      vars.ARKDOWN_HVIGOR_PARITY == 'true' ||
-      (github.event_name == 'workflow_dispatch' && (inputs.run_hvigor_parity || inputs.publish_package)) ||
-      (github.event_name == 'push' && github.ref == 'refs/heads/main' &&
-        startsWith(github.event.head_commit.message, 'chore(release): publish'))
-    runs-on:
-      - self-hosted
-      - ohos-sdk
-    needs: rust
-    timeout-minutes: 60
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-          components: clippy, rustfmt
-
-      - name: Verify Rust environment
-        run: |
-          rustc --version --verbose
-          cargo --version
-          cargo fmt --version
-          cargo clippy --version
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-rust-${{ env.RUST_TOOLCHAIN }}-parity-cargo-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-rust-${{ env.RUST_TOOLCHAIN }}-parity-cargo-
-
-      - name: Verify SDK environment
-        run: |
-          test -n "$ARKDOWN_PARITY_HVIGORW"
-          test -x "$ARKDOWN_PARITY_HVIGORW"
-          test -n "$OHOS_SDK_HOME"
-          test -d "$OHOS_SDK_HOME"
-        env:
-          ARKDOWN_PARITY_HVIGORW: ${{ secrets.HVIGORW_PATH }}
-          OHOS_SDK_HOME: ${{ secrets.OHOS_SDK_PATH }}
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: '10.12.1'
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: 22
-
-      - name: Build binding for the JavaScript CLI
-        working-directory: packages/arkdown
-        run: |
-          pnpm install --frozen-lockfile
-          pnpm build
-
-      - name: Test embedded compiler and build through Node
-        working-directory: packages/arkdown
-        run: node --test __test__/native-checker.e2e.cjs __test__/native-plugin.e2e.cjs
-        env:
-          ARKDOWN_NATIVE_CHECKER_E2E: '1'
-          ARKDOWN_NATIVE_PLUGIN_E2E: '1'
-          OHOS_SDK_HOME: ${{ secrets.OHOS_SDK_PATH }}
-
-      - name: Run hvigor parity tests
-        run: cargo test --locked -p arkdown-napi --test hvigor_parity -- --nocapture
-        env:
-          ARKDOWN_PARITY_HVIGORW: ${{ secrets.HVIGORW_PATH }}
-          ARKDOWN_PARITY_ARKDOWN_CLI: ${{ github.workspace }}/packages/arkdown/js/arkdown-cli.js
-          ARKDOWN_PARITY_RUN: '1'
-          ARKDOWN_PARITY_STRICT: '1'
-          ARKDOWN_PARITY_ALLOWLIST: tests/parity_allowlist.json
-          OHOS_SDK_HOME: ${{ secrets.OHOS_SDK_PATH }}
-
-      - name: Upload parity report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: parity-report-${{ github.sha }}
-          path: target/parity/
-          if-no-files-found: error
-          retention-days: 30
-
   package:
     name: Package arkdown
     needs:
       - quality
       - rust
-      - hvigor-parity
-    if: >-
-      ${{
-        always() &&
-        needs.quality.result == 'success' &&
-        needs.rust.result == 'success' &&
-        (needs.hvigor-parity.result == 'success' || needs.hvigor-parity.result == 'skipped')
-      }}
     permissions:
       contents: read
       id-token: write

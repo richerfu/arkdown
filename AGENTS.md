@@ -39,6 +39,11 @@ depend on a separate skill.
 
 Use Cargo directly; there is no `justfile`.
 
+All GitHub Actions jobs must use GitHub-hosted runners. Custom runner labels,
+runner groups, and preconfigured private CI machines are forbidden. Provision
+SDK and toolchain dependencies in the workflow. Run developer-only Hvigor
+parity checks locally.
+
 ## Entrypoint Boundary
 
 The only executable command-line entry is `packages/arkdown/js/arkdown-cli.js`, published through the npm `bin` field. JavaScript owns argv parsing, help/version text, stdout/stderr, exit codes, and TS/JS plugin compatibility. Project discovery, build plans, transforms, caches, SDK commands, artifacts, checking, and cleaning remain Rust-owned behind typed N-API services.
