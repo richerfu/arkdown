@@ -8,6 +8,11 @@ on:
         required: false
         default: false
         type: boolean
+      dist_tag:
+        description: 'npm dist-tag; empty derives it from the package version (beta, rc, latest, ...)'
+        required: false
+        default: ''
+        type: string
     secrets:
       NPM_TOKEN:
         required: false
@@ -354,7 +359,11 @@ jobs:
       - name: Publish to npm
         if: inputs.publish
         run: |
-          NPM_TAG=$(node -p "const version = require('./package.json').version; const match = version.match(/^[^-]+-([0-9A-Za-z]+)(?:[.-].*)?$/); match ? match[1] : 'latest'")
+          if [ -n "${REQUESTED_DIST_TAG}" ]; then
+            NPM_TAG="${REQUESTED_DIST_TAG}"
+          else
+            NPM_TAG=$(node -p "const version = require('./package.json').version; const match = version.match(/^[^-]+-([0-9A-Za-z]+)(?:[.-].*)?$/); match ? match[1] : 'latest'")
+          fi
           echo "Publishing with npm dist-tag: ${NPM_TAG}"
           export npm_config_tag="${NPM_TAG}"
           export NPM_CONFIG_PROVENANCE=true
@@ -364,3 +373,4 @@ jobs:
           npm publish --ignore-scripts --provenance --access public --tag "${NPM_TAG}"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          REQUESTED_DIST_TAG: ${{ inputs.dist_tag }}
