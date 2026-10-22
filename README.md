@@ -62,21 +62,23 @@ release-mode native binding and produce a debug HAP with native debug symbols re
 | Implementation | After public clean | Unchanged-source rebuild | Peak tree RSS, cold / hot | Peak tree physical footprint, cold / hot |
 | --- | ---: | ---: | ---: | ---: |
 | Hvigor 6.26.4 | 629.69 s | 5.96 s | 2.90 / 0.54 GiB | 9.68 / 0.49 GiB |
-| Arkdown, full checker with cached stages | 84.08 s | 17.28 s | 1.71 / 0.42 GiB | 2.39 / 0.34 GiB |
-| Arkdown `--skip-checker` | 98.02 s | 15.84 s | 1.68 / 0.43 GiB | 2.37 / 0.34 GiB |
+| Arkdown, full checker with cached stages | 75.36 s | 17.28 s | 1.71 / 0.42 GiB | 2.39 / 0.34 GiB |
+| Arkdown `--skip-checker` | 62.94 s | 15.84 s | 1.68 / 0.43 GiB | 2.37 / 0.34 GiB |
 
 The input is a production HarmonyOS application with 11,627 TypeScript files and 23 ETS
-files. Arkdown cold/hot values are medians of two cold/hot pairs (cold 78.72/89.43 s,
-hot 16.21/18.34 s); `--skip-checker` cold values were 101.04/95.00 s. Hvigor was measured
-as one cold/hot pair. Each cold run follows the implementation's public `clean`; hot runs
-repeat unchanged inputs in a new process. Dependencies, SDK files, and the OS page cache
-remain available. Hvigor runs without its daemon, with parallel and incremental builds
-enabled. Process-tree memory is sampled every 100 ms (RSS) and 1 s (physical footprint);
-Node uses `--max-old-space-size=8192`. RSS and macOS physical footprint are separate
-measurements. Cold time is I/O-dominated: the two Arkdown full-checker cold samples differ
-by 10.7 s, so the `--skip-checker` cold difference is not a controlled comparison.
+files. Arkdown cold/hot values are medians of two cold/hot pairs measured in alternating
+order (full cold 77.87/72.85 s, `--skip-checker` cold 64.62/61.25 s; hot 16.21/18.34 s
+and 16.35/15.33 s). Hvigor was measured as one cold/hot pair. Each cold run follows the
+implementation's public `clean`; hot runs repeat unchanged inputs in a new process.
+Dependencies, SDK files, and the OS page cache remain available. Hvigor runs without its
+daemon, with parallel and incremental builds enabled. Process-tree memory is sampled every
+100 ms (RSS) and 1 s (physical footprint); Node uses `--max-old-space-size=8192`. RSS and
+macOS physical footprint are separate measurements. Cold wall time is I/O-dominated and
+varies by tens of seconds between runs, so the alternating pair is the controlled
+comparison. `--skip-checker` is faster because it omits diagnostics while retaining
+transform type facts: median Bundling is 25.85 s versus 36.35 s for the full checker.
 
-In the current pair, Arkdown uses 86.6% less cold-build time (7.5x) and 75.3% less peak
+In the current pair, Arkdown uses 88.0% less cold-build time (8.4x) and 75.3% less peak
 cold-build physical footprint than Hvigor, with 41.1% lower cold-build RSS. Its
 unchanged-source rebuild is 2.90 times slower, but uses 21.9% less RSS and 30.2% less
 physical footprint.
