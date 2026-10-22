@@ -249,11 +249,10 @@ For a public SDK without vendor checker plugins, install the test callback
 component with `node packages/arkdown/scripts/prepare-test-sdk.cjs` from the
 repository root, pointing `OHOS_SDK_HOME` at an SDK dedicated to testing.
 
-Strict Hvigor parity needs a self-hosted runner labelled `ohos-sdk` and the
-`HVIGORW_PATH` / `OHOS_SDK_PATH` secrets. Use the CI dispatch input
-`run_hvigor_parity`, or set the repository variable `ARKDOWN_HVIGOR_PARITY=true`
-to run it automatically. npm publication always requires strict parity;
-ordinary CI and package validation run on GitHub-hosted runners.
+All CI and npm publication jobs use GitHub-hosted runners. Publication waits
+for lint, the Linux/macOS/Windows Rust and native integration checks, and the
+platform package checks. Strict Hvigor parity remains a local test using the
+DevEco-bundled `hvigorw` executable, as described above.
 
 The ArkTS checker is tsrs, fetched by Cargo from `ohos-rs/tsrs` with a full
 Git `rev` in the workspace dependencies and `Cargo.lock`. Cargo links
