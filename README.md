@@ -86,8 +86,7 @@ hits verify the generated SDK input files as well as bytecode and source maps; r
 modified outputs trigger rebuilding. Content hashing runs in parallel with bounded read
 buffers. The latest Arkdown hot stages take 6.92 s for preparing the project, 3.28 s for
 profiles/resources, 0.46 s for bundling, 0 s for ABC, and 7.39 s for packaging/signing
-including content validation. Detailed before/after dependency measurements are in
-[`meta/tasks/PERF-OHOS-DEPS-UPGRADE.md`](meta/tasks/PERF-OHOS-DEPS-UPGRADE.md).
+including content validation.
 
 ### Prerequisites
 
