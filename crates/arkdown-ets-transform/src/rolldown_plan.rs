@@ -996,7 +996,7 @@ impl<'a> HvigorSourcePipeline<'a> {
             self.transformer.plan.arkts_language_version,
         );
         let parsed = Parser::new(&allocator, source, source_type).parse();
-        if parsed.panicked || !parsed.diagnostics.is_empty() {
+        if parsed.fatal_error || !parsed.diagnostics.is_empty() {
             return source.to_string();
         }
         HvigorTypescriptPrinter::print(

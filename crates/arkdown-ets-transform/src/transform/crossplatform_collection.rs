@@ -80,19 +80,28 @@ impl<'a> CrossplatformModuleCollector<'a> {
             match statement {
                 Statement::ImportDeclaration(import) => {
                     if let Some(specifiers) = import.specifiers.as_deref() {
-                        self.collect_import(import.source.value.as_str(), specifiers);
+                        self.collect_import(
+                            (import.source.value.as_str()).unwrap_or_default(),
+                            specifiers,
+                        );
                     }
                 }
                 Statement::LazyImportDeclaration(import) => {
                     if let Some(specifiers) = import.specifiers.as_deref() {
-                        self.collect_import(import.source.value.as_str(), specifiers);
+                        self.collect_import(
+                            (import.source.value.as_str()).unwrap_or_default(),
+                            specifiers,
+                        );
                     }
                 }
                 Statement::TSImportEqualsDeclaration(import) => {
                     if let TSModuleReference::ExternalModuleReference(reference) =
                         &import.module_reference
                     {
-                        self.collect_import(reference.expression.value.as_str(), &[]);
+                        self.collect_import(
+                            (reference.expression.value.as_str()).unwrap_or_default(),
+                            &[],
+                        );
                     }
                 }
                 _ => {}
@@ -118,7 +127,7 @@ impl<'a> CrossplatformModuleCollector<'a> {
                                 name.name.as_str()
                             }
                             oxc_ast::ast::ModuleExportName::StringLiteral(name) => {
-                                name.value.as_str()
+                                name.value.as_str().unwrap_or_default()
                             }
                         };
                         resolve_kit_import(specifier, name).map(|entry| entry.module())

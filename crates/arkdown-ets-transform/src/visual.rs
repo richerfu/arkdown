@@ -58,7 +58,7 @@ impl<'a> VisualSourceInjector<'a> {
         }
         let allocator = Allocator::default();
         let parsed = Parser::new(&allocator, self.source, SourceType::ets()).parse();
-        if parsed.panicked || !parsed.diagnostics.is_empty() {
+        if parsed.fatal_error || !parsed.diagnostics.is_empty() {
             return Ok(None);
         }
 
@@ -125,7 +125,11 @@ impl<'a> VisualInsertionPlan<'a> {
             let StructElement::MethodDefinition(method) = element else {
                 return None;
             };
-            (method.key.static_name().as_deref() == Some("build")).then_some(method)
+            (method
+                .key
+                .static_name()
+                .is_some_and(|name| name.as_str() == Some("build")))
+            .then_some(method)
         });
         let Some(build) = build else {
             return Ok(());
@@ -189,7 +193,11 @@ impl<'a> VisualInsertionPlan<'a> {
                 let StructElement::MethodDefinition(method) = element else {
                     return None;
                 };
-                (method.key.static_name().as_deref() == Some(name)).then_some(method)
+                (method
+                    .key
+                    .static_name()
+                    .is_some_and(|key| key.as_str() == Some(name)))
+                .then_some(method)
             })
             .map(|method| &**method)
     }

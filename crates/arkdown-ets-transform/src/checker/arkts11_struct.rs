@@ -1,3 +1,4 @@
+use crate::text::StaticPropertyNameText;
 use oxc_ast::ast::{
     Argument, ArkUIChild, ArkUIComponentExpression, ArrowFunctionBody, ChainElement, Expression,
     FunctionBody, MethodDefinitionKind, ObjectPropertyKind, PropertyKey, Statement, StructElement,
@@ -83,12 +84,12 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
                     for decorator in &property.decorators {
                         let decorator = ArkuiDecorator::new(decorator).name();
                         if decorator == ArkuiDecoratorName::ENV {
-                            env_props.insert(name.to_string());
+                            env_props.insert(name.to_owned_text());
                         }
                         kind = kind.or_else(|| Self::component_property_kind(decorator));
                     }
                     property_kinds.insert(
-                        name.into_owned(),
+                        name.to_owned_text(),
                         kind.unwrap_or(CustomComponentPropertyKind::Regular),
                     );
                 }
@@ -99,7 +100,7 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
                         }) =>
                 {
                     if let Some(name) = method.key.static_name() {
-                        computed_props.insert(name.into_owned());
+                        computed_props.insert(name.to_owned_text());
                     }
                 }
                 _ => {}
@@ -263,12 +264,15 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
             );
             return;
         };
-        if !matches!(reuse_pool.value.as_str(), "shared" | "perInstance") {
+        if !matches!(
+            reuse_pool.value.as_str(),
+            Some("shared") | Some("perInstance")
+        ) {
             self.error(
                 "10905377",
                 format!(
                     "ReusePool must be either 'shared' or 'perInstance'. The value '{}' is not valid.",
-                    reuse_pool.value
+                    reuse_pool.value.display()
                 ),
                 reuse_pool.span,
                 &[],
@@ -1722,7 +1726,10 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
             let StructElement::PropertyDefinition(property) = element else {
                 return None;
             };
-            if property.key.static_name().as_deref() != Some(name)
+            if !property
+                .key
+                .static_name()
+                .is_some_and(|key| key.as_str() == Some(name))
                 || !property.decorators.iter().any(|decorator| {
                     Self::is_v1_update_source_decorator(ArkuiDecorator::new(decorator).name())
                 })
@@ -1963,7 +1970,9 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
             match &property.value {
                 Expression::Identifier(identifier) => Some(identifier.name.as_str()),
                 Expression::StaticMemberExpression(member) => Some(member.property.name.as_str()),
-                Expression::StringLiteral(literal) => Some(literal.value.as_str()),
+                Expression::StringLiteral(literal) => {
+                    Some((literal.value.as_str()).unwrap_or_default())
+                }
                 _ => None,
             }
         })
@@ -2761,12 +2770,12 @@ impl<'statement, 'errors> Arkts11StructValidator<'statement, 'errors> {
         };
         match argument {
             Argument::StringLiteral(literal) => {
-                if !method_names.contains(literal.value.as_str()) {
+                if !literal.value.as_str().is_some_and(|value| method_names.contains(value)) {
                     self.error(
                         "10905301",
                         format!(
                             "'@Watch' cannot be used with '{}'. Apply it only to parameters that correspond to existing methods.",
-                            literal.raw.as_ref().map_or(literal.value.as_str(), |raw| raw.as_str())
+                            literal.raw.as_ref().map_or(literal.value.as_str().unwrap_or_default(), |raw| raw.as_str())
                         ),
                         literal.span,
                         &[],

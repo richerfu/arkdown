@@ -35,6 +35,7 @@ mod rolldown_plan;
 mod source;
 mod source_map;
 mod sys_resource;
+mod text;
 pub mod transform;
 mod typescript_emit;
 mod visual;

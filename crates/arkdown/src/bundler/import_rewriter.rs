@@ -161,7 +161,7 @@ pub(crate) struct HvigorModuleRequestLiteralInventory {
 impl HvigorModuleRequestLiteralInventory {
     pub(crate) fn push(&mut self, literal: &StringLiteral<'_>, is_dynamic: bool) {
         self.literals.push(HvigorModuleRequestLiteral {
-            specifier: literal.value.to_string(),
+            specifier: literal.value.as_str().unwrap_or_default().to_string(),
             source_span: HvigorSourceSpan {
                 start: literal.span.start,
                 end: literal.span.end,

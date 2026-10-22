@@ -38,7 +38,12 @@ impl NativeCompilerOptions {
             lib: Some(self.lib.clone()),
             types: Some(self.types.clone()),
             type_roots: Some(CompilerPaths::many(&self.type_roots)?),
-            paths: Some(CompilerPaths::map(&self.paths)?),
+            paths: Some(
+                CompilerPaths::map(&self.paths)?
+                    .into_iter()
+                    .map(|(key, values)| (key, Some(values)))
+                    .collect(),
+            ),
             paths_base_path: CompilerPaths::one(&self.paths_base_path)?,
             base_url: CompilerPaths::one(&self.base_url)?,
             no_emit: tsrs_core::bool_to_tristate(self.no_emit),

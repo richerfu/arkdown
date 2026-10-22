@@ -7,6 +7,7 @@
 //! files and `module_mode.js` emits JavaScript for them. The OXC emitter below
 //! implements that explicit production boundary.
 
+use crate::text::JsStrText;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
@@ -336,7 +337,9 @@ impl<'a> TypeScriptDecoratorHelperCanonicalizer<'a> {
         let Statement::ImportDeclaration(import) = statement else {
             return None;
         };
-        let helper = TypeScriptDecoratorHelper::from_import_source(import.source.value.as_str())?;
+        let helper = TypeScriptDecoratorHelper::from_import_source(
+            (import.source.value.as_str()).unwrap_or_default(),
+        )?;
         let local = import.specifiers.as_ref()?.iter().find_map(|specifier| {
             let ImportDeclarationSpecifier::ImportDefaultSpecifier(default) = specifier else {
                 return None;
@@ -1250,7 +1253,10 @@ impl LocalEnumValueMutator<'_, '_> {
         let Expression::StringLiteral(property) = &member.expression else {
             return None;
         };
-        self.member_replacement(&member.object, property.value.as_str())
+        self.member_replacement(
+            &member.object,
+            (property.value.as_str()).unwrap_or_default(),
+        )
     }
 
     fn member_replacement<'a>(
@@ -1277,7 +1283,7 @@ impl LocalEnumValueMutator<'_, '_> {
         self.enums
             .get(&enum_symbol)?
             .members
-            .get(member.id.static_name().as_ref())
+            .get(member.id.static_name().as_str()?)
     }
 }
 
@@ -1378,10 +1384,10 @@ impl<'a> ConstEnumImportCollector<'a> {
         if import.import_kind.is_type() {
             return;
         }
-        let Some(target) = self
-            .sources
-            .resolve_static_with_declarations(Path::new(self.id), import.source.value.as_str())
-        else {
+        let Some(target) = self.sources.resolve_static_with_declarations(
+            Path::new(self.id),
+            (import.source.value.as_str()).unwrap_or_default(),
+        ) else {
             return;
         };
         let exports = if let Some(cache) = self.const_enum_exports {
@@ -1620,9 +1626,10 @@ impl<'a> ConstEnumExportAnalyzer<'a> {
             if import.import_kind.is_type() {
                 continue;
             }
-            let Some(target_exports) =
-                self.analyze_reexport_source(import.source.value.as_str(), visited)
-            else {
+            let Some(target_exports) = self.analyze_reexport_source(
+                (import.source.value.as_str()).unwrap_or_default(),
+                visited,
+            ) else {
                 continue;
             };
             let Some(specifiers) = &import.specifiers else {
@@ -1687,8 +1694,8 @@ impl<'a> ConstEnumExportAnalyzer<'a> {
         visited: &mut FxHashSet<PathBuf>,
         exports: &mut ConstEnumExports,
     ) {
-        let Some(target_exports) =
-            self.analyze_reexport_source(export.source.value.as_str(), visited)
+        let Some(target_exports) = self
+            .analyze_reexport_source((export.source.value.as_str()).unwrap_or_default(), visited)
         else {
             return;
         };
@@ -1727,8 +1734,8 @@ impl<'a> ConstEnumExportAnalyzer<'a> {
         visited: &mut FxHashSet<PathBuf>,
         exports: &mut ConstEnumExports,
     ) {
-        let Some(target_exports) =
-            self.analyze_reexport_source(export.source.value.as_str(), visited)
+        let Some(target_exports) = self
+            .analyze_reexport_source((export.source.value.as_str()).unwrap_or_default(), visited)
         else {
             return;
         };
@@ -1899,7 +1906,7 @@ impl<'a, 'b> ConstEnumMemberCollector<'a, 'b> {
             .copied()?;
         let mut members = FxHashMap::default();
         for member in &self.declaration.body.members {
-            let member_name = member.id.static_name().to_string();
+            let member_name = member.id.static_name().to_owned_text();
             let symbol = self
                 .scoping
                 .get_binding(enum_scope, member_name.as_str().into())?;
@@ -1931,7 +1938,7 @@ impl<'a> ConstEnumAstMemberCollector<'a> {
         let mut members = FxHashMap::default();
         let mut previous_number = None;
         for member in &self.declaration.body.members {
-            let member_name = member.id.static_name().to_string();
+            let member_name = member.id.static_name().to_owned_text();
             let value = if let Some(initializer) = &member.initializer {
                 self.literal_value(initializer)?
             } else {
@@ -1950,7 +1957,7 @@ impl<'a> ConstEnumAstMemberCollector<'a> {
         match expression {
             Expression::NumericLiteral(literal) => Some(EnumValue::Number(literal.value)),
             Expression::StringLiteral(literal) => {
-                Some(EnumValue::String(literal.value.to_string()))
+                Some(EnumValue::String(literal.value.to_owned_text()))
             }
             Expression::UnaryExpression(unary) => {
                 let Expression::NumericLiteral(literal) = &unary.argument else {

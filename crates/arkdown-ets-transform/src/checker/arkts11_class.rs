@@ -1,4 +1,5 @@
 use crate::error::{DiagnosticSeverity, EtsTransformError};
+use crate::text::StaticPropertyNameText;
 use crate::transform::decorator::{ArkuiDecorator, ArkuiDecoratorName};
 use crate::transform::{ClassObservation, ImportedClassObservations};
 
@@ -380,7 +381,7 @@ impl<'class, 'context, 'errors> Arkts11ClassValidator<'class, 'context, 'errors>
                     }) =>
                 {
                     if let Some(name) = property.key.static_name() {
-                        roots.insert(name.to_string());
+                        roots.insert(name.to_owned_text());
                     }
                 }
                 ClassElement::MethodDefinition(method)
@@ -390,7 +391,7 @@ impl<'class, 'context, 'errors> Arkts11ClassValidator<'class, 'context, 'errors>
                         }) =>
                 {
                     if let Some(name) = method.key.static_name() {
-                        roots.insert(name.to_string());
+                        roots.insert(name.to_owned_text());
                     }
                 }
                 _ => {}

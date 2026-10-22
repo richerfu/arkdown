@@ -4,6 +4,7 @@
 //! non-static field initializers into the constructor/reuse reset paths, and
 //! wires `@Param` state through `initParam`/`updateParam`/`resetParam`.
 
+use crate::text::StaticPropertyNameText;
 use rustc_hash::FxHashSet;
 use std::sync::Arc;
 
@@ -266,14 +267,14 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
                     field: method
                         .key
                         .static_name()
-                        .map(|name| name.into_owned())
+                        .map(|name| name.to_owned_text())
                         .unwrap_or_else(|| "<anonymous>".to_string()),
                     message: "'@Styles' decorated methods cannot have arguments.".to_string(),
                 });
             }
             if let Some(method_name) = method.key.static_name() {
                 styles_methods.push(StylesMethodInfo {
-                    name: method_name.into_owned(),
+                    name: method_name.to_owned_text(),
                     body: method.value.body.as_deref(),
                 });
             }
@@ -331,7 +332,7 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
                         if method.r#static {
                             return Err(ComponentV2Error::InvalidMethod {
                                 name: name.to_string(),
-                                method: method_name.into_owned(),
+                                method: method_name.to_owned_text(),
                                 message: "Static methods in custom components cannot be decorated by '@LocalBuilder'.".to_string(),
                             });
                         }
@@ -378,7 +379,12 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
                         &regular_attribute_properties,
                     ))
                     .with_styles_methods(&styles_methods);
-                    builder_methods.push((method_name.into_owned(), method.as_ref(), plan, kind));
+                    builder_methods.push((
+                        method_name.to_owned_text(),
+                        method.as_ref(),
+                        plan,
+                        kind,
+                    ));
                     source_members.push(V2SourceMember::Builder(builder_methods.len() - 1));
                 }
                 StructElement::MethodDefinition(method) if self.is_styles_method(method) => {
@@ -391,7 +397,7 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
                 StructElement::MethodDefinition(method) => {
                     if self.has_method_decorator(method, ArkuiDecoratorName::COMPUTED) {
                         if let Some(method_name) = method.key.static_name() {
-                            reuse_resets.push(V2ReuseReset::Computed(method_name.into_owned()));
+                            reuse_resets.push(V2ReuseReset::Computed(method_name.to_owned_text()));
                         }
                     }
                     self.validate_lifecycle_method(name, method)?;
@@ -660,7 +666,7 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
             };
             if self.is_builder_method(method) {
                 if let Some(name) = method.key.static_name() {
-                    methods.insert(name.into_owned());
+                    methods.insert(name.to_owned_text());
                 }
             }
         }
@@ -674,7 +680,7 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
             };
             if self.property_has_decorator(property, ArkuiDecoratorName::BUILDER_PARAM) {
                 if let Some(name) = property.key.static_name() {
-                    visible_builder_methods.insert(name.into_owned());
+                    visible_builder_methods.insert(name.to_owned_text());
                 }
             }
         }
@@ -689,7 +695,7 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
         let Some(field_name) = property.key.static_name() else {
             return Ok(None);
         };
-        let field_name = field_name.into_owned();
+        let field_name = field_name.to_owned_text();
         let decorator_names = self.property_decorator_names(property);
         self.validate_field_decorators(
             component_name,
@@ -804,7 +810,7 @@ impl<'a, 'b> ComponentV2Lowerer<'a, 'b> {
         let method_name = method
             .key
             .static_name()
-            .map(|name| name.into_owned())
+            .map(|name| name.to_owned_text())
             .unwrap_or_else(|| "<anonymous>".to_string());
         let message = if decorator_name == ArkuiDecoratorName::COMPONENT_REUSE {
             "Methods decorated with '@ComponentReuse' in '@ComponentV2' cannot have input parameters."

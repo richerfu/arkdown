@@ -1,3 +1,4 @@
+use crate::text::JsStrText;
 use oxc_allocator::{Allocator, ArenaBox, CloneIn, GetAllocator, Vec as OxcVec};
 use oxc_ast::ast::{
     Argument, ArrowFunctionBody, BindingPattern, Expression, FormalParameterKind, FormalParameters,
@@ -81,7 +82,7 @@ impl<'a> EntryOptions<'a> {
     fn property_name(key: &PropertyKey<'_>) -> Option<String> {
         match key {
             PropertyKey::StaticIdentifier(identifier) => Some(identifier.name.to_string()),
-            PropertyKey::StringLiteral(literal) => Some(literal.value.to_string()),
+            PropertyKey::StringLiteral(literal) => Some(literal.value.to_owned_text()),
             _ => None,
         }
     }

@@ -97,7 +97,7 @@ impl<'a> PluginAstParser<'a> {
             })
             .parse();
 
-        if parsed.panicked || !parsed.diagnostics.is_empty() {
+        if parsed.fatal_error || !parsed.diagnostics.is_empty() {
             let (message, byte_offset) = parsed.diagnostics.first().map_or_else(
                 || ("OXC parser stopped unexpectedly".to_string(), 0),
                 |diagnostic| {

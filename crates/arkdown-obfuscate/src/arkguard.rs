@@ -1445,9 +1445,14 @@ impl ArkguardScopeLocations {
             AstKind::TSNamespaceDeclaration(declaration) => {
                 Some(Some(declaration.id.name.to_string()))
             }
-            AstKind::TSExternalModuleDeclaration(declaration) => {
-                Some(Some(declaration.id.value.to_string()))
-            }
+            AstKind::TSExternalModuleDeclaration(declaration) => Some(Some(
+                declaration
+                    .id
+                    .value
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+            )),
             _ => None,
         }
     }
@@ -1504,7 +1509,7 @@ impl ArkguardScopeLocations {
     fn property_key_name<'key>(key: &'key PropertyKey<'_>) -> Option<&'key str> {
         match key {
             PropertyKey::StaticIdentifier(identifier) => Some(identifier.name.as_str()),
-            PropertyKey::StringLiteral(literal) => Some(literal.value.as_str()),
+            PropertyKey::StringLiteral(literal) => literal.value.as_str(),
             PropertyKey::PrivateIdentifier(identifier) => Some(identifier.name.as_str()),
             _ => None,
         }
@@ -2174,7 +2179,8 @@ impl IdentifierPolicyCollector {
                 self.exported_names.insert(name.name.to_string());
             }
             ModuleExportName::StringLiteral(name) => {
-                self.exported_names.insert(name.value.to_string());
+                self.exported_names
+                    .insert(name.value.as_str().unwrap_or_default().to_string());
             }
         }
     }
@@ -2291,7 +2297,8 @@ impl<'a> Visit<'a> for ObjectPropertyKeepCollector {
                 self.names.insert(identifier.name.to_string());
             }
             PropertyKey::StringLiteral(literal) => {
-                self.names.insert(literal.value.to_string());
+                self.names
+                    .insert(literal.value.as_str().unwrap_or_default().to_string());
             }
             _ => {}
         }
@@ -2411,7 +2418,7 @@ impl PropertyNameCollector {
             PropertyKey::StaticIdentifier(identifier) => self.insert(identifier.name.as_str()),
             PropertyKey::PrivateIdentifier(identifier) => self.insert(identifier.name.as_str()),
             PropertyKey::StringLiteral(literal) if self.include_strings => {
-                self.insert(literal.value.as_str());
+                self.insert(literal.value.as_str().unwrap_or_default());
             }
             _ => {}
         }
@@ -2437,7 +2444,7 @@ impl<'a> Visit<'a> for PropertyNameCollector {
     fn visit_computed_member_expression(&mut self, member: &ComputedMemberExpression<'a>) {
         if self.include_strings {
             if let Expression::StringLiteral(literal) = &member.expression {
-                self.insert(literal.value.as_str());
+                self.insert(literal.value.as_str().unwrap_or_default());
             }
         }
         walk::walk_computed_member_expression(self, member);
@@ -2450,7 +2457,7 @@ impl<'a> Visit<'a> for PropertyNameCollector {
                     self.insert(identifier.name.as_str());
                 }
                 ModuleExportName::StringLiteral(literal) => {
-                    self.insert(literal.value.as_str());
+                    self.insert(literal.value.as_str().unwrap_or_default());
                 }
                 ModuleExportName::IdentifierReference(_) => {}
             }
@@ -2536,8 +2543,11 @@ impl<'a, 'm> NativeArkguardAstTransform<'a, 'm> {
     }
 
     fn rename_string(&self, literal: &mut StringLiteral<'a>) {
-        if let Some(replacement) = self.properties.get(literal.value.as_str()) {
-            literal.value = Str::from_str_in(replacement, &self.allocator);
+        if let Some(replacement) = self
+            .properties
+            .get(literal.value.as_str().unwrap_or_default())
+        {
+            literal.value = Str::from_str_in(replacement, &self.allocator).into();
             literal.raw = None;
             literal.span = Span::default();
         }
@@ -2549,9 +2559,9 @@ impl<'a, 'm> NativeArkguardAstTransform<'a, 'm> {
             self.record_names,
             self.rename_module_paths,
         )
-        .rewrite(literal.value.as_str());
-        if literal.value != replacement {
-            literal.value = Str::from_str_in(&replacement, &self.allocator);
+        .rewrite(literal.value.as_str().unwrap_or_default());
+        if literal.value.as_str() != Some(replacement.as_str()) {
+            literal.value = Str::from_str_in(&replacement, &self.allocator).into();
             literal.raw = None;
             literal.span = Span::default();
         }
@@ -2563,7 +2573,7 @@ impl<'a> VisitMut<'a> for NativeArkguardAstTransform<'a, '_> {
         let original = match &property.key {
             PropertyKey::StaticIdentifier(identifier) => Some(identifier.name.to_string()),
             PropertyKey::StringLiteral(literal) if self.rename_strings => {
-                Some(literal.value.to_string())
+                Some(literal.value.as_str().unwrap_or_default().to_string())
             }
             _ => None,
         };
@@ -2910,7 +2920,7 @@ impl<'rules> DeclarationCommentTargetCollector<'rules> {
     fn keep_key(&mut self, start: u32, key: &PropertyKey<'_>) {
         let name = match key {
             PropertyKey::StaticIdentifier(identifier) => Some(identifier.name.as_str()),
-            PropertyKey::StringLiteral(literal) => Some(literal.value.as_str()),
+            PropertyKey::StringLiteral(literal) => literal.value.as_str(),
             PropertyKey::PrivateIdentifier(identifier) => Some(identifier.name.as_str()),
             _ => None,
         };
@@ -3017,7 +3027,7 @@ impl<'ast> Visit<'ast> for DeclarationCommentTargetCollector<'_> {
             let name = match &member.id {
                 TSEnumMemberName::Identifier(identifier) => Some(identifier.name.as_str()),
                 TSEnumMemberName::String(literal) | TSEnumMemberName::ComputedString(literal) => {
-                    Some(literal.value.as_str())
+                    literal.value.as_str()
                 }
                 TSEnumMemberName::ComputedTemplateString(_) => None,
             };

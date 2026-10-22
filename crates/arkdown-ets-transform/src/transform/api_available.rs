@@ -136,7 +136,7 @@ impl<'a> ApiAvailableLowerer<'a> {
         };
         let mut parsed =
             Parser::new(self.allocator, source, SourceType::ts().with_module(true)).parse();
-        if parsed.panicked || !parsed.diagnostics.is_empty() {
+        if parsed.fatal_error || !parsed.diagnostics.is_empty() {
             return None;
         }
         GeneratedSpanClearer.visit_program(&mut parsed.program);

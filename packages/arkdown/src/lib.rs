@@ -485,7 +485,7 @@ impl TryFrom<JsJsonSourceMap> for rolldown_sourcemap::SourceMap {
       sources_content: value.sources_content,
       names: value.names.unwrap_or_default(),
       debug_id: value.debug_id,
-      x_google_ignore_list: value.x_google_ignore_list,
+      ignore_list: value.x_google_ignore_list,
     })
     .map_err(|error| anyhow::anyhow!("invalid source map: {error}"))
   }
@@ -1008,6 +1008,7 @@ type PluginDispatchTsfn = MaybeAsyncJsCallback<
 /// One typed dispatcher per plugin can be called from any Rust thread
 /// (including `tokio` async tasks). Rust owns hook usage and scheduling while
 /// JavaScript retains only the live function receiver/context bridge.
+#[derive(Clone)]
 pub struct JsPlugin {
   name: String,
   module_root: Option<PathBuf>,
@@ -1017,7 +1018,7 @@ pub struct JsPlugin {
   hook_orders: HashMap<String, JsHookOrder>,
   cache_identity: String,
   usage: HookUsage,
-  watch_changes: Mutex<Arc<[HvigorWatchChange]>>,
+  watch_changes: Arc<Mutex<Arc<[HvigorWatchChange]>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -1240,7 +1241,7 @@ impl JsPlugin {
         hook_orders,
         cache_identity,
         usage,
-        watch_changes: Mutex::new(Arc::from([])),
+        watch_changes: Arc::new(Mutex::new(Arc::from([]))),
       }),
       order,
     ))
@@ -2465,7 +2466,7 @@ pub fn build<'a>(
       })?;
       let module_root = plugin.module_root.clone();
       let target_name = plugin.target_name.clone();
-      let rolldown_plugin = plugin.clone() as rolldown_plugin::__inner::SharedPluginable;
+      let rolldown_plugin = rolldown_plugin::Pluginable::new_shared((*plugin).clone());
       let gap_hooks = plugin as Arc<dyn HvigorPluginGapHooks>;
       js_plugins.push(
         PackagePlugin::with_gap_hooks(rolldown_plugin, order, gap_hooks)

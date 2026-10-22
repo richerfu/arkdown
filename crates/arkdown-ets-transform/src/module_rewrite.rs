@@ -59,7 +59,7 @@ impl<'a> ModuleSourceFilePrinter<'a> {
     pub(super) fn print(&self) -> Option<HvigorTypescriptPrintOutput> {
         let allocator = Allocator::default();
         let mut parsed = Parser::new(&allocator, self.source, self.source_type).parse();
-        if parsed.panicked || !parsed.diagnostics.is_empty() {
+        if parsed.fatal_error || !parsed.diagnostics.is_empty() {
             return None;
         }
         let mut span_eraser = ModuleSourceFileSpanEraser::default();
@@ -87,7 +87,7 @@ pub(super) struct ModuleSourceFileSpanEraser {
 
 impl ModuleSourceFileSpanEraser {
     fn request_is_rewritten(source: &StringLiteral<'_>) -> bool {
-        let request = ModuleSpecifierText::new(source.value.as_str());
+        let request = ModuleSpecifierText::new((source.value.as_str()).unwrap_or_default());
         request.is_relative()
             || !(source.value.starts_with('@')
                 && source
@@ -286,7 +286,8 @@ impl<'a, 'source, 'classifier> ImportDeclarationSplit<'a, 'source, 'classifier> 
         // though the first and last imports are type-only.  Leave kit imports
         // intact for `KitImportRewriter`, which owns both the classification
         // and factory-created individual declarations.
-        if crate::kit_map::is_kit_specifier(self.import.source.value.as_str()) {
+        if crate::kit_map::is_kit_specifier((self.import.source.value.as_str()).unwrap_or_default())
+        {
             return None;
         }
         let specifiers = self.import.specifiers.as_ref()?;
@@ -385,7 +386,7 @@ impl<'a, 'source, 'classifier> ImportDeclarationSplit<'a, 'source, 'classifier> 
         self.binding_classifier
             .classify_imported_binding(
                 Path::new(self.id),
-                self.import.source.value.as_str(),
+                (self.import.source.value.as_str()).unwrap_or_default(),
                 imported_name,
             )
             .is_some_and(ModuleBindingKind::is_type_only)
@@ -836,20 +837,20 @@ where
         match self.type_only_policy {
             TypeOnlySpecifierPolicy::Skip => true,
             TypeOnlySpecifierPolicy::RewriteNonRelative => {
-                ModuleSpecifierText::new(source.value.as_str()).is_relative()
+                ModuleSpecifierText::new((source.value.as_str()).unwrap_or_default()).is_relative()
             }
         }
     }
 
     fn rewrite_literal(&mut self, literal: &mut StringLiteral<'a>) -> bool {
-        let specifier = literal.value.as_str();
+        let specifier = literal.value.as_str().unwrap_or_default();
         let Some(replacement) = (self.rewrite)(specifier) else {
             return false;
         };
         if replacement == specifier {
             return false;
         }
-        literal.value = Str::from_str_in(&replacement, &self.ast);
+        literal.value = (Str::from_str_in(&replacement, &self.ast)).into();
         literal.raw = None;
         // TypeScript's printer emits a freshly rewritten module request with
         // its normal double-quote style. Keeping the old source span lets the
@@ -946,7 +947,7 @@ impl<'a, 'source, 'classifier> TypeOnlyReexportSplit<'a, 'source, 'classifier> {
         let specifier = source.value.as_str();
         let target_exports = self
             .binding_classifier
-            .classify_specifier_exports(Path::new(self.id), specifier)?;
+            .classify_specifier_exports(Path::new(self.id), (specifier).unwrap_or_default())?;
 
         let mut value_specifiers = Vec::new();
         let mut type_specifiers = Vec::new();

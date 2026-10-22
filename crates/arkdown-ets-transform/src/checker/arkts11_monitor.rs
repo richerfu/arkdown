@@ -68,7 +68,8 @@ impl<'decorator, 'context, 'errors> Arkts11MonitorValidator<'decorator, 'context
                 continue;
             };
             if (!is_monitor || (wildcard.is_enabled() && index > 0))
-                && !MonitorWildcardPattern::new(literal.value.as_str()).is_valid()
+                && !MonitorWildcardPattern::new((literal.value.as_str()).unwrap_or_default())
+                    .is_valid()
             {
                 self.error(
                     "10905367",
@@ -79,7 +80,11 @@ impl<'decorator, 'context, 'errors> Arkts11MonitorValidator<'decorator, 'context
                 );
                 continue;
             }
-            self.check_observable_root(name, literal.value.as_str(), literal.span);
+            self.check_observable_root(
+                name,
+                (literal.value.as_str()).unwrap_or_default(),
+                literal.span,
+            );
         }
     }
 

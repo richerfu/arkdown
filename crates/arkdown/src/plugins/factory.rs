@@ -53,7 +53,7 @@ use arkdown_path::{
 use arkdown_resolver::{OhosResolver, PackageResolutionPlan, ResolverConfig};
 use rolldown_plugin::{
     __inner::SharedPluginable, HookBuildEndArgs, HookBuildStartArgs, HookNoopReturn, HookUsage,
-    Plugin, PluginContext, PluginHookMeta, PluginOrder as RolldownPluginOrder,
+    Plugin, PluginContext, PluginHookMeta, PluginOrder as RolldownPluginOrder, Pluginable,
 };
 
 use crate::plan::BundlePlan;
@@ -952,7 +952,8 @@ impl<'a> PluginFactory<'a> {
             .collect::<Vec<_>>();
 
         // ── 1. DuplicateCheckPlugin (hvigor: checkDuplicatedFileNames) ──────────
-        let duplicate_check_plugin: SharedPluginable = Arc::new(DuplicateCheckPlugin::new());
+        let duplicate_check_plugin: SharedPluginable =
+            Pluginable::new_shared(DuplicateCheckPlugin::new());
 
         // ── 3. OhosResolvePlugin (hvigor: resolve + newOhmUrl) ───────────────
         let resolver_config = ResolverConfig {
@@ -974,7 +975,7 @@ impl<'a> PluginFactory<'a> {
             OhosResolver::new(resolver_config)
                 .with_source_inventory(self.input.transform_sources.source_inventory().cloned()),
         );
-        let ohos_resolve_plugin: SharedPluginable = Arc::new(
+        let ohos_resolve_plugin: SharedPluginable = Pluginable::new_shared(
             OhosResolvePlugin::with_resolver(
                 ohos_resolver,
                 project_root.clone(),
@@ -984,17 +985,18 @@ impl<'a> PluginFactory<'a> {
         );
 
         // ── 4. ImportCheckPlugin (hvigor: sensitiveCheck) ────────────────────
-        let import_check_plugin: SharedPluginable = Arc::new(ImportCheckPlugin::with_policy(
-            // `import-check-plugin.ts::getBelongModulePath` compares the
-            // importer with `allModulePaths`, whose entries are OHOS package
-            // roots rather than active `src/main` source roots.
-            import_check_module_roots,
-            self.input.no_external_import_by_path,
-        ));
+        let import_check_plugin: SharedPluginable =
+            Pluginable::new_shared(ImportCheckPlugin::with_policy(
+                // `import-check-plugin.ts::getBelongModulePath` compares the
+                // importer with `allModulePaths`, whose entries are OHOS package
+                // roots rather than active `src/main` source roots.
+                import_check_module_roots,
+                self.input.no_external_import_by_path,
+            ));
 
         // ── 5. Json5Plugin (hvigor: json) ────────────────────────────────────
         let json5_plugin: SharedPluginable =
-            Arc::new(Json5Plugin::new(self.input.transform_sources.clone()));
+            Pluginable::new_shared(Json5Plugin::new(self.input.transform_sources.clone()));
 
         // ── 6. wrapperChunk ─────────────────────────────────────────────────
         // No native adapter: `render_chunk` is unreachable on the scan-only
@@ -1052,7 +1054,8 @@ impl<'a> PluginFactory<'a> {
             Arc::clone(&ets_transform_plan),
             &self.plan.cache,
         ));
-        let ets_transform_plugin_entry: SharedPluginable = ets_transform_plugin.clone();
+        let ets_transform_plugin_entry: SharedPluginable =
+            Pluginable::new_shared((*ets_transform_plugin).clone());
 
         // ── 8. ApiTransformPlugin (hvigor SDK: apiTransform) ───────────────
         //
@@ -1060,7 +1063,7 @@ impl<'a> PluginFactory<'a> {
         // adapter retains the SDK's distinct post-emit source-map boundary so
         // the following genAbc-equivalent collector observes Rollup-compatible
         // combined mappings.
-        let api_transform_plugin: SharedPluginable = Arc::new(ApiTransformPlugin);
+        let api_transform_plugin: SharedPluginable = Pluginable::new_shared(ApiTransformPlugin);
 
         let mut native_plugins = vec![
             PluginFactoryEntry::native(
@@ -1080,13 +1083,13 @@ impl<'a> PluginFactory<'a> {
                 HarDedupFactoryMode::Collect {
                     collect_file,
                     source_har_roots,
-                } => Some(Arc::new(HarDedupPlugin::collect_pass(
+                } => Some(Pluginable::new_shared(HarDedupPlugin::collect_pass(
                     collect_file,
                     source_har_roots,
                 ))),
-                HarDedupFactoryMode::RealBuild { collect_file } => {
-                    Some(Arc::new(HarDedupPlugin::real_build(collect_file)?))
-                }
+                HarDedupFactoryMode::RealBuild { collect_file } => Some(Pluginable::new_shared(
+                    HarDedupPlugin::real_build(collect_file)?,
+                )),
             };
             if let Some(har_plugin) = har_plugin {
                 native_plugins.push(PluginFactoryEntry::native(
@@ -1222,7 +1225,10 @@ impl<'a> PluginFactory<'a> {
                 if !matches!(boundary, HvigorLifecycleBoundary::AfterBuildEnd) {
                     plugins.insert(
                         0,
-                        Arc::new(HvigorLifecyclePlugin::new(entries.clone(), *boundary)),
+                        Pluginable::new_shared(HvigorLifecyclePlugin::new(
+                            entries.clone(),
+                            *boundary,
+                        )),
                     );
                 }
             }
@@ -1230,7 +1236,9 @@ impl<'a> PluginFactory<'a> {
                 .into_iter()
                 .find(|(boundary, _)| matches!(boundary, HvigorLifecycleBoundary::AfterBuildEnd))
             {
-                plugins.push(Arc::new(HvigorLifecyclePlugin::new(entries, boundary)));
+                plugins.push(Pluginable::new_shared(HvigorLifecyclePlugin::new(
+                    entries, boundary,
+                )));
             }
         }
 
@@ -1248,7 +1256,7 @@ mod tests {
     use std::path::Path;
 
     use arkdown_core::BuildMode;
-    use rolldown_plugin::{HookUsage, Plugin};
+    use rolldown_plugin::{HookUsage, Plugin, Pluginable};
 
     use super::HvigorPluginOrder;
     use super::*;
@@ -1354,15 +1362,21 @@ mod tests {
         let mut input = PluginFactoryInput::from_plan(&plan);
         input.package_plugins = vec![
             PackagePlugin::new(
-                Arc::new(NamedTestPlugin("first-a")),
+                Pluginable::new_shared(NamedTestPlugin("first-a")),
                 HvigorPluginOrder::First,
             ),
             PackagePlugin::new(
-                Arc::new(NamedTestPlugin("first-b")),
+                Pluginable::new_shared(NamedTestPlugin("first-b")),
                 HvigorPluginOrder::First,
             ),
-            PackagePlugin::new(Arc::new(NamedTestPlugin("last-a")), HvigorPluginOrder::Last),
-            PackagePlugin::new(Arc::new(NamedTestPlugin("last-b")), HvigorPluginOrder::Last),
+            PackagePlugin::new(
+                Pluginable::new_shared(NamedTestPlugin("last-a")),
+                HvigorPluginOrder::Last,
+            ),
+            PackagePlugin::new(
+                Pluginable::new_shared(NamedTestPlugin("last-b")),
+                HvigorPluginOrder::Last,
+            ),
         ];
 
         let plugins = PluginFactory::new(&plan, input)
@@ -1385,11 +1399,11 @@ mod tests {
         let mut input = PluginFactoryInput::from_plan(&plan);
         input.package_plugins = vec![
             PackagePlugin::new(
-                Arc::new(NamedTestPlugin("before-all")),
+                Pluginable::new_shared(NamedTestPlugin("before-all")),
                 HvigorPluginOrder::Position(0),
             ),
             PackagePlugin::new(
-                Arc::new(NamedTestPlugin("after-duplicate-check")),
+                Pluginable::new_shared(NamedTestPlugin("after-duplicate-check")),
                 HvigorPluginOrder::Position(2),
             ),
         ];
@@ -1414,7 +1428,7 @@ mod tests {
         let hap_plan = make_plan(&root);
         let mut hap_input = PluginFactoryInput::from_plan(&hap_plan);
         hap_input.package_plugins = vec![PackagePlugin::new(
-            Arc::new(NamedTestPlugin("before-ets")),
+            Pluginable::new_shared(NamedTestPlugin("before-ets")),
             HvigorPluginOrder::Anchor {
                 rank: HvigorNativePluginSlot::EtsTransform.rank(),
                 sequence: 0,
@@ -1435,7 +1449,7 @@ mod tests {
             source_har_roots: Vec::new(),
         };
         hsp_input.package_plugins = vec![PackagePlugin::new(
-            Arc::new(NamedTestPlugin("before-ets")),
+            Pluginable::new_shared(NamedTestPlugin("before-ets")),
             HvigorPluginOrder::Anchor {
                 rank: HvigorNativePluginSlot::EtsTransform.rank(),
                 sequence: 0,
@@ -1477,7 +1491,7 @@ mod tests {
         let plan = make_plan(&root);
         let mut input = PluginFactoryInput::from_plan(&plan);
         input.package_plugins = vec![PackagePlugin::new(
-            Arc::new(NamedTestPlugin("module-meta-anchor")),
+            Pluginable::new_shared(NamedTestPlugin("module-meta-anchor")),
             HvigorPluginOrder::Anchor {
                 rank: HvigorNativePluginSlot::ModuleMeta.rank(),
                 sequence: 0,
@@ -1510,7 +1524,7 @@ mod tests {
             plan.build_mode = mode;
             let mut input = PluginFactoryInput::from_plan(&plan);
             input.package_plugins = vec![PackagePlugin::new(
-                Arc::new(NamedTestPlugin("pipeline-end")),
+                Pluginable::new_shared(NamedTestPlugin("pipeline-end")),
                 HvigorPluginOrder::Anchor {
                     rank: HvigorNativePluginSlot::END_RANK,
                     sequence: 0,
@@ -1539,7 +1553,7 @@ mod tests {
         let plan = make_plan(&root);
         let mut input = PluginFactoryInput::from_plan(&plan);
         input.package_plugins = vec![PackagePlugin::with_gap_hooks(
-            Arc::new(NamedTestPlugin("custom")),
+            Pluginable::new_shared(NamedTestPlugin("custom")),
             HvigorPluginOrder::Last,
             Arc::new(EmptyGapHooks),
         )];
@@ -1565,7 +1579,7 @@ mod tests {
         let plan = make_plan(&root);
         let mut input = PluginFactoryInput::from_plan(&plan);
         input.package_plugins = vec![PackagePlugin::with_gap_hooks(
-            Arc::new(NamedTestPlugin("watch-custom")),
+            Pluginable::new_shared(NamedTestPlugin("watch-custom")),
             HvigorPluginOrder::Last,
             Arc::new(WatchGapHooks),
         )];
@@ -1601,8 +1615,14 @@ mod tests {
         let plan = make_plan(&root);
         let mut input = PluginFactoryInput::from_plan(&plan);
         input.package_plugins = vec![
-            PackagePlugin::new(Arc::new(NamedTestPlugin("same")), HvigorPluginOrder::First),
-            PackagePlugin::new(Arc::new(NamedTestPlugin("same")), HvigorPluginOrder::Last),
+            PackagePlugin::new(
+                Pluginable::new_shared(NamedTestPlugin("same")),
+                HvigorPluginOrder::First,
+            ),
+            PackagePlugin::new(
+                Pluginable::new_shared(NamedTestPlugin("same")),
+                HvigorPluginOrder::Last,
+            ),
         ];
 
         let error = PluginFactory::new(&plan, input)
@@ -1621,12 +1641,12 @@ mod tests {
         let mut input = PluginFactoryInput::from_plan(&plan);
         input.package_plugins = vec![
             PackagePlugin::new(
-                Arc::new(NamedTestPlugin("same-module-name")),
+                Pluginable::new_shared(NamedTestPlugin("same-module-name")),
                 HvigorPluginOrder::Last,
             )
             .with_module_root(Some(root.join("entry"))),
             PackagePlugin::new(
-                Arc::new(NamedTestPlugin("same-module-name")),
+                Pluginable::new_shared(NamedTestPlugin("same-module-name")),
                 HvigorPluginOrder::Last,
             )
             .with_module_root(Some(root.join("feature"))),
@@ -1657,13 +1677,13 @@ mod tests {
         input.target_name = "phone".to_string();
         input.package_plugins = vec![
             PackagePlugin::new(
-                Arc::new(NamedTestPlugin("phone-plugin")),
+                Pluginable::new_shared(NamedTestPlugin("phone-plugin")),
                 HvigorPluginOrder::Last,
             )
             .with_module_root(Some(root.join("entry")))
             .with_target_name(Some("phone".to_string())),
             PackagePlugin::new(
-                Arc::new(NamedTestPlugin("tablet-plugin")),
+                Pluginable::new_shared(NamedTestPlugin("tablet-plugin")),
                 HvigorPluginOrder::Last,
             )
             .with_module_root(Some(root.join("entry")))

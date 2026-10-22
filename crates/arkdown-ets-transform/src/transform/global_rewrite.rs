@@ -265,8 +265,14 @@ impl<'a> VisitMut<'a> for WorkerPathMutator<'a> {
             else {
                 unreachable!("WorkerPathRewrite established a literal first argument");
             };
-            let rewritten = literal.value.trim_end_matches(".ts").to_string() + ".js";
-            literal.value = Str::from_str_in(&rewritten, &self.allocator);
+            let rewritten = literal
+                .value
+                .as_str()
+                .unwrap_or_default()
+                .trim_end_matches(".ts")
+                .to_string()
+                + ".js";
+            literal.value = (Str::from_str_in(&rewritten, &self.allocator)).into();
             literal.raw = None;
             literal.span = oxc_span::SPAN;
             self.changed = true;

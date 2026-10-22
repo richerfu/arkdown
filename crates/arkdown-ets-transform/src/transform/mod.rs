@@ -1,3 +1,4 @@
+use crate::text::StaticPropertyNameText;
 mod annotation;
 pub(crate) mod api_available;
 mod auto_lazy_import;
@@ -1388,7 +1389,7 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
             }
             if let Some(name) = method.key.static_name() {
                 styles_methods.push(StylesMethodInfo {
-                    name: name.into_owned(),
+                    name: name.to_owned_text(),
                     body: method.value.body.as_deref(),
                 });
             }
@@ -1429,7 +1430,7 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                         ArkuiDecorator::new(decorator).name() == ArkuiDecoratorName::CUSTOM_ENV
                     });
                     if let Some(name) = property.key.static_name() {
-                        let name = name.into_owned();
+                        let name = name.to_owned_text();
                         property_order.push(name.clone());
                         if !is_custom_env {
                             source_members.push(ComponentSourceMember::Property(name.clone()));
@@ -1463,7 +1464,7 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                                 .as_ref()
                                 .map(FieldExpression::from_expression);
                             regular_fields.push(RegularField {
-                                name: name.into_owned(),
+                                name: name.to_owned_text(),
                                 source: property,
                                 initializer,
                             });
@@ -1525,7 +1526,7 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                         .and_then(|decorator| ArkuiDecorator::new(decorator).arg_expression())
                         .map(FieldExpression::from_expression);
                     state_fields.push(StateField {
-                        name: name.into_owned(),
+                        name: name.to_owned_text(),
                         source_span: property.span,
                         name_span: property.key.span(),
                         type_annotation_ast: property.type_annotation.as_deref(),
@@ -1644,7 +1645,7 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                     ))
                     .with_styles_methods(&styles_methods);
                     builder_methods.push(BuilderMethodInfo {
-                        name: name.into_owned(),
+                        name: name.to_owned_text(),
                         params: &method.value.params,
                         return_annotation: method.value.return_type.as_deref(),
                         body: BuildBodyInfo::plan(body),
@@ -1654,11 +1655,14 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                 }
                 StructElement::MethodDefinition(method)
                     if method.key.static_name().is_some_and(|name| {
-                        name == self
-                            .options
-                            .component_metadata
-                            .runtime_names()
-                            .page_transition_method
+                        name.as_str()
+                            == Some(
+                                self.options
+                                    .component_metadata
+                                    .runtime_names()
+                                    .page_transition_method
+                                    .as_str(),
+                            )
                     }) =>
                 {
                     let body = BuildBodyPlan::page_transition_with_shared_inputs(
@@ -1837,13 +1841,16 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                 "ReusePool can only accept string literal.",
             ));
         };
-        if !matches!(ownership_literal.value.as_str(), "shared" | "perInstance") {
+        if !matches!(
+            ownership_literal.value.as_str(),
+            Some("shared") | Some("perInstance")
+        ) {
             return Err(self.global_reuse_pool_error(
                 "10905377",
                 &component.id.name,
                 &format!(
                     "ReusePool must be either 'shared' or 'perInstance'. The value '{}' is not valid.",
-                    ownership_literal.value
+                    ownership_literal.value.display()
                 ),
             ));
         }
@@ -1913,7 +1920,7 @@ impl<'a, 'b> ArktsStatementTransformer<'a, 'b> {
                     let Some(name) = property.key.static_name() else {
                         continue;
                     };
-                    match name.as_ref() {
+                    match name.as_str_or_empty() {
                         "freezeWhenInactive" if options.freeze_when_inactive.is_none() => {
                             options.freeze_when_inactive = Some(&property.value);
                         }
@@ -2389,7 +2396,7 @@ impl<'a, 'b> ComponentRawObjectFields<'a, 'b> {
                 .simple_type_context
                 .is_simple_type_annotation(type_node, property.key.span())
             {
-                names.insert(name.into_owned());
+                names.insert(name.to_owned_text());
             }
         }
         names

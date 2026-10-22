@@ -395,7 +395,7 @@ impl<'a> SdkPermissionDeclarationParser<'a> {
             .with_module(true)
             .with_typescript_definition(true);
         let parsed = Parser::new(&allocator, self.source, source_type).parse();
-        if parsed.panicked || !parsed.diagnostics.is_empty() {
+        if parsed.fatal_error || !parsed.diagnostics.is_empty() {
             let message = parsed
                 .diagnostics
                 .first()
@@ -454,7 +454,7 @@ impl<'a> SdkPermissionName<'a> {
 
 impl<'a> Visit<'a> for SdkPermissionLiteralCollector {
     fn visit_string_literal(&mut self, literal: &StringLiteral<'a>) {
-        self.record_literal(literal.value.as_str());
+        self.record_literal(literal.value.as_str().unwrap_or_default());
     }
 }
 

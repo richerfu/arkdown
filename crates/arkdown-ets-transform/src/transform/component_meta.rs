@@ -1,3 +1,4 @@
+use crate::text::StaticPropertyNameText;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::{
     fs,
@@ -1243,10 +1244,10 @@ impl<'a> SdkComponentDeclarationCollector<'a> {
             for decorator in &property.decorators {
                 match ArkuiDecorator::new(decorator).name() {
                     name if ArkuiDecoratorName::is_custom_component_update_prop(name) => {
-                        update_props.insert(property_name.to_string());
+                        update_props.insert(property_name.to_owned_text());
                     }
                     ArkuiDecoratorName::LINK => {
-                        link_props.insert(property_name.to_string());
+                        link_props.insert(property_name.to_owned_text());
                     }
                     _ => {}
                 }

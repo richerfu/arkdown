@@ -803,7 +803,9 @@ impl<'source> AtKeepNameCollector<'source> {
                 self.names.properties.insert(identifier.name.to_string());
             }
             PropertyKey::StringLiteral(literal) => {
-                self.names.properties.insert(literal.value.to_string());
+                self.names
+                    .properties
+                    .insert(literal.value.as_str().unwrap_or_default().to_string());
             }
             PropertyKey::PrivateIdentifier(identifier) => {
                 self.names.properties.insert(identifier.name.to_string());
@@ -965,7 +967,9 @@ impl<'ast> Visit<'ast> for AtKeepNameCollector<'ast> {
                     }
                     oxc_ast::ast::TSEnumMemberName::String(literal)
                     | oxc_ast::ast::TSEnumMemberName::ComputedString(literal) => {
-                        self.names.properties.insert(literal.value.to_string());
+                        self.names
+                            .properties
+                            .insert(literal.value.as_str().unwrap_or_default().to_string());
                     }
                     oxc_ast::ast::TSEnumMemberName::ComputedTemplateString(_) => {}
                 }
@@ -1077,7 +1081,7 @@ impl ReservedNameAstCollector {
                 self.insert_export_name(identifier.name.as_str());
             }
             ModuleExportName::StringLiteral(literal) => {
-                self.insert_export_name(literal.value.as_str());
+                self.insert_export_name(literal.value.as_str().unwrap_or_default());
             }
         }
     }
@@ -1085,7 +1089,7 @@ impl ReservedNameAstCollector {
     fn property_key_name<'key>(key: &'key PropertyKey<'_>) -> Option<&'key str> {
         match key {
             PropertyKey::StaticIdentifier(identifier) => Some(identifier.name.as_str()),
-            PropertyKey::StringLiteral(literal) => Some(literal.value.as_str()),
+            PropertyKey::StringLiteral(literal) => literal.value.as_str(),
             PropertyKey::PrivateIdentifier(identifier) => Some(identifier.name.as_str()),
             _ => None,
         }
@@ -1180,7 +1184,7 @@ impl<'a> Visit<'a> for ReservedNameAstCollector {
 
     fn visit_string_literal(&mut self, literal: &StringLiteral<'a>) {
         if self.collect_all_names || self.decorator_depth > 0 {
-            self.insert_property_name(literal.value.as_str());
+            self.insert_property_name(literal.value.as_str().unwrap_or_default());
         }
     }
 
@@ -1250,8 +1254,10 @@ impl<'a> Visit<'a> for ReservedNameAstCollector {
     fn visit_computed_member_expression(&mut self, expression: &ComputedMemberExpression<'a>) {
         if self.keep_string_properties {
             if let Expression::StringLiteral(literal) = &expression.expression {
-                self.insert_property_name(literal.value.as_str());
-                self.scan.strings.insert(literal.value.to_string());
+                self.insert_property_name(literal.value.as_str().unwrap_or_default());
+                self.scan
+                    .strings
+                    .insert(literal.value.as_str().unwrap_or_default().to_string());
             }
         }
         walk::walk_computed_member_expression(self, expression);
@@ -1352,7 +1358,7 @@ impl<'a> Visit<'a> for ReservedNameAstCollector {
                 let name = match &member.id {
                     TSEnumMemberName::Identifier(identifier) => Some(identifier.name.as_str()),
                     TSEnumMemberName::String(literal)
-                    | TSEnumMemberName::ComputedString(literal) => Some(literal.value.as_str()),
+                    | TSEnumMemberName::ComputedString(literal) => literal.value.as_str(),
                     TSEnumMemberName::ComputedTemplateString(_) => None,
                 };
                 if let Some(name) = name {

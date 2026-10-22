@@ -5,6 +5,7 @@
 //! This module reads the same JavaScript assignment through OXC AST and exposes
 //! the resource references consumed by the `$r(...)` lowering pass.
 
+use crate::text::StaticPropertyNameText;
 use rustc_hash::FxHashMap;
 use std::path::{Path, PathBuf};
 
@@ -198,7 +199,9 @@ impl<'a> SystemResourceCollector<'a> {
             let Some(resource_type) = type_property.key.static_name() else {
                 continue;
             };
-            let Some(runtime_type) = ResourceRuntimeType::from_name(resource_type.as_ref()) else {
+            let Some(runtime_type) =
+                ResourceRuntimeType::from_name(resource_type.as_str_or_empty())
+            else {
                 continue;
             };
             let Expression::ObjectExpression(entries) = &type_property.value else {
@@ -219,8 +222,8 @@ impl<'a> SystemResourceCollector<'a> {
                 refs.insert(
                     ResourceRuntimeKey::new(
                         ResourceSource::Sys,
-                        resource_type.as_ref(),
-                        resource_name.as_ref(),
+                        resource_type.as_str_or_empty(),
+                        resource_name.as_str_or_empty(),
                     )
                     .to_key(),
                     ResourceReference {
