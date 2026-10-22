@@ -385,7 +385,7 @@ impl FinalizeConstructionProbe {
     fn expression_contains(expression: &Expression<'_>) -> bool {
         match expression {
             Expression::StringLiteral(literal) => {
-                literal.value.as_str() == GeneratedViewpuName::FINALIZE_CONSTRUCTION
+                literal.value.as_str() == Some(GeneratedViewpuName::FINALIZE_CONSTRUCTION)
             }
             Expression::UnaryExpression(expression) => {
                 Self::expression_contains(&expression.argument)

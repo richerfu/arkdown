@@ -55,49 +55,38 @@ release gates are recorded in
 
 ### Performance
 
-Measured on 2026-10-12 with an Apple M2 Pro (12 CPU cores, 16 GiB RAM), macOS 15.6.1,
-Node.js 24.14.1, Rust 1.99.0, and HarmonyOS 26.0.0.105 / API 26. Builds use a release-mode
-native binding and produce a debug HAP with native debug symbols retained.
+Measured on 2026-10-22 with an Apple M2 Pro (12 CPU cores, 16 GiB RAM), macOS 15.6.1,
+Node.js 22.23.2, Rust 1.99.0, and DevEco Studio 26.0.0.821 / HarmonyOS API 26. Builds use a
+release-mode native binding and produce a debug HAP with native debug symbols retained.
 
 | Implementation | After public clean | Unchanged-source rebuild | Peak tree RSS, cold / hot | Peak tree physical footprint, cold / hot |
 | --- | ---: | ---: | ---: | ---: |
-| Hvigor 6.26.4 | 557.13 s | 6.51 s | 3.84 / 0.64 GiB | 9.82 / 0.48 GiB |
-| Arkdown, full checker with cached stages | 181.12 s | 36.05 s | 1.93 / 0.52 GiB | 5.19 / 0.37 GiB |
-| Arkdown, full checker before caching | 187.47 s | 137.16 s | 1.77 / 2.03 GiB | 5.33 / 4.79 GiB |
-| Arkdown `--skip-checker`, before caching | 103.76 s | 58.90 s | 1.74 / 1.87 GiB | 4.41 / 2.18 GiB |
+| Hvigor 6.26.4 | 629.69 s | 5.96 s | 2.90 / 0.54 GiB | 9.68 / 0.49 GiB |
+| Arkdown, full checker with cached stages | 84.08 s | 17.28 s | 1.71 / 0.42 GiB | 2.39 / 0.34 GiB |
+| Arkdown `--skip-checker` | 98.02 s | 15.84 s | 1.68 / 0.43 GiB | 2.37 / 0.34 GiB |
 
-Each row is one cold/hot pair, not a statistical average. The two rows before caching are
-historical references; current measurements use the same current project inputs and run
-without other Cargo/Hvigor builds. Cold builds follow the public `clean` command; hot builds
+The input is a production HarmonyOS application with 11,627 TypeScript files and 23 ETS
+files. Arkdown cold/hot values are medians of two cold/hot pairs (cold 78.72/89.43 s,
+hot 16.21/18.34 s); `--skip-checker` cold values were 101.04/95.00 s. Hvigor was measured
+as one cold/hot pair. Each cold run follows the implementation's public `clean`; hot runs
 repeat unchanged inputs in a new process. Dependencies, SDK files, and the OS page cache
-remain available. Hvigor runs without its daemon, with parallel and incremental builds enabled.
-Process-tree memory is sampled every 100 ms; Node uses `--max-old-space-size=8192`.
-RSS and macOS physical footprint are separate measurements.
+remain available. Hvigor runs without its daemon, with parallel and incremental builds
+enabled. Process-tree memory is sampled every 100 ms (RSS) and 1 s (physical footprint);
+Node uses `--max-old-space-size=8192`. RSS and macOS physical footprint are separate
+measurements. Cold time is I/O-dominated: the two Arkdown full-checker cold samples differ
+by 10.7 s, so the `--skip-checker` cold difference is not a controlled comparison.
 
-In the current pair, Arkdown uses 67.49% less cold-build time and 47.12% less peak cold-build
-physical footprint than Hvigor. Its unchanged-source rebuild is still 5.54 times slower.
+In the current pair, Arkdown uses 86.6% less cold-build time (7.5x) and 75.3% less peak
+cold-build physical footprint than Hvigor, with 41.1% lower cold-build RSS. Its
+unchanged-source rebuild is 2.90 times slower, but uses 21.9% less RSS and 30.2% less
+physical footprint.
 
 Successful checking, packaging, and signing are reused on unchanged inputs. Compile cache
 hits verify the generated SDK input files as well as bytecode and source maps; removed or
 modified outputs trigger rebuilding. Content hashing runs in parallel with bounded read
-buffers. The latest hot stages take 3.338 s for profiles, 1.115 s for compile-cache validation,
-0 s for ABC, and 6.379 s for packaging/signing including content validation. Approximately
-25.22 s falls outside these recorded stages, including startup, project/SDK snapshots, and
-teardown. Startup remains the largest hot-build cost.
-
-SDK callback AST caches now end with the native compiler session, and the CLI exposes GC for
-compiler-state release. Normal and strict checker pools are each capped at four workers.
-In an instrumented full build with 5,553 SDK AST construction calls, releasing the session
-reduced used V8 heap from 1.24 GiB to 28.8 MiB; it stayed near 29.3 MiB through packaging,
-compared with 1.19 GiB retained in the earlier implementation.
-
-This removes retained JavaScript ASTs but only modestly changes the complete build's peak:
-the earlier cached-stage sample used 5.28 GiB, versus 5.19 GiB in the current sample. A separate
-instrumented run peaked during ABC compilation at 5.29 GiB: 3.51 GiB in the build host,
-1.77 GiB in `es2abc`, and 0.01 GiB in the CLI parent. Native allocations and SDK subprocesses
-remain substantial. A controlled allocator lazy-commit experiment did not improve the peak
-and is not enabled. Instrumented samples explain memory ownership; they do not replace the
-timing measurements above. Used V8 heap, RSS, and process footprint are different metrics.
+buffers. The latest Arkdown hot stages take 6.92 s for preparing the project, 3.28 s for
+profiles/resources, 0.46 s for bundling, 0 s for ABC, and 7.39 s for packaging/signing
+including content validation.
 
 ### Prerequisites
 

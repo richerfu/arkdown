@@ -220,7 +220,9 @@ impl<'program, 'alloc, 'file> EtsChecker<'program, 'alloc, 'file> {
             };
             if !matches!(
                 import.source.value.as_str(),
-                "@ohos.arkui.StateManagement" | "@ohos:arkui.StateManagement" | "@kit.ArkUI"
+                Some("@ohos.arkui.StateManagement")
+                    | Some("@ohos:arkui.StateManagement")
+                    | Some("@kit.ArkUI")
             ) {
                 continue;
             }

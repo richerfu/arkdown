@@ -5,6 +5,7 @@
 //! source text boundaries here while generated expression text is printed by OXC
 //! codegen.
 
+use crate::text::{JsStrText, StaticPropertyNameText};
 use std::cell::RefCell;
 use std::collections::VecDeque;
 
@@ -459,7 +460,7 @@ impl<'a> TypeScriptSourceBoundaryInventory<'a> {
 
     fn property_name(key: &PropertyKey<'_>) -> String {
         key.static_name()
-            .map(|name| name.into_owned())
+            .map(|name| name.to_owned_text())
             .unwrap_or_default()
     }
 
@@ -586,7 +587,7 @@ impl<'a> Visit<'a> for TypeScriptSourceBoundaryInventory<'a> {
                     .next()
                     .unwrap_or_default();
                 let retains_source_request =
-                    source_line.contains(declaration.source.value.as_str());
+                    source_line.contains(declaration.source.value.as_str().unwrap_or_default());
                 if !retains_source_request {
                     walk::walk_import_declaration(self, declaration);
                     return;
@@ -791,7 +792,7 @@ impl<'a> Visit<'a> for TypeScriptSourceBoundaryInventory<'a> {
 
     fn visit_string_literal(&mut self, literal: &StringLiteral<'a>) {
         self.push(
-            TypeScriptSourceBoundaryKind::StringLiteral(literal.value.to_string()),
+            TypeScriptSourceBoundaryKind::StringLiteral(literal.value.to_owned_text()),
             literal.span,
         );
     }
@@ -885,7 +886,7 @@ impl<'a> Visit<'a> for TypeScriptSourceBoundaryInventory<'a> {
             let name = property
                 .key
                 .static_name()
-                .map(|name| name.into_owned())
+                .map(|name| name.to_owned_text())
                 .unwrap_or_default();
             // OXC includes the terminator in this span. TypeScript's generic
             // `emitSourceMapsAfterNode` runs after `writeTrailingSemicolon`, at
@@ -1110,7 +1111,7 @@ impl<'a> TypeScriptSourceBoundaryMapper<'a> {
         // platform-specific type constructs. OXC still returns the complete
         // recoverable AST in that case; only a parser panic makes boundary
         // reconstruction unsafe.
-        if parsed.panicked {
+        if parsed.fatal_error {
             return;
         }
         let mut generated = TypeScriptSourceBoundaryInventory::with_source_text(
@@ -1894,7 +1895,7 @@ impl<'a> StringLiteralInventory<'a> {
         let position = self
             .synthetic_type_import_literals
             .iter()
-            .position(|candidate| literal.value == candidate.value)?;
+            .position(|candidate| literal.value.as_str() == Some(candidate.value.as_str()))?;
         self.synthetic_type_import_literals
             .remove(position)
             .and_then(|candidate| candidate.raw)
@@ -1912,7 +1913,7 @@ impl<'a> Visit<'a> for StringLiteralInventory<'_> {
             if let Some(raw) = self.synthetic_type_import_literal(&declaration.source) {
                 self.synthetic_type_import_literals
                     .push_back(HvigorSourceStringLiteral {
-                        value: declaration.source.value.to_string(),
+                        value: declaration.source.value.to_owned_text(),
                         raw: Some(raw),
                     });
             }
@@ -1925,7 +1926,7 @@ impl<'a> Visit<'a> for StringLiteralInventory<'_> {
             .raw_literal(literal)
             .or_else(|| self.take_synthetic_type_import_raw(literal));
         self.literals.push(HvigorSourceStringLiteral {
-            value: literal.value.to_string(),
+            value: literal.value.to_owned_text(),
             raw,
         });
     }
@@ -2085,7 +2086,7 @@ impl<'a> TypeScriptSourceLayoutInventory<'a> {
         allocator: &Allocator,
     ) -> HvigorSourceLayoutSnapshot {
         let parsed = Parser::new(allocator, program.source_text, program.source_type).parse();
-        if parsed.panicked || !parsed.diagnostics.is_empty() {
+        if parsed.fatal_error || !parsed.diagnostics.is_empty() {
             return HvigorSourceLayoutSnapshot::default();
         }
         let mut inventory = Self::new(program.source_text);
@@ -2292,7 +2293,7 @@ impl HvigorObjectLayoutKey {
                     ObjectPropertyKind::ObjectProperty(property) if !property.computed => property
                         .key
                         .static_name()
-                        .map(|name| HvigorObjectPropertyLayoutKey::Named(name.into_owned()))
+                        .map(|name| HvigorObjectPropertyLayoutKey::Named(name.to_owned_text()))
                         .unwrap_or(HvigorObjectPropertyLayoutKey::Computed),
                     ObjectPropertyKind::ObjectProperty(_) => {
                         HvigorObjectPropertyLayoutKey::Computed
@@ -2388,7 +2389,7 @@ impl HvigorSourceLayoutSnapshot {
                 .collect::<Vec<_>>();
             if !aliases.is_empty() {
                 self.explicit_same_name_import_aliases
-                    .entry(declaration.source.value.to_string())
+                    .entry(declaration.source.value.to_owned_text())
                     .or_default()
                     .push_back(aliases);
             }
@@ -2423,7 +2424,7 @@ impl<'a> HvigorTypescriptLayout<'a> {
 
     fn format(self, allocator: &Allocator) -> HvigorTypescriptLayoutOutput {
         let parsed = Parser::new(allocator, &self.code, SourceType::ets()).parse();
-        if parsed.panicked || !parsed.diagnostics.is_empty() {
+        if parsed.fatal_error || !parsed.diagnostics.is_empty() {
             return HvigorTypescriptLayoutOutput {
                 code: self.code,
                 source_map: None,
@@ -2650,7 +2651,7 @@ impl<'a> HvigorLayoutInventory<'a> {
             };
             self.edits.push(HvigorTextEdit {
                 span: Span::new(property.span.end, property.span.end),
-                replacement: format!(": {name}"),
+                replacement: format!(": {}", name.display()),
                 kind: HvigorTextEditKind::Other,
             });
         }
@@ -2809,7 +2810,7 @@ impl<'a> Visit<'a> for HvigorLayoutInventory<'_> {
 
     fn visit_string_literal(&mut self, literal: &StringLiteral<'a>) {
         self.string_literals
-            .push((literal.span, literal.value.to_string()));
+            .push((literal.span, literal.value.to_owned_text()));
     }
 
     fn visit_arrow_function_expression(&mut self, arrow: &ArrowFunctionExpression<'a>) {
@@ -3000,7 +3001,7 @@ impl<'a> Visit<'a> for HvigorLayoutInventory<'_> {
     fn visit_import_declaration(&mut self, declaration: &ImportDeclaration<'a>) {
         let aliases = self
             .explicit_same_name_import_aliases
-            .get_mut(declaration.source.value.as_str())
+            .get_mut(declaration.source.value.as_str().unwrap_or_default())
             .and_then(VecDeque::pop_front)
             .unwrap_or_default();
         if !aliases.is_empty() {

@@ -1,3 +1,4 @@
+use crate::text::JsStrText;
 use oxc_ast::ast::{Decorator, Expression};
 
 pub(crate) struct ArkuiDecoratorName;
@@ -206,7 +207,7 @@ impl<'a> ArkuiDecorator<'a> {
         if let Expression::CallExpression(call) = &self.decorator.expression {
             if let Some(arg) = call.arguments.first() {
                 if let Some(Expression::StringLiteral(lit)) = arg.as_expression() {
-                    return Some(lit.value.to_string());
+                    return Some(lit.value.to_owned_text());
                 }
             }
         }
@@ -231,7 +232,7 @@ impl<'a> ArkuiDecorator<'a> {
         let Expression::StringLiteral(alias) = &property.value else {
             return None;
         };
-        Some((alias.value.to_string(), true))
+        Some((alias.value.to_owned_text(), true))
     }
 
     pub(super) fn provider_override_key(&self) -> Option<&'a Expression<'a>> {

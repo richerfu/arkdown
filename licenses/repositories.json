@@ -2,18 +2,18 @@
   {
     "name": "oxc",
     "repository": "https://github.com/ohos-rs/oxc",
-    "revision": "3f2b4b7d5338c10014c973e0db874ec2d3b655db",
+    "revision": "6d42deb0af488a59c3d2ba06e01fc60d87b86355",
     "license": "MIT",
     "kind": "linked dependency",
     "files": [
       {
         "path": "oxc/LICENSE",
-        "source": "https://github.com/ohos-rs/oxc/blob/3f2b4b7d5338c10014c973e0db874ec2d3b655db/LICENSE",
+        "source": "https://github.com/ohos-rs/oxc/blob/6d42deb0af488a59c3d2ba06e01fc60d87b86355/LICENSE",
         "sha256": "95ced5ecf1133fbf41d409b5555c86c344f83f3b019926057ddbc07cfdcc27b3"
       },
       {
         "path": "oxc/THIRD-PARTY-LICENSE",
-        "source": "https://github.com/ohos-rs/oxc/blob/3f2b4b7d5338c10014c973e0db874ec2d3b655db/THIRD-PARTY-LICENSE",
+        "source": "https://github.com/ohos-rs/oxc/blob/6d42deb0af488a59c3d2ba06e01fc60d87b86355/THIRD-PARTY-LICENSE",
         "sha256": "77643247a04db72198cea3c8b73751091821b4d51b5448fd65501127a9db5111"
       }
     ]
@@ -21,18 +21,18 @@
   {
     "name": "rolldown",
     "repository": "https://github.com/ohos-rs/rolldown",
-    "revision": "63112ceaa35eb24750a09d0ce3ae6f2f8074ed42",
+    "revision": "4f27b5fe103e661090848aaaa4f7d3084bc2e49c",
     "license": "MIT",
     "kind": "linked dependency",
     "files": [
       {
         "path": "rolldown/LICENSE",
-        "source": "https://github.com/ohos-rs/rolldown/blob/63112ceaa35eb24750a09d0ce3ae6f2f8074ed42/LICENSE",
+        "source": "https://github.com/ohos-rs/rolldown/blob/4f27b5fe103e661090848aaaa4f7d3084bc2e49c/LICENSE",
         "sha256": "23ecfff35a5a2e80d92142f75228912c3b1abc4b5a8337a821ff4397e2f9f734"
       },
       {
         "path": "rolldown/THIRD-PARTY-LICENSE",
-        "source": "https://github.com/ohos-rs/rolldown/blob/63112ceaa35eb24750a09d0ce3ae6f2f8074ed42/THIRD-PARTY-LICENSE",
+        "source": "https://github.com/ohos-rs/rolldown/blob/4f27b5fe103e661090848aaaa4f7d3084bc2e49c/THIRD-PARTY-LICENSE",
         "sha256": "a877291d800ed43692f3f9ae09d8e01cc6f7293ad39d43896059c188ffbb8b7c"
       }
     ]
@@ -40,18 +40,18 @@
   {
     "name": "tsrs",
     "repository": "https://github.com/ohos-rs/tsrs.git",
-    "revision": "4d7e69df3847b5e0e5708b22a3f713082e5e6d02",
+    "revision": "a59ee9bdc7d632b6d797711291375e8511674f82",
     "license": "Apache-2.0",
     "kind": "linked dependency",
     "files": [
       {
         "path": "tsrs/LICENSE",
-        "source": "https://github.com/ohos-rs/tsrs/blob/4d7e69df3847b5e0e5708b22a3f713082e5e6d02/LICENSE",
+        "source": "https://github.com/ohos-rs/tsrs/blob/a59ee9bdc7d632b6d797711291375e8511674f82/LICENSE",
         "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47"
       },
       {
         "path": "tsrs/NOTICE",
-        "source": "https://github.com/ohos-rs/tsrs/blob/4d7e69df3847b5e0e5708b22a3f713082e5e6d02/NOTICE",
+        "source": "https://github.com/ohos-rs/tsrs/blob/a59ee9bdc7d632b6d797711291375e8511674f82/NOTICE",
         "sha256": "1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118"
       }
     ]

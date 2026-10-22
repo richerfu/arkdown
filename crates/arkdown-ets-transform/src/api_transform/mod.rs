@@ -119,7 +119,7 @@ impl<'a> KitImportDeclarationRewriter<'a> {
 
     fn bindings(&self) -> Option<Vec<KitImportBinding>> {
         let kit_specifier = self.source.value.as_str();
-        if !crate::kit_map::is_kit_specifier(kit_specifier) {
+        if !crate::kit_map::is_kit_specifier((kit_specifier).unwrap_or_default()) {
             return None;
         }
 
@@ -133,8 +133,10 @@ impl<'a> KitImportDeclarationRewriter<'a> {
 
             let imported_name = ModuleExportNameText::new(&specifier.imported).binding_name();
             let local_name = specifier.local.name.as_str();
-            let Some(kit_entry) = crate::kit_map::resolve_kit_import(kit_specifier, &imported_name)
-            else {
+            let Some(kit_entry) = crate::kit_map::resolve_kit_import(
+                (kit_specifier).unwrap_or_default(),
+                &imported_name,
+            ) else {
                 continue;
             };
 

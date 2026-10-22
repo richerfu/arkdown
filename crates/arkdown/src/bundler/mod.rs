@@ -69,6 +69,7 @@ use rolldown_common::{
     ModuleType as RdModuleType, SanitizeFilename, ScanMode, TreeshakeOptions, TypeScriptOptions,
 };
 use rolldown_plugin::__inner::SharedPluginable;
+use rolldown_plugin::Pluginable;
 
 use crate::chunk_module_request::HvigorChunkModuleRequestProcessor;
 use crate::diagnostics::RolldownBuildDiagnostics;
@@ -78,8 +79,9 @@ use crate::plan::{BundlePlan, SourceMapPolicy};
 use crate::plugins::ets_transform::EtsTransformPlugin;
 
 type DynamicChunkNameFuture =
-    Pin<Box<dyn Future<Output = anyhow::Result<Option<String>>> + Send + 'static>>;
-type DynamicChunkName = Arc<dyn Fn(&str, &ChunkingContext) -> DynamicChunkNameFuture + Send + Sync>;
+    Pin<Box<dyn Future<Output = anyhow::Result<Vec<Option<String>>>> + Send + 'static>>;
+type DynamicChunkName =
+    Arc<dyn Fn(Vec<String>, &ChunkingContext) -> DynamicChunkNameFuture + Send + Sync>;
 
 /// The top-level bundler for one OHOS module build.
 ///
@@ -171,15 +173,16 @@ impl Bundler {
             .unwrap_or_default();
         let mut rd_plugins: Vec<SharedPluginable> = self.plugins.clone();
         let source_collector =
-            Arc::new(HvigorModuleTransformCollector::new(transform_store.clone()))
-                as SharedPluginable;
+            Pluginable::new_shared(HvigorModuleTransformCollector::new(transform_store.clone()));
         // CompileArkTS consumes the result after every Rollup transform hook,
         // including package plugins ordered after the SDK adapters. The
         // collector is the Rust equivalent of that post-transform handoff,
         // so it must remain the final ordinary transform observer.
         rd_plugins.push(source_collector);
         #[cfg(feature = "memory-diagnostics")]
-        rd_plugins.push(Arc::new(MemoryTransformDiagnosticPlugin::new()) as SharedPluginable);
+        rd_plugins.push(Pluginable::new_shared(
+            MemoryTransformDiagnosticPlugin::new(),
+        ));
 
         // ── 3. Build rolldown BundlerOptions ─────────────────────────────────
         //
@@ -899,10 +902,13 @@ impl Bundler {
         let common_chunk_policy =
             Arc::new(ManualChunkPolicy::from_plan(Vec::new(), Default::default()));
         let commons_test_policy = Arc::clone(&common_chunk_policy);
-        let commons_test = Arc::new(move |module_id: &str| {
-            let is_common = commons_test_policy.is_common_dependency(module_id);
-            Box::pin(async move { Ok(Some(is_common)) })
-                as Pin<Box<dyn Future<Output = anyhow::Result<Option<bool>>> + Send + 'static>>
+        let commons_test = Arc::new(move |module_ids: Vec<String>| {
+            let results = module_ids
+                .iter()
+                .map(|module_id| commons_test_policy.is_common_dependency(module_id))
+                .collect::<Vec<_>>();
+            Box::pin(async move { Ok(results) })
+                as Pin<Box<dyn Future<Output = anyhow::Result<Vec<bool>>> + Send + 'static>>
         });
 
         let commons_group = MatchGroup {
@@ -914,15 +920,16 @@ impl Bundler {
         // Dynamic name function: returns "vendors" for non-entry modules, None for entries.
         // The function captures no state; it queries `is_entry` via ChunkingContext.
         let vendors_name_fn: DynamicChunkName =
-            Arc::new(|module_id: &str, ctx: &ChunkingContext| {
-                let result = ctx.get_module_info(module_id).and_then(|info| {
-                    if !info.is_entry {
-                        Some(ChunkName::VENDORS.to_string())
-                    } else {
-                        None
-                    }
-                });
-                Box::pin(async move { Ok(result) })
+            Arc::new(|module_ids: Vec<String>, ctx: &ChunkingContext| {
+                let results = module_ids
+                    .iter()
+                    .map(|module_id| {
+                        ctx.get_module_info(module_id).and_then(|info| {
+                            (!info.is_entry).then(|| ChunkName::VENDORS.to_string())
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                Box::pin(async move { Ok(results) })
             });
 
         let vendors_group = MatchGroup {

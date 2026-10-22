@@ -41,10 +41,21 @@ pub use arkdown_ets_transform::{
 
 /// ArkTS transform plugin adapter.
 pub struct EtsTransformPlugin {
-    plan: ArcSwap<RolldownEtsTransformPlan>,
-    cache: EtsTransformCache,
+    plan: Arc<ArcSwap<RolldownEtsTransformPlan>>,
+    cache: Arc<EtsTransformCache>,
     #[cfg(feature = "memory-diagnostics")]
-    memory_trace: EtsTransformMemoryTrace,
+    memory_trace: Arc<EtsTransformMemoryTrace>,
+}
+
+impl Clone for EtsTransformPlugin {
+    fn clone(&self) -> Self {
+        Self {
+            plan: Arc::clone(&self.plan),
+            cache: Arc::clone(&self.cache),
+            #[cfg(feature = "memory-diagnostics")]
+            memory_trace: Arc::clone(&self.memory_trace),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -94,10 +105,10 @@ impl EtsTransformPlugin {
         cache_policy: &BundleCachePolicy,
     ) -> Self {
         Self {
-            cache: EtsTransformCache::from_policy(cache_policy),
-            plan: ArcSwap::from(plan),
+            cache: Arc::new(EtsTransformCache::from_policy(cache_policy)),
+            plan: Arc::new(ArcSwap::from(plan)),
             #[cfg(feature = "memory-diagnostics")]
-            memory_trace: EtsTransformMemoryTrace::from_env(),
+            memory_trace: Arc::new(EtsTransformMemoryTrace::from_env()),
         }
     }
 

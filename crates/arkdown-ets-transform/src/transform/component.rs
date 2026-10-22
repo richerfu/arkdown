@@ -1,3 +1,4 @@
+use crate::text::StaticPropertyNameText;
 use rustc_hash::FxHashSet;
 
 use oxc_allocator::{Allocator, ArenaBox, ArenaVec, CloneIn, FromIn};
@@ -405,7 +406,8 @@ impl<'a, 'b> CustomDialogControllerLowerer<'a, 'b> {
             let property_name = property.key.static_name();
             let backing_name = Self::dollar_reference_name(&property.value).or_else(|| {
                 property_name
-                    .as_deref()
+                    .as_ref()
+                    .and_then(|name| name.as_str())
                     .filter(|name| component_info.link_props.contains(*name))
                     .and_then(|_| Self::this_member_name(&property.value))
             });
@@ -734,7 +736,7 @@ impl<'a, 'b> CustomDialogControllerLowerer<'a, 'b> {
 
 impl<'a, 'b> VisitMut<'a> for CustomDialogControllerLowerer<'a, 'b> {
     fn visit_property_definition(&mut self, property: &mut PropertyDefinition<'a>) {
-        let property_name = property.key.static_name().map(|name| name.to_string());
+        let property_name = property.key.static_name().map(|name| name.to_owned_text());
         if let (Some(property_name), Some(initializer)) = (property_name, property.value.as_mut()) {
             self.rewrite_custom_dialog_controller_builder(
                 initializer,

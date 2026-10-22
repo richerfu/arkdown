@@ -103,7 +103,7 @@ impl<'a> ImportPathExpander<'a> {
         import: &ImportDeclaration<'b>,
         ast: &AstBuilder<'b>,
     ) -> Vec<Statement<'b>> {
-        let specifier = import.source.value.as_str();
+        let specifier = import.source.value.as_str().unwrap_or_default();
         // Relative imports, SDK prefixed modules, SO dependencies and
         // excluded packages never expand.
         if specifier.starts_with('.')
@@ -137,7 +137,7 @@ impl<'a> ImportPathExpander<'a> {
             .package_candidates()
             .last()
             .map(|candidate| candidate.package_name().to_string())
-            .unwrap_or_else(|| specifier.to_string());
+            .unwrap_or_else(|| specifier.to_owned());
         let Some(entry) = self
             .sources
             .resolve_static_with_declarations(Path::new(self.importer), specifier)
@@ -365,10 +365,10 @@ impl<'a> ImportPathExpander<'a> {
                 }
                 // `export { x } from "./mod"` — recurse.
                 Statement::ExportFromDeclaration(export) if !export.specifiers.is_empty() => {
-                    let Some(resolved) = self
-                        .sources
-                        .resolve_relative_with_declarations(file, export.source.value.as_str())
-                    else {
+                    let Some(resolved) = self.sources.resolve_relative_with_declarations(
+                        file,
+                        (export.source.value.as_str()).unwrap_or_default(),
+                    ) else {
                         continue;
                     };
                     for element in &export.specifiers {
@@ -381,10 +381,10 @@ impl<'a> ImportPathExpander<'a> {
                 }
                 // `export * from "./mod"` — recurse for the symbol.
                 Statement::ExportAllDeclaration(export) => {
-                    let Some(resolved) = self
-                        .sources
-                        .resolve_relative_with_declarations(file, export.source.value.as_str())
-                    else {
+                    let Some(resolved) = self.sources.resolve_relative_with_declarations(
+                        file,
+                        (export.source.value.as_str()).unwrap_or_default(),
+                    ) else {
                         continue;
                     };
                     if let Some(result) = self.trace_export(&resolved.path, symbol, false, seen) {

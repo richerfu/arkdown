@@ -1010,11 +1010,13 @@ impl<'a> ResourceArgumentText<'a> {
 
     fn text(&self) -> Option<&'a str> {
         match self.expression {
-            Expression::StringLiteral(literal) => Some(literal.value.as_str()),
+            Expression::StringLiteral(literal) => {
+                Some((literal.value.as_str()).unwrap_or_default())
+            }
             Expression::TemplateLiteral(literal) if literal.expressions.is_empty() => literal
                 .quasis
                 .first()
-                .and_then(|quasi| quasi.value.cooked.as_deref()),
+                .and_then(|quasi| quasi.value.cooked.and_then(oxc_str::JSStr::as_str)),
             _ => None,
         }
     }

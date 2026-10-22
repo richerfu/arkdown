@@ -31,9 +31,9 @@ license = "MIT OR Apache-2.0"
 license-file = "LICENSE"
 
 [workspace.dependencies]
-tsrs_api = { git = "https://github.com/ohos-rs/tsrs.git", rev = "4d7e69df3847b5e0e5708b22a3f713082e5e6d02" }
-tsrs_core = { git = "https://github.com/ohos-rs/tsrs.git", rev = "4d7e69df3847b5e0e5708b22a3f713082e5e6d02" }
-tsrs_vfs = { git = "https://github.com/ohos-rs/tsrs.git", rev = "4d7e69df3847b5e0e5708b22a3f713082e5e6d02" }
+tsrs_api = { git = "https://github.com/ohos-rs/tsrs.git", rev = "a59ee9bdc7d632b6d797711291375e8511674f82" }
+tsrs_core = { git = "https://github.com/ohos-rs/tsrs.git", rev = "a59ee9bdc7d632b6d797711291375e8511674f82" }
+tsrs_vfs = { git = "https://github.com/ohos-rs/tsrs.git", rev = "a59ee9bdc7d632b6d797711291375e8511674f82" }
 # Workspace crates
 arkdown = { path = "crates/arkdown" }
 arkdown-abc = { path = "crates/arkdown-abc" }
@@ -60,31 +60,31 @@ arkdown-watcher = { path = "crates/arkdown-watcher" }
 hapsigner = { version = "0.2.0", default-features = false }
 
 # Parser — ohos-rs OXC fork with ArkTS/ArkUI support.
-oxc = { git = "https://github.com/ohos-rs/oxc", rev = "3f2b4b7d5338c10014c973e0db874ec2d3b655db", features = ["full"] }
-oxc_allocator = { git = "https://github.com/ohos-rs/oxc", rev = "3f2b4b7d5338c10014c973e0db874ec2d3b655db" }
-oxc_ast = { git = "https://github.com/ohos-rs/oxc", rev = "3f2b4b7d5338c10014c973e0db874ec2d3b655db" }
-oxc_parser = { git = "https://github.com/ohos-rs/oxc", rev = "3f2b4b7d5338c10014c973e0db874ec2d3b655db" }
-oxc_semantic = { git = "https://github.com/ohos-rs/oxc", rev = "3f2b4b7d5338c10014c973e0db874ec2d3b655db", features = ["jsdoc"] }
-oxc_span = { git = "https://github.com/ohos-rs/oxc", rev = "3f2b4b7d5338c10014c973e0db874ec2d3b655db" }
-oxc_sourcemap = "8.1.2"
-oxc_str = { git = "https://github.com/ohos-rs/oxc", rev = "3f2b4b7d5338c10014c973e0db874ec2d3b655db" }
-oxc_ast_visit = { git = "https://github.com/ohos-rs/oxc", rev = "3f2b4b7d5338c10014c973e0db874ec2d3b655db" }
-oxc_syntax = { git = "https://github.com/ohos-rs/oxc", rev = "3f2b4b7d5338c10014c973e0db874ec2d3b655db" }
-oxc_transformer = { git = "https://github.com/ohos-rs/oxc", rev = "3f2b4b7d5338c10014c973e0db874ec2d3b655db" }
-oxc_isolated_declarations = { git = "https://github.com/ohos-rs/oxc", rev = "3f2b4b7d5338c10014c973e0db874ec2d3b655db" }
-oxc_codegen = { git = "https://github.com/ohos-rs/oxc", rev = "3f2b4b7d5338c10014c973e0db874ec2d3b655db" }
-oxc_diagnostics = { git = "https://github.com/ohos-rs/oxc", rev = "3f2b4b7d5338c10014c973e0db874ec2d3b655db" }
-oxc_minifier = { git = "https://github.com/ohos-rs/oxc", rev = "3f2b4b7d5338c10014c973e0db874ec2d3b655db" }
-oxc_resolver = "11.21.3"
+oxc = { git = "https://github.com/ohos-rs/oxc", rev = "6d42deb0af488a59c3d2ba06e01fc60d87b86355", features = ["full"] }
+oxc_allocator = { git = "https://github.com/ohos-rs/oxc", rev = "6d42deb0af488a59c3d2ba06e01fc60d87b86355" }
+oxc_ast = { git = "https://github.com/ohos-rs/oxc", rev = "6d42deb0af488a59c3d2ba06e01fc60d87b86355" }
+oxc_parser = { git = "https://github.com/ohos-rs/oxc", rev = "6d42deb0af488a59c3d2ba06e01fc60d87b86355" }
+oxc_semantic = { git = "https://github.com/ohos-rs/oxc", rev = "6d42deb0af488a59c3d2ba06e01fc60d87b86355", features = ["jsdoc"] }
+oxc_span = { git = "https://github.com/ohos-rs/oxc", rev = "6d42deb0af488a59c3d2ba06e01fc60d87b86355" }
+oxc_sourcemap = "9.0.0"
+oxc_str = { git = "https://github.com/ohos-rs/oxc", rev = "6d42deb0af488a59c3d2ba06e01fc60d87b86355" }
+oxc_ast_visit = { git = "https://github.com/ohos-rs/oxc", rev = "6d42deb0af488a59c3d2ba06e01fc60d87b86355" }
+oxc_syntax = { git = "https://github.com/ohos-rs/oxc", rev = "6d42deb0af488a59c3d2ba06e01fc60d87b86355" }
+oxc_transformer = { git = "https://github.com/ohos-rs/oxc", rev = "6d42deb0af488a59c3d2ba06e01fc60d87b86355" }
+oxc_isolated_declarations = { git = "https://github.com/ohos-rs/oxc", rev = "6d42deb0af488a59c3d2ba06e01fc60d87b86355" }
+oxc_codegen = { git = "https://github.com/ohos-rs/oxc", rev = "6d42deb0af488a59c3d2ba06e01fc60d87b86355" }
+oxc_diagnostics = { git = "https://github.com/ohos-rs/oxc", rev = "6d42deb0af488a59c3d2ba06e01fc60d87b86355" }
+oxc_minifier = { git = "https://github.com/ohos-rs/oxc", rev = "6d42deb0af488a59c3d2ba06e01fc60d87b86355" }
+oxc_resolver = "11.24.3"
 
 # Rolldown
-rolldown = { git = "https://github.com/ohos-rs/rolldown", rev = "63112ceaa35eb24750a09d0ce3ae6f2f8074ed42", default-features = false, features = ["experimental"] }
-rolldown_common = { git = "https://github.com/ohos-rs/rolldown", rev = "63112ceaa35eb24750a09d0ce3ae6f2f8074ed42" }
-rolldown_plugin = { git = "https://github.com/ohos-rs/rolldown", rev = "63112ceaa35eb24750a09d0ce3ae6f2f8074ed42" }
-rolldown_sourcemap = { git = "https://github.com/ohos-rs/rolldown", rev = "63112ceaa35eb24750a09d0ce3ae6f2f8074ed42" }
-rolldown_utils = { git = "https://github.com/ohos-rs/rolldown", rev = "63112ceaa35eb24750a09d0ce3ae6f2f8074ed42" }
-rolldown_error = { git = "https://github.com/ohos-rs/rolldown", rev = "63112ceaa35eb24750a09d0ce3ae6f2f8074ed42" }
-string_wizard = { git = "https://github.com/ohos-rs/rolldown", rev = "63112ceaa35eb24750a09d0ce3ae6f2f8074ed42", features = ["sourcemap"] }
+rolldown = { git = "https://github.com/ohos-rs/rolldown", rev = "4f27b5fe103e661090848aaaa4f7d3084bc2e49c", default-features = false, features = ["experimental"] }
+rolldown_common = { git = "https://github.com/ohos-rs/rolldown", rev = "4f27b5fe103e661090848aaaa4f7d3084bc2e49c" }
+rolldown_plugin = { git = "https://github.com/ohos-rs/rolldown", rev = "4f27b5fe103e661090848aaaa4f7d3084bc2e49c" }
+rolldown_sourcemap = { git = "https://github.com/ohos-rs/rolldown", rev = "4f27b5fe103e661090848aaaa4f7d3084bc2e49c" }
+rolldown_utils = { git = "https://github.com/ohos-rs/rolldown", rev = "4f27b5fe103e661090848aaaa4f7d3084bc2e49c" }
+rolldown_error = { git = "https://github.com/ohos-rs/rolldown", rev = "4f27b5fe103e661090848aaaa4f7d3084bc2e49c" }
+string_wizard = { git = "https://github.com/ohos-rs/rolldown", rev = "4f27b5fe103e661090848aaaa4f7d3084bc2e49c", features = ["sourcemap"] }
 
 # NAPI-RS (Node.js native addon bridge — used by packages/arkdown)
 napi = { version = "3.9.1", features = [

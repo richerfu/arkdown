@@ -6,6 +6,7 @@
 //! spans here; the build coordinator only snapshots inputs and persists the
 //! returned files.
 
+use crate::text::JsStrText;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -321,7 +322,7 @@ impl<'a> DeclarationFileParser<'a> {
                     file.imports.insert(
                         local,
                         ImportBinding {
-                            specifier: import.source.value.to_string(),
+                            specifier: import.source.value.to_owned_text(),
                             imported,
                         },
                     );
@@ -342,7 +343,7 @@ impl<'a> DeclarationFileParser<'a> {
                 let original = self.slice(export.span).trim().to_string();
                 for specifier in &export.specifiers {
                     file.reexports.push(Reexport {
-                        specifier: export.source.value.to_string(),
+                        specifier: export.source.value.to_owned_text(),
                         imported: Self::module_export_name(&specifier.local),
                         exported: Self::module_export_name(&specifier.exported),
                         original: original.clone(),
@@ -350,7 +351,7 @@ impl<'a> DeclarationFileParser<'a> {
                 }
             }
             Statement::ExportAllDeclaration(export) => file.export_all.push(ExportAll {
-                specifier: export.source.value.to_string(),
+                specifier: export.source.value.to_owned_text(),
                 namespace: export.exported.as_ref().map(Self::module_export_name),
                 original: self.slice(export.span).trim().to_string(),
             }),
@@ -635,7 +636,7 @@ impl<'a> Visit<'a> for DeclarationReferenceCollector {
         self.references.push(AbsoluteReference {
             name,
             member: None,
-            specifier: Some(import.source.value.to_string()),
+            specifier: Some(import.source.value.to_owned_text()),
             span: Span::new(import.span.start, qualifier.span().end),
         });
     }

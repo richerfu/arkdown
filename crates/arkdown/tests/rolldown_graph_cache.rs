@@ -12,7 +12,7 @@ use arkdown::{
 use arkdown_core::{ArktsLanguageVersion, BuildMode, OutputTarget};
 use rolldown_plugin::{
     HookCloseBundleArgs, HookTransformArgs, HookTransformReturn, HookUsage, Plugin, PluginContext,
-    SharedTransformPluginContext,
+    Pluginable, SharedTransformPluginContext,
 };
 use rustc_hash::FxHashMap;
 
@@ -159,7 +159,7 @@ async fn retained_graph_only_retransforms_changed_modules_and_closes_once() {
 
     let transform_count = Arc::new(AtomicUsize::new(0));
     let close_count = Arc::new(AtomicUsize::new(0));
-    let plugin = Arc::new(TransformProbe {
+    let plugin = Pluginable::new_shared(TransformProbe {
         source_root: arkdown_path::AbsPath::canonicalize(&source_root)
             .expect("canonical source root")
             .into_path_buf(),

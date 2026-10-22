@@ -1,3 +1,4 @@
+use crate::text::{JsStrText, StaticPropertyNameText};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -111,7 +112,7 @@ impl ComponentModuleExportName {
         match name {
             ModuleExportName::IdentifierName(identifier) => identifier.name.to_string(),
             ModuleExportName::IdentifierReference(identifier) => identifier.name.to_string(),
-            ModuleExportName::StringLiteral(literal) => literal.value.to_string(),
+            ModuleExportName::StringLiteral(literal) => literal.value.to_owned_text(),
         }
     }
 }
@@ -261,9 +262,9 @@ impl<'a, 'b> ImportedCustomComponentNamesCollector<'a, 'b> {
                 continue;
             };
             let source = import.source.value.as_str();
-            let Some(target) = resolver.resolve(source) else {
+            let Some(target) = resolver.resolve((source).unwrap_or_default()) else {
                 self.collect_external_usage_specifiers(
-                    source,
+                    (source).unwrap_or_default(),
                     specifiers,
                     &external_component_usages,
                 );
@@ -272,7 +273,7 @@ impl<'a, 'b> ImportedCustomComponentNamesCollector<'a, 'b> {
             let target_components = self.options.module_exports.component_names(&target.path);
             if target_components.is_empty() {
                 self.collect_external_usage_specifiers(
-                    source,
+                    (source).unwrap_or_default(),
                     specifiers,
                     &external_component_usages,
                 );
@@ -410,11 +411,14 @@ impl<'a, 'b> ImportedComponentNamesCollector<'a, 'b> {
             let Some(specifiers) = &import.specifiers else {
                 continue;
             };
-            self.collect_sdk_specifiers(import.source.value.as_str(), specifiers);
+            self.collect_sdk_specifiers(
+                (import.source.value.as_str()).unwrap_or_default(),
+                specifiers,
+            );
             let source = import.source.value.as_str();
-            let Some(target) = resolver.resolve(source) else {
+            let Some(target) = resolver.resolve((source).unwrap_or_default()) else {
                 self.collect_external_usage_specifiers(
-                    source,
+                    (source).unwrap_or_default(),
                     specifiers,
                     &external_component_usages,
                 );
@@ -423,7 +427,7 @@ impl<'a, 'b> ImportedComponentNamesCollector<'a, 'b> {
             let target_components = self.options.module_exports.component_names(&target.path);
             if target_components.is_empty() {
                 self.collect_external_usage_specifiers(
-                    source,
+                    (source).unwrap_or_default(),
                     specifiers,
                     &external_component_usages,
                 );
@@ -839,7 +843,7 @@ impl<'a> BuilderFunctionNameCollector<'a> {
             if let Some(sdk_builders) = self
                 .options
                 .component_metadata
-                .sdk_builder_function_names(import.source.value.as_str())
+                .sdk_builder_function_names((import.source.value.as_str()).unwrap_or_default())
             {
                 for specifier in specifiers {
                     match specifier {
@@ -866,7 +870,8 @@ impl<'a> BuilderFunctionNameCollector<'a> {
                     }
                 }
             }
-            let Some(target) = resolver.resolve(import.source.value.as_str()) else {
+            let Some(target) = resolver.resolve((import.source.value.as_str()).unwrap_or_default())
+            else {
                 continue;
             };
             let target_builders = self
@@ -990,7 +995,7 @@ impl<'a> ComponentInfoCollector<'a> {
                 continue;
             }
             if let Some(name) = property.key.static_name() {
-                names.insert(name.into_owned());
+                names.insert(name.to_owned_text());
             }
         }
         names
@@ -1018,7 +1023,7 @@ impl<'a> ComponentInfoCollector<'a> {
                     && (decorators.contains(&ArkuiDecoratorName::PARAM)
                         || decorators.contains(&ArkuiDecoratorName::BUILDER_PARAM))
             })
-            .filter_map(|property| property.key.static_name().map(|name| name.into_owned()))
+            .filter_map(|property| property.key.static_name().map(|name| name.to_owned_text()))
             .collect()
     }
 
@@ -1063,7 +1068,7 @@ impl<'a> ComponentInfoCollector<'a> {
                 None
             };
             if let Some(kind) = kind {
-                properties.insert(name.into_owned(), kind);
+                properties.insert(name.to_owned_text(), kind);
             }
         }
         properties
@@ -1083,7 +1088,7 @@ impl<'a> ComponentInfoCollector<'a> {
                         !ArkuiStateDecorator::new(ArkuiDecorator::new(decorator).name()).is_state()
                     }) =>
                 {
-                    property.key.static_name().map(|name| name.into_owned())
+                    property.key.static_name().map(|name| name.to_owned_text())
                 }
                 _ => None,
             })
@@ -1126,7 +1131,7 @@ impl<'a> ComponentInfoCollector<'a> {
                     .iter()
                     .all(|decorator| !ArkuiStateDecorator::new(decorator).is_state())
             })
-            .filter_map(|property| property.key.static_name().map(|name| name.into_owned()))
+            .filter_map(|property| property.key.static_name().map(|name| name.to_owned_text()))
             .collect()
     }
 
@@ -1147,7 +1152,7 @@ impl<'a> ComponentInfoCollector<'a> {
                                 ArkuiDecorator::new(decorator).name() == required_decorator
                             }) =>
                         {
-                            property.key.static_name().map(|name| name.into_owned())
+                            property.key.static_name().map(|name| name.to_owned_text())
                         }
                         _ => None,
                     }),
@@ -1183,7 +1188,7 @@ impl<'a> ComponentInfoCollector<'a> {
                         .then_some(CustomComponentPropertyKind::Regular)
                 });
             if let Some(kind) = kind {
-                properties.insert(name.into_owned(), kind);
+                properties.insert(name.to_owned_text(), kind);
             }
         }
         properties
@@ -1232,7 +1237,7 @@ impl<'a> ComponentInfoCollector<'a> {
                     _ => None,
                 });
             if let Some(kind) = kind {
-                properties.insert(name.into_owned(), kind);
+                properties.insert(name.to_owned_text(), kind);
             }
         }
         properties
@@ -1249,7 +1254,7 @@ impl<'a> ComponentInfoCollector<'a> {
                         ArkuiDecorator::new(decorator).name() == decorator_name
                     }) =>
                 {
-                    property.key.static_name().map(|name| name.into_owned())
+                    property.key.static_name().map(|name| name.to_owned_text())
                 }
                 _ => None,
             })
@@ -1270,7 +1275,7 @@ impl<'a> ComponentInfoCollector<'a> {
                 continue;
             }
             if let Some(name) = property.key.static_name() {
-                names.insert(name.into_owned());
+                names.insert(name.to_owned_text());
             }
         }
         names
@@ -1301,7 +1306,7 @@ impl<'a> StructBuilderMethodNames<'a> {
                 continue;
             }
             if let Some(name) = method.key.static_name() {
-                names.insert(name.into_owned());
+                names.insert(name.to_owned_text());
             }
         }
         names
@@ -1408,7 +1413,7 @@ impl<'a> StructRegularAttributeProperties<'a> {
                 if property.r#static || !self.is_regular_property(property) {
                     return None;
                 }
-                property.key.static_name().map(|name| name.into_owned())
+                property.key.static_name().map(|name| name.to_owned_text())
             })
             .collect()
     }
@@ -1453,7 +1458,7 @@ impl<'a> StructBuilderParamNames<'a> {
                 continue;
             }
             if let Some(name) = property.key.static_name() {
-                names.insert(name.into_owned());
+                names.insert(name.to_owned_text());
             }
         }
         names
@@ -1646,7 +1651,8 @@ impl ModuleExportIndex {
             if import.import_kind.is_type() {
                 continue;
             }
-            let Some(target) = resolver.resolve(import.source.value.as_str()) else {
+            let Some(target) = resolver.resolve((import.source.value.as_str()).unwrap_or_default())
+            else {
                 continue;
             };
             let Some(exports) = self.entries.get(&target.path).map(|entry| &entry.classes) else {
@@ -1699,7 +1705,8 @@ impl ModuleExportIndex {
             let Statement::ImportDeclaration(import) = statement else {
                 continue;
             };
-            let Some(target) = resolver.resolve(import.source.value.as_str()) else {
+            let Some(target) = resolver.resolve((import.source.value.as_str()).unwrap_or_default())
+            else {
                 continue;
             };
             let Some(exports) = self.entries.get(&target.path).map(|entry| &entry.entities) else {
@@ -1959,7 +1966,10 @@ impl ModuleBindingFacts {
                         .collect();
                     facts.imports.push(ModuleBindingImportFact {
                         target: sources
-                            .resolve_static_with_declarations(path, import.source.value.as_str())
+                            .resolve_static_with_declarations(
+                                path,
+                                (import.source.value.as_str()).unwrap_or_default(),
+                            )
                             .map(|source| source.path),
                         bindings,
                     });
@@ -1982,9 +1992,10 @@ impl ModuleBindingFacts {
                     }
                 }
                 Statement::ExportFromDeclaration(export) => {
-                    let Some(target) = sources
-                        .resolve_static_with_declarations(path, export.source.value.as_str())
-                    else {
+                    let Some(target) = sources.resolve_static_with_declarations(
+                        path,
+                        (export.source.value.as_str()).unwrap_or_default(),
+                    ) else {
                         continue;
                     };
                     for specifier in &export.specifiers {
@@ -2047,9 +2058,10 @@ impl ModuleBindingFacts {
                         );
                         continue;
                     }
-                    if let Some(target) =
-                        sources.resolve_static_with_declarations(path, export.source.value.as_str())
-                    {
+                    if let Some(target) = sources.resolve_static_with_declarations(
+                        path,
+                        (export.source.value.as_str()).unwrap_or_default(),
+                    ) {
                         facts.exports.push(ModuleBindingExportFact::AllFrom {
                             target: target.path,
                             explicit_type: export.export_kind.is_type(),
@@ -2076,7 +2088,7 @@ impl ModuleExportFacts {
             CompileArktsSourceType::from_path_with_version(&source.path, arkts_language_version);
         let parser_source = ArktsExtendSource::new(&source.source, arkts_language_version);
         let parsed = component_metadata.parse_ets(&allocator, parser_source.as_str(), source_type);
-        if parsed.panicked {
+        if parsed.fatal_error {
             return Self::default();
         }
         if !parsed.diagnostics.is_empty() {
@@ -2256,7 +2268,9 @@ impl ModuleExportFacts {
         for statement in &program.body {
             match statement {
                 Statement::ImportDeclaration(import) => {
-                    let Some(target) = resolver.resolve(import.source.value.as_str()) else {
+                    let Some(target) =
+                        resolver.resolve((import.source.value.as_str()).unwrap_or_default())
+                    else {
                         continue;
                     };
                     let Some(specifiers) = &import.specifiers else {
@@ -2312,7 +2326,9 @@ impl ModuleExportFacts {
                             exported: ComponentModuleExportName::value(&specifier.exported),
                         })
                         .collect::<Vec<_>>();
-                    if let Some(target) = resolver.resolve(export.source.value.as_str()) {
+                    if let Some(target) =
+                        resolver.resolve((export.source.value.as_str()).unwrap_or_default())
+                    {
                         facts.exports.push(ModuleExportFact::NamedFrom {
                             target: target.path,
                             bindings,
@@ -2336,7 +2352,9 @@ impl ModuleExportFacts {
                     }
                 }
                 Statement::ExportAllDeclaration(export) => {
-                    if let Some(target) = resolver.resolve(export.source.value.as_str()) {
+                    if let Some(target) =
+                        resolver.resolve((export.source.value.as_str()).unwrap_or_default())
+                    {
                         if let Some(exported) = &export.exported {
                             facts.exports.push(ModuleExportFact::NamespaceFrom {
                                 target: target.path,

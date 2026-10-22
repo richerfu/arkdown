@@ -13,9 +13,9 @@ to the corresponding third-party material.
 
 | Project | Source revision | License | Included upstream files |
 | --- | --- | --- | --- |
-| [OXC (OpenHarmony fork)](https://github.com/ohos-rs/oxc) | `3f2b4b7d5338c10014c973e0db874ec2d3b655db` | MIT | [LICENSE](licenses/oxc/LICENSE), [THIRD-PARTY-LICENSE](licenses/oxc/THIRD-PARTY-LICENSE) |
-| [Rolldown (OpenHarmony fork)](https://github.com/ohos-rs/rolldown) | `63112ceaa35eb24750a09d0ce3ae6f2f8074ed42` | MIT | [LICENSE](licenses/rolldown/LICENSE), [THIRD-PARTY-LICENSE](licenses/rolldown/THIRD-PARTY-LICENSE) |
-| [tsrs](https://github.com/ohos-rs/tsrs) | `4d7e69df3847b5e0e5708b22a3f713082e5e6d02` | Apache-2.0 | [LICENSE](licenses/tsrs/LICENSE), [NOTICE](licenses/tsrs/NOTICE) |
+| [OXC (OpenHarmony fork)](https://github.com/ohos-rs/oxc) | `6d42deb0af488a59c3d2ba06e01fc60d87b86355` | MIT | [LICENSE](licenses/oxc/LICENSE), [THIRD-PARTY-LICENSE](licenses/oxc/THIRD-PARTY-LICENSE) |
+| [Rolldown (OpenHarmony fork)](https://github.com/ohos-rs/rolldown) | `4f27b5fe103e661090848aaaa4f7d3084bc2e49c` | MIT | [LICENSE](licenses/rolldown/LICENSE), [THIRD-PARTY-LICENSE](licenses/rolldown/THIRD-PARTY-LICENSE) |
+| [tsrs](https://github.com/ohos-rs/tsrs) | `a59ee9bdc7d632b6d797711291375e8511674f82` | Apache-2.0 | [LICENSE](licenses/tsrs/LICENSE), [NOTICE](licenses/tsrs/NOTICE) |
 | [hapsigner-rs](https://github.com/harmony-contrib/hapsigner-rs) | `0b4a16ad812d679c28e9d5602f0b0a239f28c719` | MIT | [LICENSE](licenses/hapsigner/LICENSE), [THIRD_PARTY_NOTICES.md](licenses/hapsigner/THIRD_PARTY_NOTICES.md) |
 
 OXC's and Rolldown's upstream third-party notices include their own borrowed

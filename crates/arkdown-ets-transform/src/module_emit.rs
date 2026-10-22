@@ -1,3 +1,4 @@
+use crate::text::JsStrText;
 use oxc_allocator::Vec as ArenaVec;
 use oxc_ast::ast::{
     BindingIdentifier, ExportSpecifier, ImportDeclarationSpecifier, ImportOrExportKind,
@@ -361,7 +362,7 @@ impl LocalExportSplitEmitter {
 impl ModuleStringLiteral {
     pub(super) fn from_string_literal(literal: &StringLiteral<'_>) -> Self {
         Self {
-            value: literal.value.to_string(),
+            value: literal.value.to_owned_text(),
             raw: literal.raw.as_ref().map(ToString::to_string),
         }
     }

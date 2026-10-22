@@ -5,6 +5,7 @@
 //! per-source facts on the transform result instead: the Rolldown adapter can
 //! collect them without filesystem I/O or a JavaScript singleton.
 
+use crate::text::{JsStrText, StaticPropertyNameText};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -221,7 +222,7 @@ impl InsightIntentDecoratorBindingInventory {
                 Statement::ImportDeclaration(import) => {
                     let sdk_source = matches!(
                         import.source.value.as_str(),
-                        INSIGHT_INTENT_DECORATOR_MODULE | ABILITY_KIT_MODULE
+                        Some(INSIGHT_INTENT_DECORATOR_MODULE) | Some(ABILITY_KIT_MODULE)
                     );
                     let Some(specifiers) = &import.specifiers else {
                         continue;
@@ -401,9 +402,9 @@ impl<'p, 'a> StaticValueInventory<'p, 'a> {
         expression: &'p Expression<'a>,
     ) -> Result<StaticValue, StaticValueError> {
         match expression {
-            Expression::StringLiteral(literal) => {
-                Ok(StaticValue::Json(Value::String(literal.value.to_string())))
-            }
+            Expression::StringLiteral(literal) => Ok(StaticValue::Json(Value::String(
+                literal.value.to_owned_text(),
+            ))),
             Expression::NumericLiteral(literal) => {
                 let number = if literal.value.fract() == 0.0
                     && literal.value >= i64::MIN as f64
@@ -431,8 +432,8 @@ impl<'p, 'a> StaticValueInventory<'p, 'a> {
             Expression::TemplateLiteral(template) if template.expressions.is_empty() => template
                 .quasis
                 .first()
-                .and_then(|quasi| quasi.value.cooked.or(Some(quasi.value.raw)))
-                .map(|text| StaticValue::Json(Value::String(text.to_string())))
+                .and_then(|quasi| quasi.value.cooked.or(Some((quasi.value.raw).into())))
+                .map(|text| StaticValue::Json(Value::String(text.to_owned_text())))
                 .ok_or(StaticValueError::Unsupported),
             Expression::ArrayExpression(array) => {
                 let mut values = Vec::with_capacity(array.elements.len());
@@ -469,7 +470,7 @@ impl<'p, 'a> StaticValueInventory<'p, 'a> {
                                 return Err(StaticValueError::Unsupported);
                             };
                             if let StaticValue::Json(value) = self.evaluate(&property.value)? {
-                                values.insert(name.into_owned(), value);
+                                values.insert(name.to_owned_text(), value);
                             }
                         }
                         ObjectPropertyKind::SpreadProperty(spread) => {
@@ -503,7 +504,7 @@ impl<'p, 'a> StaticValueInventory<'p, 'a> {
             }
             Expression::ComputedMemberExpression(member) => member
                 .static_property_name()
-                .map(|name| name.to_string())
+                .map(|name| name.to_owned_text())
                 .ok_or(StaticValueError::Unsupported)
                 .and_then(|name| Self::enum_value(&name)),
             Expression::ParenthesizedExpression(expression) => {
@@ -811,7 +812,10 @@ impl<'a> InsightIntentDecoratorProcessor<'a> {
                 _ => None,
             };
             if let Some(name) = name {
-                Self::record_unique(&mut self.metadata.obfuscation_property_names, name.as_ref());
+                Self::record_unique(
+                    &mut self.metadata.obfuscation_property_names,
+                    name.as_str_or_empty(),
+                );
             }
         }
     }
@@ -834,7 +838,10 @@ impl<'a> InsightIntentDecoratorProcessor<'a> {
                 _ => None,
             };
             if let Some(name) = name {
-                Self::record_unique(&mut self.metadata.obfuscation_property_names, name.as_ref());
+                Self::record_unique(
+                    &mut self.metadata.obfuscation_property_names,
+                    name.as_str_or_empty(),
+                );
             }
         }
     }
@@ -1293,7 +1300,7 @@ impl<'a> InsightIntentDecoratorProcessor<'a> {
                 method
                     .key
                     .static_name()
-                    .map(|name| name.into_owned())
+                    .map(|name| name.to_owned_text())
                     .unwrap_or_default(),
             ),
         );
@@ -1796,7 +1803,7 @@ impl<'a> InsightIntentDecoratorProcessor<'a> {
         &self,
         property: &PropertyDefinition<'a>,
     ) -> Option<InsightIntentClassProperty> {
-        let name = property.key.static_name()?.into_owned();
+        let name = property.key.static_name()?.to_owned_text();
         let (schema_type, referenced_name) = property
             .type_annotation
             .as_deref()
@@ -2066,7 +2073,10 @@ impl<'a> InsightIntentDecoratorProcessor<'a> {
     fn class_entity_id(&self, elements: &[ClassElement<'a>]) -> Option<String> {
         elements.iter().find_map(|element| match element {
             ClassElement::PropertyDefinition(property)
-                if property.key.static_name().as_deref() == Some("entityId") =>
+                if property
+                    .key
+                    .static_name()
+                    .is_some_and(|name| name.as_str() == Some("entityId")) =>
             {
                 self.string_initializer(property)
             }
@@ -2077,7 +2087,10 @@ impl<'a> InsightIntentDecoratorProcessor<'a> {
     fn struct_entity_id(&self, elements: &[StructElement<'a>]) -> Option<String> {
         elements.iter().find_map(|element| match element {
             StructElement::PropertyDefinition(property)
-                if property.key.static_name().as_deref() == Some("entityId") =>
+                if property
+                    .key
+                    .static_name()
+                    .is_some_and(|name| name.as_str() == Some("entityId")) =>
             {
                 self.string_initializer(property)
             }
@@ -2088,7 +2101,7 @@ impl<'a> InsightIntentDecoratorProcessor<'a> {
     fn string_initializer(&self, property: &PropertyDefinition<'a>) -> Option<String> {
         let expression = property.value.as_ref()?;
         match expression {
-            Expression::StringLiteral(literal) => Some(literal.value.to_string()),
+            Expression::StringLiteral(literal) => Some(literal.value.to_owned_text()),
             Expression::Identifier(identifier) => self
                 .static_values
                 .get(identifier.name.as_str())

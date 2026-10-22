@@ -1,3 +1,4 @@
+use crate::text::JsStrText;
 use rustc_hash::FxHashSet;
 
 use oxc_allocator::{Allocator, GetAllocator, Vec as OxcVec};
@@ -91,7 +92,7 @@ struct StaticArktsModuleRequestInventory {
 impl StaticArktsModuleRequestInventory {
     fn push(&mut self, source: &StringLiteral<'_>, dynamic: bool) {
         let request = StaticArktsModuleRequest {
-            specifier: source.value.to_string(),
+            specifier: source.value.to_owned_text(),
             dynamic,
         };
         if self.seen.insert(request.clone()) {

@@ -113,7 +113,7 @@ impl<'a> HvigorJsonParser<'a> {
         let allocator = Allocator::default();
         let parsed = Parser::new(&allocator, &wrapped, SourceType::ts().with_module(true)).parse();
         let line_index = HvigorJsonLineIndex::new(&wrapped);
-        if parsed.panicked || !parsed.diagnostics.is_empty() {
+        if parsed.fatal_error || !parsed.diagnostics.is_empty() {
             let (message, offset) = parsed.diagnostics.first().map_or_else(
                 || ("OXC parser stopped unexpectedly".to_string(), 0),
                 |diagnostic| {
@@ -191,7 +191,7 @@ impl<'a> HvigorJsonEvaluator<'a> {
                 })
             }
             Expression::StringLiteral(literal) => Ok(HvigorJsonBridgeValue::String {
-                value: literal.value.to_string(),
+                value: literal.value.as_str().unwrap_or_default().to_string(),
                 location: self.primitive_location(literal.span),
             }),
             Expression::NumericLiteral(literal) => Ok(HvigorJsonBridgeValue::Number {
@@ -249,7 +249,9 @@ impl<'a> HvigorJsonEvaluator<'a> {
     fn property_name(&self, key: &PropertyKey<'_>) -> Result<String, HvigorJsonParseError> {
         match key {
             PropertyKey::StaticIdentifier(identifier) => Ok(identifier.name.to_string()),
-            PropertyKey::StringLiteral(literal) => Ok(literal.value.to_string()),
+            PropertyKey::StringLiteral(literal) => {
+                Ok(literal.value.as_str().unwrap_or_default().to_string())
+            }
             PropertyKey::NumericLiteral(literal) => Ok(Self::number_text(literal.value)),
             _ => Err(HvigorJsonParseError::UnsupportedPropertyName {
                 snippet: self.source_text(key.span()),

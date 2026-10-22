@@ -414,9 +414,11 @@ impl<'a> HarSourceDeclaration<'a> {
                             oxc_ast::ast::PropertyKey::StaticIdentifier(identifier) => {
                                 identifier.name.as_str().to_string()
                             }
-                            oxc_ast::ast::PropertyKey::StringLiteral(literal) => {
-                                literal.value.as_str().to_string()
-                            }
+                            oxc_ast::ast::PropertyKey::StringLiteral(literal) => literal
+                                .value
+                                .as_str()
+                                .map(str::to_owned)
+                                .unwrap_or_default(),
                             other => source[other.span()].trim().to_string(),
                         };
                         out.push_str(&key);

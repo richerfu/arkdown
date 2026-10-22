@@ -2,6 +2,7 @@
 
 use super::builder_emit::BuilderParamProxyObjectEmitter;
 use super::*;
+use crate::text::StaticPropertyNameText;
 
 /// Extracted representation of a leaf component call and its attribute chain.
 pub(super) struct LeafComponent<'a> {
@@ -104,7 +105,7 @@ impl<'a> StateStylesAttributeList<'a> {
                 return Err(BuildLoweringError::InvalidStateStyles);
             };
             states.push(StateStyle {
-                name: name.into_owned(),
+                name: name.to_owned_text(),
                 attrs: Self::state_attributes(&property.value, styles, context)?,
             });
         }
@@ -822,11 +823,9 @@ impl<'a, 'ctx> AttributeBindingArgumentEmitter<'a, 'ctx> {
                 let ObjectPropertyKind::ObjectProperty(property) = property else {
                     return self.plain_object_property(property, allocator);
                 };
-                if property
-                    .key
-                    .static_name()
-                    .is_some_and(|name| name == runtime_names.custom_dialog_controller_builder)
-                {
+                if property.key.static_name().is_some_and(|name| {
+                    name.as_str() == Some(runtime_names.custom_dialog_controller_builder.as_str())
+                }) {
                     return ObjectPropertyKind::new_object_property(
                         property.span,
                         property.kind,
@@ -1082,7 +1081,7 @@ impl<'a, 'ctx> AttributeBindingArgumentEmitter<'a, 'ctx> {
                 if !self
                     .context
                     .runtime_names()
-                    .is_builder_object_property_name(property_name.as_ref())
+                    .is_builder_object_property_name(property_name.as_str_or_empty())
                 {
                     return self.plain_regular_object_property(property, allocator);
                 }
@@ -1490,15 +1489,15 @@ impl<'a, 'ctx> CreateArgumentEmitter<'a, 'ctx> {
                 return false;
             };
             property.key.static_name().is_some_and(|name| {
-                (self
-                    .context
-                    .is_component_double_dollar_property_name(self.component_name, name.as_ref())
-                    && DoubleDollarBindingEmitter::new(self.context)
-                        .updated_expression(&property.value, allocator)
-                        .is_some())
+                (self.context.is_component_double_dollar_property_name(
+                    self.component_name,
+                    name.as_str_or_empty(),
+                ) && DoubleDollarBindingEmitter::new(self.context)
+                    .updated_expression(&property.value, allocator)
+                    .is_some())
                     || (self.context.is_component_double_exclamation_property(
                         self.component_name,
-                        name.as_ref(),
+                        name.as_str_or_empty(),
                     ) && DoubleExclamationBindingEmitter::new(self.context)
                         .updated_expression(&property.value, allocator)
                         .is_some())
@@ -1521,7 +1520,7 @@ impl<'a, 'ctx> CreateArgumentEmitter<'a, 'ctx> {
             };
             if self.context.is_component_double_exclamation_property(
                 self.component_name,
-                property_name.as_ref(),
+                property_name.as_str_or_empty(),
             ) {
                 if let Some(value) = DoubleExclamationBindingEmitter::new(self.context)
                     .updated_expression(&property.value, allocator)
@@ -1538,7 +1537,7 @@ impl<'a, 'ctx> CreateArgumentEmitter<'a, 'ctx> {
                     ));
                     properties.push(
                         DoubleExclamationBindingEmitter::new(self.context).change_property(
-                            property_name.as_ref(),
+                            property_name.as_str_or_empty(),
                             value,
                             allocator,
                         ),
@@ -1548,7 +1547,7 @@ impl<'a, 'ctx> CreateArgumentEmitter<'a, 'ctx> {
             }
             if self.context.is_component_double_dollar_property_name(
                 self.component_name,
-                property_name.as_ref(),
+                property_name.as_str_or_empty(),
             ) {
                 if let Some(value) = DoubleDollarBindingEmitter::new(self.context)
                     .value_change_object(&property.value, allocator)
@@ -1570,7 +1569,7 @@ impl<'a, 'ctx> CreateArgumentEmitter<'a, 'ctx> {
                 && self
                     .context
                     .runtime_names()
-                    .is_builder_object_property_name(property_name.as_ref())
+                    .is_builder_object_property_name(property_name.as_str_or_empty())
             {
                 let value = attribute_emitter
                     .object_property_builder_value(&property.value, allocator)

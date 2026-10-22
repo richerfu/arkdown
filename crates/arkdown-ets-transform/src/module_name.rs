@@ -1,3 +1,4 @@
+use crate::text::JsStrText;
 use oxc_ast::ast::ModuleExportName;
 
 pub(crate) struct ModuleExportNameText<'a, 'b> {
@@ -13,7 +14,7 @@ impl<'a, 'b> ModuleExportNameText<'a, 'b> {
         match self.name {
             ModuleExportName::IdentifierName(identifier) => identifier.name.to_string(),
             ModuleExportName::IdentifierReference(identifier) => identifier.name.to_string(),
-            ModuleExportName::StringLiteral(literal) => literal.value.to_string(),
+            ModuleExportName::StringLiteral(literal) => literal.value.to_owned_text(),
         }
     }
 }

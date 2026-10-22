@@ -1,3 +1,4 @@
+use crate::text::JsStrText;
 use oxc_allocator::{Allocator, ArenaBox, CloneIn, GetAllocator, Vec as OxcVec};
 use oxc_ast::ast::{
     Argument, ArkUIComponentExpression, ArrowFunctionBody, AssignmentTarget, BindingPattern,
@@ -356,7 +357,9 @@ impl<'a, 'ast, 'b> ReusableV2CustomComponentAstEmitter<'a, 'ast, 'b> {
                 property
                     .key
                     .static_name()
-                    .is_some_and(|name| name == self.context.runtime_names().reuse_id)
+                    .is_some_and(|name| {
+                        name.as_str() == Some(self.context.runtime_names().reuse_id.as_str())
+                    })
                     .then_some(&property.value)
             })
         });
@@ -2296,7 +2299,7 @@ impl<'a, 'ast> CustomComponentObjectEmitter<'a, 'ast> {
     fn property_key_name(key: &PropertyKey<'_>) -> Option<String> {
         match key {
             PropertyKey::StaticIdentifier(identifier) => Some(identifier.name.to_string()),
-            PropertyKey::StringLiteral(literal) => Some(literal.value.to_string()),
+            PropertyKey::StringLiteral(literal) => Some(literal.value.to_owned_text()),
             _ => None,
         }
     }
