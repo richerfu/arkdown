@@ -254,6 +254,20 @@ for lint, the Linux/macOS/Windows Rust and native integration checks, and the
 platform package checks. Strict Hvigor parity remains a local test using the
 DevEco-bundled `hvigorw` executable, as described above.
 
+### Release
+
+Update `packages/arkdown/package.json` and `packages/arkdown/Cargo.toml`, then
+run `pnpm exec napi version` from `packages/arkdown` to synchronize the
+generated platform manifests. A push to `main` whose head commit starts with
+`chore(release): publish` builds, tests, and publishes all four npm packages
+from the `CI` workflow. Prereleases and dry runs use the `CI` workflow dispatch
+inputs `publish_package`, `dist_tag`, `version`, and `dry_run`.
+
+The npm trusted publisher for `@ohos-rs/arkdown` and each platform package must
+name `publish.yml` as the workflow file. Publishing stays in that file;
+`npm publish` must not move to a reusable `workflow_call` file because npm
+validates the calling workflow name.
+
 The ArkTS checker is tsrs, fetched by Cargo from `ohos-rs/tsrs` with a full
 Git `rev` in the workspace dependencies and `Cargo.lock`. Cargo links
 `tsrs_api`, `tsrs_core` and `tsrs_vfs` directly into the N-API binding with the

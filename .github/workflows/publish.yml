@@ -1,65 +1,75 @@
-name: Publish arkdown npm package
+name: CI
 
 on:
-  workflow_call:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
     inputs:
-      publish:
-        description: 'Publish assembled platform packages to npm'
+      publish_package:
+        description: 'Publish packages/arkdown after all CI and platform checks pass'
         required: false
         default: false
         type: boolean
       dist_tag:
-        description: 'npm dist-tag; empty derives it from the package version (beta, rc, latest, ...)'
+        description: 'npm dist-tag for a prerelease (beta, rc, next, ...); empty derives it from the version'
         required: false
         default: ''
         type: string
-    secrets:
-      NPM_TOKEN:
+      version:
+        description: 'Expected packages/arkdown version; leave empty to skip the check'
         required: false
+        default: ''
+        type: string
+      dry_run:
+        description: 'Build and validate npm packages without uploading'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   APP_NAME: arkdown
   CARGO_BUILD_JOBS: '2'
   CARGO_INCREMENTAL: '0'
+  CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
   CARGO_PROFILE_DEV_DEBUG: '0'
   CARGO_PROFILE_TEST_DEBUG: '0'
-  CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
   CARGO_TERM_COLOR: always
   DEBUG: napi:*
+  MACOSX_DEPLOYMENT_TARGET: '10.13'
+  OHOS_SDK_VERSION: '6.0'
+  RUST_BACKTRACE: '1'
+  RUST_TOOLCHAIN: '1.99.0'
   LINUX_BUILD_DEPENDENCIES: >-
     build-essential ca-certificates clang cmake libssl-dev ninja-build perl
     pkg-config python3
-  MACOSX_DEPLOYMENT_TARGET: '10.13'
-  PNPM_VERSION: '10.12.1'
-  RUST_BACKTRACE: '1'
-  RUST_TOOLCHAIN: '1.99.0'
-
-defaults:
-  run:
-    working-directory: packages/arkdown
 
 jobs:
-  verify:
-    name: Verify package environment
+  quality:
+    name: Lint and format
     runs-on: ubuntu-latest
-
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Install Linux build dependencies
-        run: |
-          sudo apt-get update
-          read -r -a build_dependencies <<< "$LINUX_BUILD_DEPENDENCIES"
-          sudo apt-get install --no-install-recommends --yes "${build_dependencies[@]}"
+      - name: Validate GitHub Actions workflows
+        uses: docker://rhysd/actionlint:1.7.12
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: ${{ env.PNPM_VERSION }}
+          package_json_file: packages/arkdown/package.json
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -68,55 +78,209 @@ jobs:
           cache: pnpm
           cache-dependency-path: packages/arkdown/pnpm-lock.yaml
 
+      - name: Install package dependencies
+        working-directory: packages/arkdown
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Rust formatting tools
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt
+
+      - name: Check Rust formatting
+        run: cargo fmt --all --check
+
+      - name: Lint JavaScript and TypeScript
+        working-directory: packages/arkdown
+        run: pnpm lint
+
+      - name: Check JavaScript and workflow formatting
+        working-directory: packages/arkdown
+        run: pnpm format:check
+
+      - name: Test JavaScript package
+        working-directory: packages/arkdown
+        run: pnpm test
+
+  rust:
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+
+    steps:
+      - name: Enable long paths on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: git config --global core.longpaths true
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          package_json_file: packages/arkdown/package.json
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: packages/arkdown/pnpm-lock.yaml
+
+      - name: Install package dependencies
+        working-directory: packages/arkdown
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          read -r -a build_dependencies <<< "$LINUX_BUILD_DEPENDENCIES"
+          sudo apt-get install --no-install-recommends --yes "${build_dependencies[@]}"
+
+      - name: Setup OpenHarmony SDK
+        id: setup-ohos-sdk
+        uses: openharmony-rs/setup-ohos-sdk@v0.2
+        with:
+          version: ${{ env.OHOS_SDK_VERSION }}
+          components: all
+
+      - name: Configure OpenHarmony SDK environment
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          sdk_home="${{ steps.setup-ohos-sdk.outputs.ohos-base-sdk-home }}"
+          test -n "$sdk_home"
+          test -d "$sdk_home/ets/build-tools/ets-loader"
+          test -x "$sdk_home/toolchains/restool"
+          case "${{ runner.os }}" in
+            Linux) platform_dir="build-linux" ;;
+            macOS) platform_dir="build-mac" ;;
+            *) echo "unsupported SDK host: ${{ runner.os }}" >&2; exit 1 ;;
+          esac
+          es2abc="$sdk_home/ets/build-tools/ets-loader/bin/ark/$platform_dir/bin/es2abc"
+          if [[ ! -x "$es2abc" ]]; then
+            es2abc="$sdk_home/ets/build-tools/ets-loader/bin/ark/build/bin/es2abc"
+          fi
+          test -x "$es2abc"
+          echo "OHOS_BASE_SDK_HOME=$sdk_home" >> "$GITHUB_ENV"
+          echo "OHOS_SDK_HOME=$sdk_home" >> "$GITHUB_ENV"
+
+      - name: Configure OpenHarmony SDK environment on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $sdkHome = '${{ steps.setup-ohos-sdk.outputs.ohos-base-sdk-home }}'
+          if ($sdkHome -match '^/([A-Za-z])(?:/(.*))?$') {
+            $drive = $Matches[1].ToUpperInvariant()
+            $tail = $Matches[2] -replace '/', '\'
+            $sdkHome = "${drive}:\$tail"
+          } elseif ($sdkHome.StartsWith('/')) {
+            $cygpath = Get-Command cygpath.exe -ErrorAction SilentlyContinue
+            if (-not $cygpath) {
+              throw "Cannot convert MSYS SDK path without cygpath.exe: $sdkHome"
+            }
+            $sdkHome = (& $cygpath.Source -w $sdkHome).Trim()
+          }
+          if (-not $sdkHome) {
+            throw 'OpenHarmony SDK action returned an empty host SDK path'
+          }
+          if (-not (Test-Path -PathType Container (Join-Path $sdkHome 'ets/build-tools/ets-loader'))) {
+            throw "Missing ets-loader under $sdkHome"
+          }
+          if (-not (Test-Path -PathType Leaf (Join-Path $sdkHome 'toolchains/restool.exe'))) {
+            throw "Missing restool.exe under $sdkHome"
+          }
+          $es2abc = Join-Path $sdkHome 'ets/build-tools/ets-loader/bin/ark/build-win/bin/es2abc.exe'
+          if (-not (Test-Path -PathType Leaf $es2abc)) {
+            $es2abc = Join-Path $sdkHome 'ets/build-tools/ets-loader/bin/ark/build/bin/es2abc.exe'
+          }
+          if (-not (Test-Path -PathType Leaf $es2abc)) {
+            throw "Missing es2abc.exe under $sdkHome"
+          }
+          "OHOS_BASE_SDK_HOME=$sdkHome" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "OHOS_SDK_HOME=$sdkHome" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Install local SDK checker mocks
+        run: node packages/arkdown/scripts/prepare-test-sdk.cjs
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy, rustfmt
 
-      - name: Cache Cargo
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-rust-${{ env.RUST_TOOLCHAIN }}-verify-cargo-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-rust-${{ env.RUST_TOOLCHAIN }}-verify-cargo-
-
-      - name: Install package dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Verify toolchain and package manager
+      - name: Verify Rust environment
         run: |
           rustc --version --verbose
           cargo --version
           cargo fmt --version
           cargo clippy --version
-          node --version
-          pnpm --version
 
-      - name: Check Rust formatting
-        working-directory: .
-        run: cargo fmt --all --check
+      - name: Cache cargo
+        id: cargo-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_TOOLCHAIN }}-ci-v3-${{ hashFiles('Cargo.lock') }}-${{ hashFiles('Cargo.toml', 'crates/**', 'packages/arkdown/Cargo.toml', 'packages/arkdown/build.rs', 'packages/arkdown/src/**', 'packages/arkdown/tests/**', 'tests/**', '.cargo/**', '.github/workflows/publish.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_TOOLCHAIN }}-ci-v3-${{ hashFiles('Cargo.lock') }}-
+            ${{ runner.os }}-${{ runner.arch }}-rust-${{ env.RUST_TOOLCHAIN }}-ci-v3-
 
-      - name: Clippy NAPI package
-        run: cargo clippy --locked -p arkdown-napi --all-targets -- -D warnings
+      - name: Clippy workspace and all test targets
+        run: cargo clippy --locked --workspace --all-targets --keep-going -- -D warnings
 
-      - name: Lint JavaScript and TypeScript
-        run: pnpm lint
+      - name: Test workspace libraries and integration tests
+        run: cargo test --locked --workspace --lib --tests --no-fail-fast
+        env:
+          ARKDOWN_PARITY_RUN: ''
 
-      - name: Check package formatting
-        run: pnpm format:check
+      - name: Build native binding
+        working-directory: packages/arkdown
+        run: pnpm exec napi build --platform -- --locked
 
-      - name: Test JavaScript package
-        run: pnpm test
+      - name: Test native binding and JavaScript CLI
+        working-directory: packages/arkdown
+        run: pnpm test && pnpm smoke && pnpm test:e2e
+        shell: bash
+        env:
+          ARKDOWN_NATIVE_CHECKER_E2E: '1'
+          ARKDOWN_NATIVE_PLUGIN_E2E: '1'
+          ARKDOWN_NATIVE_CACHE_E2E: '1'
+          ARKDOWN_NATIVE_LOG_E2E: '1'
+          ARKDOWN_NATIVE_WATCH_E2E: '1'
+
+      - name: Save Cargo cache after checks
+        timeout-minutes: 15
+        continue-on-error: true
+        if: >-
+          !cancelled() && steps.cargo-cache.outputs.cache-primary-key != '' &&
+          steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   build:
     name: Build ${{ matrix.settings.target }}
-    needs: verify
+    needs:
+      - quality
+      - rust
     runs-on: ${{ matrix.settings.host }}
     strategy:
       fail-fast: false
@@ -131,7 +295,9 @@ jobs:
           - host: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             build: pnpm exec napi build --platform --release --target x86_64-unknown-linux-gnu --use-napi-cross -- --locked
-
+    defaults:
+      run:
+        working-directory: packages/arkdown
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -151,7 +317,7 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: ${{ env.PNPM_VERSION }}
+          package_json_file: packages/arkdown/package.json
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -214,7 +380,9 @@ jobs:
         node:
           - '20'
           - '22'
-
+    defaults:
+      run:
+        working-directory: packages/arkdown
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -227,7 +395,7 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: ${{ env.PNPM_VERSION }}
+          package_json_file: packages/arkdown/package.json
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -260,7 +428,9 @@ jobs:
         node:
           - '20'
           - '22'
-
+    defaults:
+      run:
+        working-directory: packages/arkdown
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -268,7 +438,7 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: ${{ env.PNPM_VERSION }}
+          package_json_file: packages/arkdown/package.json
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -295,11 +465,20 @@ jobs:
     needs:
       - test-macos-windows
       - test-linux
+    if: >-
+      ${{
+        (github.event_name == 'push' &&
+          github.ref == 'refs/heads/main' &&
+          startsWith(github.event.head_commit.message, 'chore(release): publish')) ||
+        (github.event_name == 'workflow_dispatch' && inputs.publish_package)
+      }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write
-
+    defaults:
+      run:
+        working-directory: packages/arkdown
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -307,7 +486,7 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: ${{ env.PNPM_VERSION }}
+          package_json_file: packages/arkdown/package.json
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -326,6 +505,28 @@ jobs:
           npm --version
           pnpm --version
           pnpm exec napi --version
+
+      - name: Validate version and dist-tag
+        env:
+          EXPECTED_VERSION: ${{ inputs.version }}
+          DIST_TAG: ${{ inputs.dist_tag }}
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./package.json').version")
+          if [ -n "$EXPECTED_VERSION" ] && [ "$version" != "$EXPECTED_VERSION" ]; then
+            echo "package version '$version' does not match expected '$EXPECTED_VERSION'" >&2
+            exit 1
+          fi
+          if [ -n "$DIST_TAG" ]; then
+            if [[ "$version" != *-* ]]; then
+              echo "version '$version' is not a prerelease; use the stable publish flow" >&2
+              exit 1
+            fi
+            if [[ ! "$DIST_TAG" =~ ^[a-z0-9][a-z0-9._-]*$ ]] || [ "$DIST_TAG" = "latest" ]; then
+              echo "invalid prerelease dist-tag '$DIST_TAG'" >&2
+              exit 1
+            fi
+          fi
 
       - name: Download all bindings
         uses: actions/download-artifact@v7
@@ -357,7 +558,7 @@ jobs:
         run: ls -R npm
 
       - name: Publish to npm
-        if: inputs.publish
+        if: ${{ github.event_name != 'workflow_dispatch' || !inputs.dry_run }}
         run: |
           if [ -n "${REQUESTED_DIST_TAG}" ]; then
             NPM_TAG="${REQUESTED_DIST_TAG}"
@@ -367,9 +568,7 @@ jobs:
           echo "Publishing with npm dist-tag: ${NPM_TAG}"
           export npm_config_tag="${NPM_TAG}"
           export NPM_CONFIG_PROVENANCE=true
-          for child_directory in ./npm/darwin-arm64 ./npm/linux-x64-gnu ./npm/win32-x64-msvc; do
-            npm publish "$child_directory" --ignore-scripts --provenance --access public --tag "${NPM_TAG}"
-          done
+          pnpm exec napi pre-publish --no-gh-release -t npm
           npm publish --ignore-scripts --provenance --access public --tag "${NPM_TAG}"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
