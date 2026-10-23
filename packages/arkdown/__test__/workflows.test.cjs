@@ -51,10 +51,24 @@ test('every workflow job uses a GitHub-hosted runner or a checked local workflow
   }
 })
 
-test('CI packaging waits for lint and the Rust platform matrix', () => {
+test('CI builds, tests, and publishes from one workflow', () => {
   const root = path.resolve(__dirname, '../../..')
-  const workflow = yaml.load(fs.readFileSync(path.join(root, '.github/workflows/ci.yml'), 'utf8'))
-  assert.deepEqual(workflow.jobs.package.needs, ['quality', 'rust'])
-  assert.equal(workflow.jobs.package.uses, './.github/workflows/publish.yml')
-  assert.equal(workflow.jobs.package.if, undefined)
+  const workflowPath = path.join(root, '.github/workflows/publish.yml')
+  const workflow = yaml.load(fs.readFileSync(workflowPath, 'utf8'))
+
+  assert.equal(workflow.jobs.package, undefined)
+  assert.deepEqual(workflow.jobs.build.needs, ['quality', 'rust'])
+  assert.equal(workflow.jobs['test-macos-windows'].needs, 'build')
+  assert.equal(workflow.jobs['test-linux'].needs, 'build')
+  assert.deepEqual(workflow.jobs.publish.needs, ['test-macos-windows', 'test-linux'])
+  assert.equal(workflow.jobs.publish.uses, undefined)
+  assert.equal(workflow.jobs.publish.permissions['id-token'], 'write')
+
+  const publishStep = workflow.jobs.publish.steps.find((step) => step.name === 'Publish to npm')
+  assert.match(publishStep.run, /napi pre-publish --no-gh-release -t npm\n/)
+  assert.doesNotMatch(publishStep.run, /--skip-optional-publish/)
+
+  for (const removed of ['ci.yml', 'publish-beta.yml']) {
+    assert.equal(fs.existsSync(path.join(root, '.github/workflows', removed)), false, removed)
+  }
 })
