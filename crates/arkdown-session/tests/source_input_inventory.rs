@@ -16,7 +16,11 @@ struct SourceProject {
 impl SourceProject {
     fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
+        // Match ArkdownConfigLoader's normalized input boundary: std canonicalize
+        // retains Windows verbatim prefixes while snapshot identities use AbsPath.
+        let root = arkdown_path::AbsPath::canonicalize(temp.path())
+            .unwrap()
+            .into_path_buf();
         let loader = root.join("sdk/ets/build-tools/ets-loader");
         std::fs::create_dir_all(&loader).unwrap();
         let config = serde_json::from_value(serde_json::json!({
