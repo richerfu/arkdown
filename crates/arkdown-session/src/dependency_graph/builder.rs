@@ -20,6 +20,7 @@ use crate::dependency_graph::snapshot::{
 };
 use crate::package::snapshot::PackageSnapshot;
 use crate::paths::ModulePathLayout;
+use crate::source_inputs::PackageSourceInputs;
 
 /// Build-session inventory for dependency package and module-profile snapshots.
 ///
@@ -372,20 +373,23 @@ impl DependencySnapshotInventory {
             }
         }
 
+        let dynamic_import_entry_file = Self::dynamic_import_entry_file(package_root, package);
+        let other_compile_entry_file = Self::other_compile_entry_file(package_root, package);
+        let extra_importee_source_files = self.read_extra_importee_source_files(
+            package,
+            package_root,
+            project_root,
+            package_manager,
+        );
         let inputs = Arc::new(DependencyCompileInputSnapshot {
             ability_source_files: ability_source_files.into_iter().collect(),
             worker_source_files: worker_source_files.into_iter().collect(),
             insight_intent_source_files: insight_intent_source_files.into_iter().collect(),
-            dynamic_import_entry_file: Self::dynamic_import_entry_file(package_root, package),
-            other_compile_entry_file: Self::other_compile_entry_file(package_root, package),
+            dynamic_import_entry_file,
+            other_compile_entry_file,
             other_compile_source_files: Arc::from(other_compile_source_files),
             source_inventory_files,
-            extra_importee_source_files: self.read_extra_importee_source_files(
-                package,
-                package_root,
-                project_root,
-                package_manager,
-            ),
+            extra_importee_source_files,
             router_map_profile: module_profile
                 .and_then(|profile| profile.router_map.as_deref())
                 .and_then(|reference| reference.strip_prefix("$profile:"))
@@ -485,41 +489,48 @@ impl DependencySnapshotInventory {
         if let Some(files) = self.source_files.get(package_root) {
             return Arc::clone(files);
         }
-        let mut files = Vec::new();
+        let mut files = std::collections::BTreeSet::new();
         if !package_root.is_dir() {
-            let files = Arc::from(files);
+            let files = Arc::from([]);
             self.source_files
                 .insert(package_root.to_path_buf(), Arc::clone(&files));
             return files;
         }
-        for entry in walkdir::WalkDir::new(package_root)
-            .follow_links(false)
-            .into_iter()
-            .filter_entry(|entry| {
-                entry.path() == package_root
-                    || !matches!(
-                        entry.path().file_name().and_then(|value| value.to_str()),
-                        Some(".git" | "build" | "out" | "node_modules" | "oh_modules")
-                    )
-            })
-        {
-            let Ok(entry) = entry else {
-                continue;
-            };
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let path = self.source_inventory_paths.canonical_file(&entry);
-            if HvigorSourceFileFilter::new(&path).is_ignored_macos_metadata() {
-                continue;
-            }
-            let extension = path.extension().and_then(|extension| extension.to_str());
-            if extension.is_some_and(crate::source_store::is_source_inventory_ext) {
-                files.push(path);
+        let inputs = PackageSourceInputs::new(
+            package_root,
+            self.packages
+                .get(package_root)
+                .and_then(|package| package.as_deref()),
+        );
+        for root in inputs.roots.into_iter().filter(|root| root.is_dir()) {
+            for entry in walkdir::WalkDir::new(&root)
+                .follow_links(false)
+                .into_iter()
+                .filter_entry(|entry| {
+                    entry.path() == root
+                        || !matches!(
+                            entry.path().file_name().and_then(|value| value.to_str()),
+                            Some(".git" | "build" | "out" | "node_modules" | "oh_modules")
+                        )
+                })
+            {
+                let Ok(entry) = entry else {
+                    continue;
+                };
+                if !entry.file_type().is_file() {
+                    continue;
+                }
+                let path = self.source_inventory_paths.canonical_file(&entry);
+                if HvigorSourceFileFilter::new(&path).is_ignored_macos_metadata() {
+                    continue;
+                }
+                let extension = path.extension().and_then(|extension| extension.to_str());
+                if extension.is_some_and(crate::source_store::is_source_inventory_ext) {
+                    files.insert(path);
+                }
             }
         }
-        files.sort_unstable();
-        let files = Arc::from(files);
+        let files = Arc::from(files.into_iter().collect::<Vec<_>>());
         self.source_files
             .insert(package_root.to_path_buf(), Arc::clone(&files));
         files
@@ -559,14 +570,13 @@ impl DependencySnapshotInventory {
                 Self::other_compile_entry_file(&dependency_root, dependency_package.as_deref())
             } else {
                 let base = canonicalize_or_owned(&dependency_root.join(subpath));
-                let inventory = self.read_source_inventory_files(&dependency_root);
                 std::iter::once(base.clone())
                     .chain(
                         ["ets", "ts", "js"]
                             .into_iter()
                             .map(|extension| base.with_extension(extension)),
                     )
-                    .find(|candidate| inventory.iter().any(|path| path == candidate))
+                    .find(|candidate| candidate.is_file())
             };
             if let Some(path) = path {
                 resolved.insert(importee.to_string(), path);

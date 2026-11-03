@@ -1,7 +1,7 @@
 //! [`BuildSessionBuilder`] — orchestrates all startup reads and constructs
 //! the immutable [`BuildSession`].
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -11,8 +11,7 @@ use arkdown_config::build_profile::BuildOptionProfileInventory;
 use arkdown_config::ArkdownCustomConfigLoader;
 use arkdown_core::{ArkdownConfig, ArktsLanguageVersion};
 
-use crate::dependency_graph::snapshot::DependencyNodeType;
-use crate::fingerprint::{FingerprintError, InputFingerprintSet};
+use crate::fingerprint::{FingerprintError, InputFingerprintRequest, InputFingerprintSet};
 use crate::paths::PathResolver;
 use crate::profiles::store::{ProfileStore, ProfileStoreError};
 use crate::project::snapshot::{ProjectSnapshot, ProjectSnapshotError};
@@ -154,11 +153,11 @@ impl BuildSessionBuilder {
         // Phase 7: Capture source contents once. Transform snapshots and
         // built-in Rolldown adapters borrow this immutable inventory instead
         // of walking or re-reading project/package source trees.
-        let source_inventory_roots = self.source_inventory_roots(&project, &sdk);
-        let dependency_source_inventories = self.dependency_source_inventories(&project);
-        let source_store = SourceStore::discover_with_preinventoried_roots(
+        let source_inventory_roots = self.sdk_source_inventory_roots(&sdk);
+        let source_store = SourceStore::discover_project(
+            &project,
             &source_inventory_roots,
-            &dependency_source_inventories,
+            self.arkts_language_version,
         )
         .map_err(|source| BuildSessionError::Io {
             path: self.config.project_root.clone(),
@@ -166,14 +165,15 @@ impl BuildSessionBuilder {
         })?;
 
         // Phase 8: Build input fingerprints.
-        let fingerprints = InputFingerprintSet::build_with_custom_config_and_arkts_version(
-            &self.config,
-            &project,
-            &profiles,
-            &sdk,
-            &custom_config,
-            self.arkts_language_version,
-        )?;
+        let fingerprints = InputFingerprintSet::build(InputFingerprintRequest {
+            config: &self.config,
+            project: &project,
+            profiles: &profiles,
+            sdk: &sdk,
+            custom_config: &custom_config,
+            arkts_language_version: self.arkts_language_version,
+            source_store: &source_store,
+        })?;
 
         Ok(BuildSession {
             watch_inputs: Arc::new(WatchPlanInput::from_project(
@@ -192,13 +192,8 @@ impl BuildSessionBuilder {
         })
     }
 
-    fn source_inventory_roots(&self, project: &ProjectSnapshot, sdk: &SdkSnapshot) -> Vec<PathBuf> {
+    fn sdk_source_inventory_roots(&self, sdk: &SdkSnapshot) -> Vec<PathBuf> {
         let mut roots = BTreeSet::new();
-        for module in project.modules.values() {
-            // Capture every source set below `src/` once. The active target
-            // overlay is selected later without another directory walk.
-            roots.insert(module.root.join("src"));
-        }
         // `ets_checker.ts::serviceChecker` and the source transform both use
         // ets-loader's `globalModulePaths` as their SDK declaration module
         // environment. Capture it for every build mode so the OXC checker and
@@ -215,32 +210,5 @@ impl BuildSessionBuilder {
             roots.extend(sdk.arkguard_source_roots());
         }
         roots.into_iter().collect()
-    }
-
-    fn dependency_source_inventories(
-        &self,
-        project: &ProjectSnapshot,
-    ) -> Vec<(PathBuf, Arc<[PathBuf]>)> {
-        let mut inventories = BTreeMap::new();
-        for graph in project.dependency_graphs.values() {
-            for node in graph.nodes.values() {
-                if !matches!(
-                    node.node_type,
-                    DependencyNodeType::SourceHar
-                        | DependencyNodeType::OhpmSource
-                        | DependencyNodeType::IntegratedHsp
-                        | DependencyNodeType::NativeSo
-                ) {
-                    continue;
-                }
-                let Some(package_root) = node.package_root.as_ref() else {
-                    continue;
-                };
-                inventories
-                    .entry(package_root.clone())
-                    .or_insert_with(|| Arc::clone(&node.compile_inputs.source_inventory_files));
-            }
-        }
-        inventories.into_iter().collect()
     }
 }

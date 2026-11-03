@@ -21,6 +21,7 @@ use crate::paths::ProjectPathLayout;
 use crate::profiles::store::ProfileStore;
 use crate::project::snapshot::ProjectSnapshot;
 use crate::sdk::snapshot::SdkSnapshot;
+use crate::source_store::{SourceContent, SourceStore};
 
 /// A single content fingerprint (SHA-256 of file content).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -114,56 +115,30 @@ pub struct InputFingerprintSet {
     module_inputs: BTreeMap<String, ModuleInputFingerprints>,
 }
 
-impl InputFingerprintSet {
-    /// Build the fingerprint set from normalized startup snapshots.
-    pub fn build(
-        config: &ArkdownConfig,
-        project: &ProjectSnapshot,
-        profiles: &ProfileStore,
-        sdk: &SdkSnapshot,
-    ) -> Result<Self, FingerprintError> {
-        Self::build_with_custom_config(
-            config,
-            project,
-            profiles,
-            sdk,
-            &ArkdownCustomConfig::default(),
-        )
-    }
+/// The startup source store is authoritative for both source membership and
+/// captured bytes. Fingerprinting must not discover a second source inventory.
+pub struct InputFingerprintRequest<'a> {
+    pub config: &'a ArkdownConfig,
+    pub project: &'a ProjectSnapshot,
+    pub profiles: &'a ProfileStore,
+    pub sdk: &'a SdkSnapshot,
+    pub custom_config: &'a ArkdownCustomConfig,
+    pub arkts_language_version: ArktsLanguageVersion,
+    pub source_store: &'a SourceStore,
+}
 
-    /// Build fingerprints including the selected Arkdown-owned configuration
-    /// file. Its content affects generated BuildProfile constants and bundler
-    /// options, so it belongs in the global configuration fingerprint.
-    pub fn build_with_custom_config(
-        config: &ArkdownConfig,
-        project: &ProjectSnapshot,
-        profiles: &ProfileStore,
-        sdk: &SdkSnapshot,
-        custom_config: &ArkdownCustomConfig,
-    ) -> Result<Self, FingerprintError> {
-        Self::build_with_custom_config_and_arkts_version(
+impl InputFingerprintSet {
+    pub fn build(request: InputFingerprintRequest<'_>) -> Result<Self, FingerprintError> {
+        let InputFingerprintRequest {
             config,
             project,
             profiles,
             sdk,
             custom_config,
-            ArktsLanguageVersion::default(),
-        )
-    }
-
-    /// Build fingerprints including the explicit ArkTS compiler language.
-    ///
-    /// Version selection affects parsing, lowering, emitted source, and ABC
-    /// inputs, so 1.1 and 1.2 builds must never share a configuration cache.
-    pub fn build_with_custom_config_and_arkts_version(
-        config: &ArkdownConfig,
-        project: &ProjectSnapshot,
-        profiles: &ProfileStore,
-        sdk: &SdkSnapshot,
-        custom_config: &ArkdownCustomConfig,
-        arkts_language_version: ArktsLanguageVersion,
-    ) -> Result<Self, FingerprintError> {
-        let project_inputs = ProjectFingerprintInventory::new(project).build()?;
+            arkts_language_version,
+            source_store,
+        } = request;
+        let project_inputs = ProjectFingerprintInventory::new(project, source_store).build()?;
         Ok(Self {
             config: Self::compute_config_hash(
                 config,
@@ -354,13 +329,15 @@ struct ModuleInputPaths {
 #[derive(Debug)]
 struct ProjectFingerprintInventory<'a> {
     project: &'a ProjectSnapshot,
+    source_store: &'a SourceStore,
     paths: FingerprintPathInventory,
 }
 
 impl<'a> ProjectFingerprintInventory<'a> {
-    fn new(project: &'a ProjectSnapshot) -> Self {
+    fn new(project: &'a ProjectSnapshot, source_store: &'a SourceStore) -> Self {
         Self {
             project,
+            source_store,
             paths: FingerprintPathInventory::default(),
         }
     }
@@ -382,7 +359,7 @@ impl<'a> ProjectFingerprintInventory<'a> {
             })
             .cloned()
             .collect::<BTreeSet<_>>();
-        let content = ProjectContentFingerprints::read(all_paths)?;
+        let content = ProjectContentFingerprints::read(all_paths, self.source_store)?;
 
         let mut global_sources = FingerprintBuilder::new("sources", &self.project.root);
         let mut global_resources = FingerprintBuilder::new("resources", &self.project.root);
@@ -422,23 +399,11 @@ impl<'a> ProjectFingerprintInventory<'a> {
             return Ok(ModuleInputPaths::default());
         };
         let mut paths = ModuleInputPaths::default();
-        self.paths
-            .add_source_roots(&mut paths.sources, &module.source_roots)?;
-        let visual_root = module.src_main.join("supervisual");
-        self.paths
-            .add_source_roots(&mut paths.sources, std::slice::from_ref(&visual_root))?;
+        let mut source_roots = vec![module.root.clone()];
         self.paths
             .add_resource_roots(&mut paths.resources, &module.resource_roots)?;
         if let Some(package_path) = &module.package_path {
             paths.dependencies.insert(package_path.clone());
-        }
-        if let Some(package) = module.package.as_deref() {
-            if let Some(exports) = package.package_json.oh_exports.as_deref() {
-                for entry in exports {
-                    self.paths
-                        .add_source_path(&mut paths.sources, &package.root.join(entry))?;
-                }
-            }
         }
         if let Some(module_json_path) = &module.module_json_path {
             paths.dependencies.insert(module_json_path.clone());
@@ -472,32 +437,12 @@ impl<'a> ProjectFingerprintInventory<'a> {
                 }
                 if matches!(
                     node.node_type,
-                    DependencyNodeType::SourceHar | DependencyNodeType::OhpmSource
+                    DependencyNodeType::SourceHar
+                        | DependencyNodeType::OhpmSource
+                        | DependencyNodeType::IntegratedHsp
+                        | DependencyNodeType::NativeSo
                 ) {
-                    self.paths.add_source_roots(
-                        &mut paths.sources,
-                        &[package_root.join("src").join("main")],
-                    )?;
-                    if let Some(package) = &node.package {
-                        for entry in [
-                            package.package_json.main.as_deref(),
-                            package.package_json.types.as_deref(),
-                        ]
-                        .into_iter()
-                        .flatten()
-                        {
-                            self.paths
-                                .add_source_path(&mut paths.sources, &package_root.join(entry))?;
-                        }
-                        if let Some(exports) = package.package_json.oh_exports.as_deref() {
-                            for entry in exports {
-                                self.paths.add_source_path(
-                                    &mut paths.sources,
-                                    &package_root.join(entry),
-                                )?;
-                            }
-                        }
-                    }
+                    source_roots.push(package_root.clone());
                 }
                 if matches!(
                     node.node_type,
@@ -513,6 +458,12 @@ impl<'a> ProjectFingerprintInventory<'a> {
             }
         }
 
+        paths.sources.extend(
+            self.source_store
+                .input_files(&source_roots)
+                .into_iter()
+                .map(|file| file.path.clone()),
+        );
         let app_scope_resources = project_layout.app_scope_resources();
         self.paths
             .add_resource_roots(&mut paths.resources, &[app_scope_resources])?;
@@ -543,35 +494,6 @@ impl FingerprintPathInventory {
             .filter(|path| path.file_name().and_then(|value| value.to_str()) == Some(name))
             .cloned()
             .collect())
-    }
-
-    fn add_source_path(
-        &mut self,
-        output: &mut BTreeSet<PathBuf>,
-        path: &Path,
-    ) -> Result<(), FingerprintError> {
-        if path.is_dir() {
-            return self.add_source_roots(output, &[path.to_path_buf()]);
-        }
-        if path.is_file() && Self::is_source_input(path) {
-            output.insert(path.to_path_buf());
-        }
-        Ok(())
-    }
-
-    fn add_source_roots(
-        &mut self,
-        output: &mut BTreeSet<PathBuf>,
-        roots: &[PathBuf],
-    ) -> Result<(), FingerprintError> {
-        for root in roots {
-            for path in self.files_under(root)?.iter() {
-                if Self::is_source_input(path) {
-                    output.insert(path.clone());
-                }
-            }
-        }
-        Ok(())
     }
 
     fn add_resource_roots(
@@ -628,12 +550,6 @@ impl FingerprintPathInventory {
             Some(".git" | "build" | "out" | "node_modules")
         )
     }
-
-    fn is_source_input(path: &Path) -> bool {
-        path.extension()
-            .and_then(|value| value.to_str())
-            .is_some_and(crate::source_store::is_source_inventory_ext)
-    }
 }
 
 #[derive(Debug)]
@@ -642,12 +558,22 @@ struct ProjectContentFingerprints {
 }
 
 impl ProjectContentFingerprints {
-    fn read(paths: BTreeSet<PathBuf>) -> Result<Self, FingerprintError> {
+    fn read(paths: BTreeSet<PathBuf>, sources: &SourceStore) -> Result<Self, FingerprintError> {
         let paths = paths.into_iter().collect::<Vec<_>>();
         let results = paths
             .par_iter()
             .map(|path| {
-                Fingerprint::of_file(path)
+                let fingerprint = if let Some(file) = sources.source_by_path(path) {
+                    file.cached_content()
+                        .map(|content| match content {
+                            SourceContent::Text(text) => Fingerprint::of_bytes(text.as_bytes()),
+                            SourceContent::Bytes(bytes) => Fingerprint::of_bytes(&bytes),
+                        })
+                        .map_err(std::io::Error::other)
+                } else {
+                    Fingerprint::of_file(path)
+                };
+                fingerprint
                     .map(|fingerprint| (path.clone(), fingerprint))
                     .map_err(|source| FingerprintError::Io {
                         path: path.clone(),

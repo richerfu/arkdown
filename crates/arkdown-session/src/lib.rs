@@ -53,6 +53,7 @@ pub mod sdk_compile_plugin;
 pub mod sdk_schemas;
 pub mod sdk_tools;
 pub mod session;
+mod source_inputs;
 pub mod source_store;
 
 // ---------------------------------------------------------------------------

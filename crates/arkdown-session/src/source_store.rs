@@ -17,7 +17,7 @@
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::Error;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -25,10 +25,13 @@ use std::sync::{Arc, RwLock};
 use std::time::{Instant, UNIX_EPOCH};
 
 use arkdown_path::{canonicalize_or_owned, lexical_normalize, HvigorSourceFileFilter};
+use oxc_index::IndexVec;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use arkdown_core::{SourceFileId, SourceReadError};
+
+mod references;
 
 /// Whether `ext` (without the leading dot) belongs to a source-inventory
 /// file.
@@ -121,6 +124,43 @@ pub struct SourceFile {
 }
 
 impl SourceFile {
+    fn capture(
+        id: SourceFileId,
+        path: PathBuf,
+        on_demand_reloads: Arc<AtomicUsize>,
+    ) -> Result<Self, std::io::Error> {
+        let metadata = std::fs::metadata(&path).map_err(|source| {
+            Error::new(
+                source.kind(),
+                format!("read metadata {}: {source}", path.display()),
+            )
+        })?;
+        let modified_millis = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64);
+        let content = std::fs::read_to_string(&path)
+            .map(Arc::<str>::from)
+            .map_err(|source| {
+                Error::new(source.kind(), format!("read {}: {source}", path.display()))
+            })?;
+        let fingerprint = SourceFingerprint {
+            content_hash: format!("{:016x}", arkdown_core::fnv1a64(content.as_bytes())),
+            size: content.len() as u64,
+        };
+        Ok(Self {
+            id,
+            path,
+            fingerprint,
+            modified_millis,
+            content: Arc::new(RwLock::new(SourceContentState::Captured(
+                SourceContent::Text(content),
+            ))),
+            on_demand_reloads,
+        })
+    }
+
     /// Lease captured content, verifying a reload if evicted. Released content
     /// never reloads, even when its file still exists on disk.
     pub fn cached_content(&self) -> Result<SourceContent, SourceReadError> {
@@ -357,6 +397,10 @@ pub struct SourceStore {
     /// Lexical caller roots mapped to their canonical startup identities.
     root_aliases: Arc<SourceRootAliases>,
     on_demand_reloads: Arc<AtomicUsize>,
+    /// Resolved project-source references, indexed by the same stable source IDs.
+    references: IndexVec<SourceFileId, Vec<SourceFileId>>,
+    /// Declared code inputs, separate from ancillary profile/resource text.
+    input_seeds: FxHashMap<PathBuf, Arc<[SourceFileId]>>,
 }
 
 /// Component trie: longest-root matching visits the path once, independent of
@@ -371,16 +415,20 @@ impl SourceRootAliases {
     fn new(aliases: Vec<(PathBuf, PathBuf)>) -> Self {
         let mut roots = Self::default();
         for (alias, canonical) in aliases {
-            let mut node = &mut roots;
-            for part in alias.components() {
-                node = node
-                    .children
-                    .entry(part.as_os_str().to_owned())
-                    .or_default();
-            }
-            node.canonical = Some(canonical);
+            roots.insert(&alias, canonical);
         }
         roots
+    }
+
+    fn insert(&mut self, alias: &Path, canonical: PathBuf) {
+        let mut node = self;
+        for part in alias.components() {
+            node = node
+                .children
+                .entry(part.as_os_str().to_owned())
+                .or_default();
+        }
+        node.canonical = Some(canonical);
     }
 
     fn resolve(&self, path: &Path) -> Option<PathBuf> {
@@ -443,9 +491,55 @@ impl arkdown_core::SourceInventory for SourceStore {
 #[derive(Debug, Default)]
 pub(crate) struct SourceInventoryPaths {
     directories: FxHashMap<PathBuf, Option<PathBuf>>,
+    reference_paths: FxHashMap<PathBuf, PathBuf>,
+    directory_names: FxHashMap<PathBuf, SourceDirectoryNames>,
 }
 
 impl SourceInventoryPaths {
+    fn remember_reference_path(&mut self, path: &Path) {
+        for ancestor in path.ancestors() {
+            if self.reference_paths.contains_key(ancestor) {
+                break;
+            }
+            self.reference_paths
+                .insert(ancestor.to_path_buf(), ancestor.to_path_buf());
+        }
+    }
+
+    /// realpath retains caller spelling on macOS. Resolve newly referenced
+    /// identities through directory entries, just like the startup walk, so
+    /// import casing cannot create a second source ID for the same file.
+    fn canonical_referenced_file(&mut self, path: &Path) -> Result<PathBuf, std::io::Error> {
+        std::fs::metadata(path)?;
+        self.reference_path(&canonicalize_or_owned(path))
+    }
+
+    fn reference_path(&mut self, path: &Path) -> Result<PathBuf, std::io::Error> {
+        if let Some(path) = self.reference_paths.get(path) {
+            return Ok(path.clone());
+        }
+        let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+            return Ok(path.to_path_buf());
+        };
+        let parent = self.reference_path(parent)?;
+        let names = match self.directory_names.entry(parent.clone()) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(SourceDirectoryNames::read(&parent)?)
+            }
+        };
+        let actual_name = names.get(name).ok_or_else(|| {
+            Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("cannot resolve source identity {}", path.display()),
+            )
+        })?;
+        let actual = parent.join(actual_name);
+        self.reference_paths
+            .insert(path.to_path_buf(), actual.clone());
+        Ok(actual)
+    }
+
     pub(crate) fn canonical_file(&mut self, entry: &walkdir::DirEntry) -> PathBuf {
         // A root file's name came from the caller, rather than directory enumeration.
         if entry.depth() == 0 || entry.file_type().is_symlink() {
@@ -468,7 +562,129 @@ impl SourceInventoryPaths {
     }
 }
 
+#[derive(Debug)]
+struct SourceDirectoryNames {
+    exact: FxHashSet<OsString>,
+    canonical: FxHashMap<PathBuf, Option<OsString>>,
+}
+
+impl SourceDirectoryNames {
+    fn read(directory: &Path) -> Result<Self, std::io::Error> {
+        let mut names = std::fs::read_dir(directory)?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<Result<Vec<_>, _>>()?;
+        names.sort();
+        let mut canonical = FxHashMap::<PathBuf, Option<OsString>>::default();
+        for name in &names {
+            if let Some(key) = SourceStore::compiler_canonical_path(Path::new(name)) {
+                canonical
+                    .entry(key)
+                    .and_modify(|entry| *entry = None)
+                    .or_insert_with(|| Some(name.clone()));
+            }
+        }
+        Ok(Self {
+            exact: names.into_iter().collect(),
+            canonical,
+        })
+    }
+
+    fn get(&self, name: &OsStr) -> Option<&OsStr> {
+        self.exact.get(name).map(OsString::as_os_str).or_else(|| {
+            let key = SourceStore::compiler_canonical_path(Path::new(name))?;
+            self.canonical.get(&key)?.as_deref()
+        })
+    }
+}
+
 impl SourceStore {
+    /// Capture source sets and declared package/compiler entries, then follow
+    /// their references using the OHOS resolver. Package roots provide identity
+    /// coverage; they are never implicitly recursive source roots.
+    pub fn discover_project(
+        project: &crate::ProjectSnapshot,
+        additional_roots: &[PathBuf],
+        version: arkdown_core::ArktsLanguageVersion,
+    ) -> Result<Self, std::io::Error> {
+        let mut roots = additional_roots.to_vec();
+        let mut inventories = BTreeMap::<PathBuf, BTreeSet<PathBuf>>::new();
+        for module in project.modules.values() {
+            roots.push(module.root.join("src"));
+            // A source root can itself be a symlink. Walking src/ without
+            // following links does not inventory that physical source tree.
+            roots.extend(module.source_roots.iter().cloned());
+            roots.extend(
+                crate::source_inputs::PackageSourceInputs::new(
+                    &module.root,
+                    module.package.as_deref(),
+                )
+                .roots,
+            );
+            inventories.entry(module.root.clone()).or_default();
+        }
+        for graph in project.dependency_graphs.values() {
+            for node in graph.nodes.values() {
+                if !matches!(
+                    node.node_type,
+                    crate::dependency_graph::snapshot::DependencyNodeType::SourceHar
+                        | crate::dependency_graph::snapshot::DependencyNodeType::OhpmSource
+                        | crate::dependency_graph::snapshot::DependencyNodeType::IntegratedHsp
+                        | crate::dependency_graph::snapshot::DependencyNodeType::NativeSo
+                ) {
+                    continue;
+                }
+                if let Some(root) = &node.package_root {
+                    inventories
+                        .entry(root.clone())
+                        .or_default()
+                        .extend(node.compile_inputs.source_inventory_files.iter().cloned());
+                }
+            }
+        }
+        let inventories = inventories
+            .into_iter()
+            .map(|(root, files)| (root, Arc::from(files.into_iter().collect::<Vec<_>>())))
+            .collect::<Vec<_>>();
+        let mut store = Self::discover_with_preinventoried_roots(&roots, &inventories)?;
+        let aliases =
+            Arc::get_mut(&mut store.root_aliases).expect("startup owns source root aliases");
+        for graph in project.dependency_graphs.values() {
+            let mut roots = graph.canonical_package_roots.iter().collect::<Vec<_>>();
+            roots.sort_unstable_by_key(|(alias, _)| *alias);
+            for (alias, canonical) in roots {
+                aliases.insert(alias, canonical.clone());
+            }
+            for edge in &graph.edges {
+                if let Some(alias) = &edge.installed_alias_path {
+                    aliases.insert(alias, edge.package_root.clone());
+                }
+            }
+        }
+        references::SourceReferenceInventory::new(project, version).capture(&mut store)?;
+        Ok(store)
+    }
+
+    /// Source inputs and their resolved references, including paths outside the
+    /// declaring package. Fingerprints consume these same captured identities.
+    pub(crate) fn input_files(&self, roots: &[PathBuf]) -> Vec<&SourceFile> {
+        let mut pending = roots
+            .iter()
+            .filter_map(|root| self.input_seeds.get(self.lookup_path(root).as_ref()))
+            .flat_map(|files| files.iter().copied())
+            .collect::<Vec<_>>();
+        let mut visited = vec![false; self.references.len()];
+        while let Some(id) = pending.pop() {
+            if std::mem::replace(&mut visited[id.index()], true) {
+                continue;
+            }
+            pending.extend(self.references[id].iter().copied());
+        }
+        self.source_files()
+            .into_iter()
+            .filter(|file| visited[file.id.index()])
+            .collect()
+    }
+
     /// Evict only unleased texts after program creation has joined its readers.
     /// Acquiring a lease clones the Arc under the same lock: a racing reader
     /// either prevents eviction or observes Evicted and verifies a reload.
@@ -644,7 +860,23 @@ impl SourceStore {
             .filter(|(root, _)| walk_roots.contains(root))
             .map(|(_, canonical)| canonical.clone())
             .collect::<BTreeSet<_>>();
-        for root in &walk_roots {
+        let mut independent_roots = BTreeSet::<PathBuf>::new();
+        for root in walk_roots {
+            let covered = root
+                .ancestors()
+                .skip(1)
+                .find(|parent| independent_roots.contains(*parent))
+                .is_some_and(|parent| {
+                    !root
+                        .ancestors()
+                        .take_while(|path| *path != parent)
+                        .any(|path| Self::is_generated_or_external_dir(path, parent))
+                });
+            if !covered {
+                independent_roots.insert(root);
+            }
+        }
+        for root in &independent_roots {
             if !root.exists() {
                 continue;
             }
@@ -678,51 +910,27 @@ impl SourceStore {
         }
 
         let paths = paths.into_iter().collect::<Vec<_>>();
+        let on_demand_reloads = Arc::new(AtomicUsize::new(0));
         let contents = paths
             .par_iter()
-            .map(|path| {
-                let metadata = std::fs::metadata(path).map_err(|source| {
-                    Error::new(
-                        source.kind(),
-                        format!("read metadata {}: {source}", path.display()),
-                    )
-                })?;
-                let modified_millis = metadata
-                    .modified()
-                    .ok()
-                    .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
-                    .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64);
-                let content = std::fs::read_to_string(path)
-                    .map(Arc::<str>::from)
-                    .map_err(|source| {
-                        Error::new(source.kind(), format!("read {}: {source}", path.display()))
-                    })?;
-                Ok::<(Arc<str>, Option<u64>), std::io::Error>((content, modified_millis))
+            .enumerate()
+            .map(|(index, path)| {
+                SourceFile::capture(
+                    SourceFileId::new(index),
+                    path.clone(),
+                    Arc::clone(&on_demand_reloads),
+                )
             })
             .collect::<Vec<_>>();
         let mut files = FxHashMap::default();
-        let on_demand_reloads = Arc::new(AtomicUsize::new(0));
-        for (index, (path, content)) in paths.into_iter().zip(contents).enumerate() {
-            let (content, modified_millis) = content?;
-            let size = content.len() as u64;
-            let content_hash = format!("{:016x}", arkdown_core::fnv1a64(content.as_bytes()));
-            files.insert(
-                path.clone(),
-                SourceFile {
-                    id: SourceFileId::new(index),
-                    path,
-                    fingerprint: SourceFingerprint { content_hash, size },
-                    modified_millis,
-                    content: Arc::new(RwLock::new(SourceContentState::Captured(
-                        SourceContent::Text(content),
-                    ))),
-                    on_demand_reloads: Arc::clone(&on_demand_reloads),
-                },
-            );
+        for file in contents {
+            let file = file?;
+            files.insert(file.path.clone(), file);
         }
         let compiler_canonical_files = (!Self::compiler_uses_case_sensitive_file_names())
             .then(|| Self::compiler_canonical_file_index(files.keys()));
 
+        let references = IndexVec::from_vec(vec![Vec::new(); files.len()]);
         Ok(Self {
             files,
             compiler_canonical_files,
@@ -732,6 +940,8 @@ impl SourceStore {
             inventory_roots: Arc::new(inventory_roots.into_iter().collect()),
             root_aliases: Arc::new(SourceRootAliases::new(root_aliases)),
             on_demand_reloads,
+            references,
+            input_seeds: FxHashMap::default(),
         })
     }
 
