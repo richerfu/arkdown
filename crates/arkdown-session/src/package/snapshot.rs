@@ -43,6 +43,38 @@ pub struct PackageSnapshot {
 }
 
 impl PackageSnapshot {
+    /// Resolver projection of the manifest already captured by this snapshot.
+    pub fn resolver_manifest(&self) -> Arc<arkdown_resolver::PackageManifestSnapshot> {
+        let metadata = self.package_json.extra.get("metadata");
+        Arc::new(arkdown_resolver::PackageManifestSnapshot {
+            version: self.version.clone(),
+            main: self.package_json.main.clone(),
+            types: self.package_json.types.clone(),
+            exports: self.package_json.extra.get("exports").cloned(),
+            oh_export_files: self.oh_export_files.clone(),
+            module: self
+                .package_json
+                .extra
+                .get("module")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            jsnext_main: self
+                .package_json
+                .extra
+                .get("jsnext:main")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            byte_code_har: metadata
+                .and_then(|metadata| metadata.get("byteCodeHar"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            abc_path: metadata
+                .and_then(|metadata| metadata.get("abcPath"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+        })
+    }
+
     /// Load from a directory that contains `oh-package.json5`.
     pub fn from_root(root: &std::path::Path) -> Result<Option<Self>, PackageSnapshotError> {
         let path = root.join("oh-package.json5");

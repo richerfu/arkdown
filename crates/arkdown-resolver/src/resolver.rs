@@ -603,7 +603,10 @@ impl OhosResolver {
         Some(pkg_root.to_resolved_module(resolved, module_type, package_name))
     }
 
-    fn resolve_package_path(
+    /// Resolve a manifest-declared entry or subpath using the same extension,
+    /// directory, and symlink rules as package imports. Startup inventories use
+    /// this without making an entry's parent directory a recursive source root.
+    pub fn resolve_package_path(
         &self,
         package_root: &Path,
         request: &str,

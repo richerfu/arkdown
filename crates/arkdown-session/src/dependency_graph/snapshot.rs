@@ -65,8 +65,9 @@ pub struct DependencyCompileInputSnapshot {
     /// Non-declaration ArkTS/TypeScript/JavaScript files below
     /// `src/main/ets`, in deterministic path order.
     pub other_compile_source_files: Arc<[PathBuf]>,
-    /// Complete source-store path inventory for this dependency root. The
-    /// session source store reuses it instead of walking the package again.
+    /// Physical paths inventoried below the source roots. SourceStore reuses
+    /// these paths, resolves the explicit entries above plus package manifests,
+    /// and follows their references without walking package working directories.
     pub source_inventory_files: Arc<[PathBuf]>,
     /// ByteCode HAR `metadata.extraImportees` resolved to concrete source
     /// files at session startup. Keys preserve the original importee strings.
