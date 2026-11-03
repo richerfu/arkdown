@@ -294,7 +294,9 @@ jobs:
             build: pnpm exec napi build --platform --release --target aarch64-apple-darwin -- --locked
           - host: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            build: pnpm exec napi build --platform --release --target x86_64-unknown-linux-gnu --use-napi-cross -- --locked
+            # lzma-sys otherwise discovers Ubuntu's host libraries via pkg-config.
+            # Its static mode builds bundled liblzma with the target toolchain.
+            build: LZMA_API_STATIC=1 pnpm exec napi build --platform --release --target x86_64-unknown-linux-gnu --use-napi-cross -- --locked
     defaults:
       run:
         working-directory: packages/arkdown
