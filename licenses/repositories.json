@@ -40,18 +40,18 @@
   {
     "name": "tsrs",
     "repository": "https://github.com/ohos-rs/tsrs.git",
-    "revision": "a59ee9bdc7d632b6d797711291375e8511674f82",
+    "revision": "38b79110fa25235380499eee060018262ab2a964",
     "license": "Apache-2.0",
     "kind": "linked dependency",
     "files": [
       {
         "path": "tsrs/LICENSE",
-        "source": "https://github.com/ohos-rs/tsrs/blob/a59ee9bdc7d632b6d797711291375e8511674f82/LICENSE",
+        "source": "https://github.com/ohos-rs/tsrs/blob/38b79110fa25235380499eee060018262ab2a964/LICENSE",
         "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47"
       },
       {
         "path": "tsrs/NOTICE",
-        "source": "https://github.com/ohos-rs/tsrs/blob/a59ee9bdc7d632b6d797711291375e8511674f82/NOTICE",
+        "source": "https://github.com/ohos-rs/tsrs/blob/38b79110fa25235380499eee060018262ab2a964/NOTICE",
         "sha256": "1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118"
       }
     ]

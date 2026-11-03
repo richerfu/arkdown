@@ -95,6 +95,81 @@ fn check_defaults_to_native_typescript_without_a_node_runtime() {
 }
 
 #[test]
+fn check_matches_sdk_for_imported_record_aliases_and_enum_objects() {
+    // SDK ArkTSLinter_1_1::isStdRecordType follows target.aliasSymbol;
+    // isEnumType also accepts the enum symbol of typeof Enum.
+    let temp = tempfile::tempdir().unwrap();
+    copy_fixture(&repo_root().join("tests/fixtures/minimal-hap"), temp.path()).unwrap();
+    let pages = temp.path().join("entry/src/main/ets/pages");
+    fs::write(
+        pages.join("LinterTypes.ets"),
+        r#"
+export type Result = Record<string, Object>;
+export type GenericResult<T> = Record<string, T>;
+export enum Status { SUCCESS = 0, ERROR = 1 }
+"#,
+    )
+    .unwrap();
+    fs::write(
+        pages.join("LinterCase.ets"),
+        r#"
+import { Result, GenericResult, Status } from './LinterTypes';
+export type ChainedResult = Result;
+export const result: Result = { "code": 0 };
+export const chained: ChainedResult = { "code": 0 };
+export const generic: GenericResult<number> = { "code": 0 };
+export const code: number = generic["code"];
+export const statusName: string = Status[0];
+"#,
+    )
+    .unwrap();
+    prepend_entry_import(temp.path(), "./LinterCase");
+    CheckApplication::new(CheckRequest {
+        target: "hap".into(),
+        module: None,
+        project: Some(temp.path().into()),
+        is_crossplatform: false,
+        ignore_crossplatform_check: false,
+        sdk_plugin_host: sdk_plugin_host(),
+        heap_reclaimer: None,
+    })
+    .execute()
+    .expect("SDK-valid Record aliases and enum indexing must pass full checking");
+}
+
+#[test]
+fn check_preserves_sdk_record_key_and_ordinary_field_index_errors() {
+    for (source, diagnostic) in [
+        (
+            "export type Result = Record<string, Object>; export const result: Result = { code: 0 };",
+            "arkts-no-untyped-obj-literals",
+        ),
+        (
+            "export class Fields { code: number = 0; } export const result: number = new Fields()[0];",
+            "arkts-no-props-by-index",
+        ),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        copy_fixture(&repo_root().join("tests/fixtures/minimal-hap"), temp.path()).unwrap();
+        fs::write(temp.path().join("entry/src/main/ets/pages/LinterCase.ets"), source)
+            .unwrap();
+        prepend_entry_import(temp.path(), "./LinterCase");
+        let error = CheckApplication::new(CheckRequest {
+            target: "hap".into(),
+            module: None,
+            project: Some(temp.path().into()),
+            is_crossplatform: false,
+            ignore_crossplatform_check: false,
+            sdk_plugin_host: sdk_plugin_host(),
+            heap_reclaimer: None,
+        })
+        .execute()
+        .expect_err("source-owned ArkTS restrictions must remain enabled");
+        assert!(format!("{error:#}").contains(diagnostic), "{error:#}");
+    }
+}
+
+#[test]
 fn check_uses_module_target_and_its_source_owned_standard_library() {
     // ets_checker.ts::getTargetESVersionLib pairs ES2017 with ES2020. A
     // module-level override must affect the tsrs program, not only OXC emit.

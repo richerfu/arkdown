@@ -15,7 +15,7 @@ to the corresponding third-party material.
 | --- | --- | --- | --- |
 | [OXC (OpenHarmony fork)](https://github.com/ohos-rs/oxc) | `6d42deb0af488a59c3d2ba06e01fc60d87b86355` | MIT | [LICENSE](licenses/oxc/LICENSE), [THIRD-PARTY-LICENSE](licenses/oxc/THIRD-PARTY-LICENSE) |
 | [Rolldown (OpenHarmony fork)](https://github.com/ohos-rs/rolldown) | `4f27b5fe103e661090848aaaa4f7d3084bc2e49c` | MIT | [LICENSE](licenses/rolldown/LICENSE), [THIRD-PARTY-LICENSE](licenses/rolldown/THIRD-PARTY-LICENSE) |
-| [tsrs](https://github.com/ohos-rs/tsrs) | `a59ee9bdc7d632b6d797711291375e8511674f82` | Apache-2.0 | [LICENSE](licenses/tsrs/LICENSE), [NOTICE](licenses/tsrs/NOTICE) |
+| [tsrs](https://github.com/ohos-rs/tsrs) | `38b79110fa25235380499eee060018262ab2a964` | Apache-2.0 | [LICENSE](licenses/tsrs/LICENSE), [NOTICE](licenses/tsrs/NOTICE) |
 | [hapsigner-rs](https://github.com/harmony-contrib/hapsigner-rs) | `0b4a16ad812d679c28e9d5602f0b0a239f28c719` | MIT | [LICENSE](licenses/hapsigner/LICENSE), [THIRD_PARTY_NOTICES.md](licenses/hapsigner/THIRD_PARTY_NOTICES.md) |
 
 OXC's and Rolldown's upstream third-party notices include their own borrowed
