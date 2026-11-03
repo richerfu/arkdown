@@ -31,9 +31,9 @@ license = "MIT OR Apache-2.0"
 license-file = "LICENSE"
 
 [workspace.dependencies]
-tsrs_api = { git = "https://github.com/ohos-rs/tsrs.git", rev = "38b79110fa25235380499eee060018262ab2a964" }
-tsrs_core = { git = "https://github.com/ohos-rs/tsrs.git", rev = "38b79110fa25235380499eee060018262ab2a964" }
-tsrs_vfs = { git = "https://github.com/ohos-rs/tsrs.git", rev = "38b79110fa25235380499eee060018262ab2a964" }
+tsrs_api = { git = "https://github.com/ohos-rs/tsrs.git", rev = "32f89d8779168460e8b45274aaaccce69b9d2f5e" }
+tsrs_core = { git = "https://github.com/ohos-rs/tsrs.git", rev = "32f89d8779168460e8b45274aaaccce69b9d2f5e" }
+tsrs_vfs = { git = "https://github.com/ohos-rs/tsrs.git", rev = "32f89d8779168460e8b45274aaaccce69b9d2f5e" }
 # Workspace crates
 arkdown = { path = "crates/arkdown" }
 arkdown-abc = { path = "crates/arkdown-abc" }

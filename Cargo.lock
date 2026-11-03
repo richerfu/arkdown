@@ -5400,7 +5400,7 @@ dependencies = [
 [[package]]
 name = "tsrs_api"
 version = "0.18.0"
-source = "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e"
 dependencies = [
  "rustc-hash 2.1.3",
  "serde",
@@ -5426,7 +5426,7 @@ dependencies = [
 [[package]]
 name = "tsrs_api_codec"
 version = "0.18.0"
-source = "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e"
 dependencies = [
  "rustc-hash 2.1.3",
  "serde",
@@ -5438,7 +5438,7 @@ dependencies = [
 [[package]]
 name = "tsrs_api_transport"
 version = "0.18.0"
-source = "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e"
 dependencies = [
  "base64 0.23.1",
  "rustc-hash 2.1.3",
@@ -5451,7 +5451,7 @@ dependencies = [
 [[package]]
 name = "tsrs_ast"
 version = "0.18.0"
-source = "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e"
 dependencies = [
  "bitflags 2.13.1",
  "hashbrown 0.17.1",
@@ -5465,7 +5465,7 @@ dependencies = [
 [[package]]
 name = "tsrs_astnav"
 version = "0.18.0"
-source = "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e"
 dependencies = [
  "tsrs_ast",
  "tsrs_core",
@@ -5475,7 +5475,7 @@ dependencies = [
 [[package]]
 name = "tsrs_binder"
 version = "0.18.0"
-source = "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e"
 dependencies = [
  "bitflags 2.13.1",
  "rustc-hash 2.1.3",
@@ -5488,7 +5488,7 @@ dependencies = [
 [[package]]
 name = "tsrs_checker"
 version = "0.18.0"
-source = "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e"
 dependencies = [
  "bitflags 2.13.1",
  "hashbrown 0.17.1",
@@ -5515,7 +5515,7 @@ dependencies = [
 [[package]]
 name = "tsrs_compiler"
 version = "0.18.0"
-source = "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e"
 dependencies = [
  "rayon",
  "rustc-hash 2.1.3",
@@ -5543,7 +5543,7 @@ dependencies = [
 [[package]]
 name = "tsrs_contentmapper"
 version = "0.18.0"
-source = "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e"
 dependencies = [
  "rustc-hash 2.1.3",
  "tsrs_ast",
@@ -5559,7 +5559,7 @@ dependencies = [
 [[package]]
 name = "tsrs_core"
 version = "0.18.0"
-source = "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e"
 dependencies = [
  "dragonbox_ecma",
  "hashbrown 0.17.1",
@@ -5579,7 +5579,7 @@ dependencies = [
 [[package]]
 name = "tsrs_declarations"
 version = "0.18.0"
-source = "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e"
 dependencies = [
  "rustc-hash 2.1.3",
  "tsrs_ast",
@@ -5596,7 +5596,7 @@ dependencies = [
 [[package]]
 name = "tsrs_diagnostics"
 version = "0.18.0"
-source = "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e"
 dependencies = [
  "rustc-hash 2.1.3",
 ]
@@ -5604,7 +5604,7 @@ dependencies = [
 [[package]]
 name = "tsrs_ipc"
 version = "0.18.0"
-source = "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e"
 dependencies = [
  "rustc-hash 2.1.3",
  "tsrs_core",
@@ -5613,7 +5613,7 @@ dependencies = [
 [[package]]
 name = "tsrs_ls"
 version = "0.18.0"
-source = "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e"
 dependencies = [
  "bitflags 2.13.1",
  "indexmap",
@@ -5641,7 +5641,7 @@ dependencies = [
 [[package]]
 name = "tsrs_lsproto"
 version = "0.18.0"
-source = "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e"
 dependencies = [
  "rustc-hash 2.1.3",
  "tsrs_core",
@@ -5651,7 +5651,7 @@ dependencies = [
 [[package]]
 name = "tsrs_module"
 version = "0.18.0"
-source = "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e"
 dependencies = [
  "bitflags 2.13.1",
  "json5 1.3.1",
@@ -5666,7 +5666,7 @@ dependencies = [
 [[package]]
 name = "tsrs_modulespecifiers"
 version = "0.18.0"
-source = "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e"
 dependencies = [
  "regex",
  "rustc-hash 2.1.3",
@@ -5679,7 +5679,7 @@ dependencies = [
 [[package]]
 name = "tsrs_parser"
 version = "0.18.0"
-source = "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e"
 dependencies = [
  "bitflags 2.13.1",
  "rustc-hash 2.1.3",
@@ -5692,7 +5692,7 @@ dependencies = [
 [[package]]
 name = "tsrs_printer"
 version = "0.18.0"
-source = "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e"
 dependencies = [
  "bitflags 2.13.1",
  "rustc-hash 2.1.3",
@@ -5705,7 +5705,7 @@ dependencies = [
 [[package]]
 name = "tsrs_project"
 version = "0.18.0"
-source = "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e"
 dependencies = [
  "rustc-hash 2.1.3",
  "tsrs_ast",
@@ -5728,7 +5728,7 @@ dependencies = [
 [[package]]
 name = "tsrs_projectutil"
 version = "0.18.0"
-source = "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e"
 dependencies = [
  "rustc-hash 2.1.3",
  "tsrs_core",
@@ -5737,7 +5737,7 @@ dependencies = [
 [[package]]
 name = "tsrs_pseudochecker"
 version = "0.18.0"
-source = "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e"
 dependencies = [
  "tsrs_ast",
  "tsrs_core",
@@ -5746,7 +5746,7 @@ dependencies = [
 [[package]]
 name = "tsrs_scanner"
 version = "0.18.0"
-source = "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e"
 dependencies = [
  "bitflags 2.13.1",
  "memchr",
@@ -5759,7 +5759,7 @@ dependencies = [
 [[package]]
 name = "tsrs_sourcemap"
 version = "0.18.0"
-source = "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e"
 dependencies = [
  "rustc-hash 2.1.3",
  "tsrs_ast",
@@ -5770,7 +5770,7 @@ dependencies = [
 [[package]]
 name = "tsrs_spanmap"
 version = "0.18.0"
-source = "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e"
 dependencies = [
  "bitflags 2.13.1",
  "tsrs_core",
@@ -5779,7 +5779,7 @@ dependencies = [
 [[package]]
 name = "tsrs_transformers"
 version = "0.18.0"
-source = "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e"
 dependencies = [
  "bitflags 2.13.1",
  "rustc-hash 2.1.3",
@@ -5795,7 +5795,7 @@ dependencies = [
 [[package]]
 name = "tsrs_tsoptions"
 version = "0.18.0"
-source = "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e"
 dependencies = [
  "rustc-hash 2.1.3",
  "serde_json",
@@ -5812,7 +5812,7 @@ dependencies = [
 [[package]]
 name = "tsrs_vfs"
 version = "0.18.0"
-source = "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964"
+source = "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e"
 dependencies = [
  "bitflags 2.13.1",
  "rayon",

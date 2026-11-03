@@ -1,5 +1,5 @@
 {
-  "cargo_lock_sha256": "b27f1f103b9bd7fd5848e7a3340455cb80fd0aae39a59007399b71459ad09844",
+  "cargo_lock_sha256": "c9dcb2610e5029f0de338d06f956539ccad93ef16a61ef499e363f2778ae6380",
   "scope": "All non-workspace packages resolved by cargo metadata --locked, including build, development, optional and platform dependencies. This is a conservative inventory, not a claim that every package is linked into every native binary.",
   "packages": [
     {
@@ -9308,7 +9308,7 @@
       "name": "tsrs_api",
       "version": "0.18.0",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964",
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
       "repository": null,
       "files": [
         {
@@ -9329,7 +9329,7 @@
       "name": "tsrs_api_codec",
       "version": "0.18.0",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964",
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
       "repository": null,
       "files": [
         {
@@ -9350,7 +9350,7 @@
       "name": "tsrs_api_transport",
       "version": "0.18.0",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964",
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
       "repository": null,
       "files": [
         {
@@ -9371,7 +9371,7 @@
       "name": "tsrs_ast",
       "version": "0.18.0",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964",
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
       "repository": null,
       "files": [
         {
@@ -9392,7 +9392,7 @@
       "name": "tsrs_astnav",
       "version": "0.18.0",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964",
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
       "repository": null,
       "files": [
         {
@@ -9413,7 +9413,7 @@
       "name": "tsrs_binder",
       "version": "0.18.0",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964",
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
       "repository": null,
       "files": [
         {
@@ -9434,7 +9434,7 @@
       "name": "tsrs_checker",
       "version": "0.18.0",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964",
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
       "repository": null,
       "files": [
         {
@@ -9455,7 +9455,7 @@
       "name": "tsrs_compiler",
       "version": "0.18.0",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964",
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
       "repository": null,
       "files": [
         {
@@ -9476,7 +9476,7 @@
       "name": "tsrs_contentmapper",
       "version": "0.18.0",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964",
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
       "repository": null,
       "files": [
         {
@@ -9497,7 +9497,7 @@
       "name": "tsrs_core",
       "version": "0.18.0",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964",
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
       "repository": null,
       "files": [
         {
@@ -9518,7 +9518,7 @@
       "name": "tsrs_declarations",
       "version": "0.18.0",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964",
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
       "repository": null,
       "files": [
         {
@@ -9539,7 +9539,7 @@
       "name": "tsrs_diagnostics",
       "version": "0.18.0",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964",
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
       "repository": null,
       "files": [
         {
@@ -9560,7 +9560,7 @@
       "name": "tsrs_ipc",
       "version": "0.18.0",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964",
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
       "repository": null,
       "files": [
         {
@@ -9581,7 +9581,7 @@
       "name": "tsrs_ls",
       "version": "0.18.0",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964",
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
       "repository": null,
       "files": [
         {
@@ -9602,7 +9602,7 @@
       "name": "tsrs_lsproto",
       "version": "0.18.0",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964",
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
       "repository": null,
       "files": [
         {
@@ -9623,7 +9623,7 @@
       "name": "tsrs_module",
       "version": "0.18.0",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964",
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
       "repository": null,
       "files": [
         {
@@ -9644,7 +9644,7 @@
       "name": "tsrs_modulespecifiers",
       "version": "0.18.0",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964",
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
       "repository": null,
       "files": [
         {
@@ -9665,7 +9665,7 @@
       "name": "tsrs_parser",
       "version": "0.18.0",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964",
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
       "repository": null,
       "files": [
         {
@@ -9686,7 +9686,7 @@
       "name": "tsrs_printer",
       "version": "0.18.0",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964",
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
       "repository": null,
       "files": [
         {
@@ -9707,7 +9707,7 @@
       "name": "tsrs_project",
       "version": "0.18.0",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964",
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
       "repository": null,
       "files": [
         {
@@ -9728,7 +9728,7 @@
       "name": "tsrs_projectutil",
       "version": "0.18.0",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964",
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
       "repository": null,
       "files": [
         {
@@ -9749,7 +9749,7 @@
       "name": "tsrs_pseudochecker",
       "version": "0.18.0",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964",
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
       "repository": null,
       "files": [
         {
@@ -9770,7 +9770,7 @@
       "name": "tsrs_scanner",
       "version": "0.18.0",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964",
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
       "repository": null,
       "files": [
         {
@@ -9791,7 +9791,7 @@
       "name": "tsrs_sourcemap",
       "version": "0.18.0",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964",
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
       "repository": null,
       "files": [
         {
@@ -9812,7 +9812,7 @@
       "name": "tsrs_spanmap",
       "version": "0.18.0",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964",
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
       "repository": null,
       "files": [
         {
@@ -9833,7 +9833,7 @@
       "name": "tsrs_transformers",
       "version": "0.18.0",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964",
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
       "repository": null,
       "files": [
         {
@@ -9854,7 +9854,7 @@
       "name": "tsrs_tsoptions",
       "version": "0.18.0",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964",
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
       "repository": null,
       "files": [
         {
@@ -9875,7 +9875,7 @@
       "name": "tsrs_vfs",
       "version": "0.18.0",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=38b79110fa25235380499eee060018262ab2a964#38b79110fa25235380499eee060018262ab2a964",
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
       "repository": null,
       "files": [
         {
