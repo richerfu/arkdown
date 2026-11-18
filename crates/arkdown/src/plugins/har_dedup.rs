@@ -196,7 +196,17 @@ impl Plugin for HarDedupPlugin {
         ctx: &PluginContext,
         _args: Option<&HookBuildEndArgs<'_>>,
     ) -> impl std::future::Future<Output = HookNoopReturn> + Send {
-        let result = self.flush_collect(ctx.get_module_ids());
+        // Rolldown removed `getModuleIds()` from the generic plugin context;
+        // the native context still exposes the current graph.
+        let module_ids = match ctx {
+            PluginContext::Native(ctx) => ctx
+                .get_module_ids()
+                .into_iter()
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>(),
+            PluginContext::Napi(_) => Vec::new(),
+        };
+        let result = self.flush_collect(module_ids);
         async move { result.map_err(|e| anyhow::anyhow!("har-dedup: {e}")) }
     }
 }

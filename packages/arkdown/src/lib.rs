@@ -96,8 +96,9 @@ use rustc_hash::FxHashMap;
 use js_callback::{MaybeAsyncJsCallback, MaybeAsyncJsCallbackExt, MaybeAsyncJsReturn};
 
 use rolldown_common::{
-  side_effects::HookSideEffects, EmittedAsset, EmittedChunk, LogWithoutPlugin, ModuleDefFormat,
-  ModuleInfo, ModuleType, NormalModule, PreserveEntrySignatures, ResolvedExternal, StrOrBytes,
+  side_effects::HookSideEffects, EmittedAsset, EmittedChunk, ImportAttributes, LogWithoutPlugin,
+  ModuleDefFormat, ModuleInfo, ModuleType, NormalModule, PreserveEntrySignatures, ResolvedExternal,
+  StrOrBytes,
 };
 use rolldown_plugin::{
   typedmap::TypedMapKey, CustomField, HookBuildEndArgs, HookBuildStartArgs, HookLoadArgs,
@@ -430,6 +431,7 @@ impl TryFrom<JsResolveIdOutput> for HookResolveIdOutput {
         .map(TryInto::try_into)
         .transpose()?,
       package_json_path: value.package_json_path,
+      attributes: None,
     })
   }
 }
@@ -476,12 +478,7 @@ impl TryFrom<JsJsonSourceMap> for rolldown_sourcemap::SourceMap {
       file: value.file,
       mappings: value.mappings.unwrap_or_default(),
       source_root: value.source_root,
-      sources: value
-        .sources
-        .unwrap_or_default()
-        .into_iter()
-        .map(Option::unwrap_or_default)
-        .collect(),
+      sources: value.sources.unwrap_or_default(),
       sources_content: value.sources_content,
       names: value.names.unwrap_or_default(),
       debug_id: value.debug_id,
@@ -764,6 +761,7 @@ impl ArkdownRolldownPluginContext {
           is_entry: options.is_entry.unwrap_or(importer.is_none()),
           skip_self: options.skip_self.unwrap_or(true),
           custom: Arc::new(custom),
+          attributes: ImportAttributes::default(),
         }),
       )
       .await
@@ -793,6 +791,7 @@ impl ArkdownRolldownPluginContext {
       .inner
       .load(
         &id,
+        ImportAttributes::default(),
         options
           .module_side_effects
           .map(TryInto::try_into)
@@ -877,12 +876,15 @@ impl ArkdownRolldownPluginContext {
 
   #[napi]
   pub fn get_module_ids(&self) -> Vec<String> {
-    self
-      .inner
-      .get_module_ids()
-      .into_iter()
-      .map(|id| id.to_string())
-      .collect()
+    match &self.inner {
+      PluginContext::Native(ctx) => ctx
+        .get_module_ids()
+        .into_iter()
+        .map(|id| id.to_string())
+        .collect(),
+      // N-API plugin contexts have no module graph of their own.
+      PluginContext::Napi(_) => Vec::new(),
+    }
   }
 
   #[napi]

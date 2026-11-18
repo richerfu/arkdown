@@ -1,7 +1,28 @@
 {
-  "cargo_lock_sha256": "e29c23f97d60359b9c034f6bd91b576b6a506b53c5c19acadc78f2cb5043b570",
+  "cargo_lock_sha256": "122f5504579685ae8ef55b84fd7b7e7c9d580b0e7cfebee46762ac930817a6a9",
   "scope": "All non-workspace packages resolved by cargo metadata --locked, including build, development, optional and platform dependencies. This is a conservative inventory, not a claim that every package is linked into every native binary.",
   "packages": [
+    {
+      "name": "addr2line",
+      "version": "0.25.1",
+      "license": "Apache-2.0 OR MIT",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "repository": "https://github.com/gimli-rs/addr2line",
+      "files": [
+        {
+          "path": "texts/a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2.txt",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+          "upstream_file": "LICENSE-APACHE",
+          "origin": "Cargo source package"
+        },
+        {
+          "path": "texts/e99d88d232bf57d70f0fb87f6b496d44b6653f99f8a63d250a54c61ea4bcde40.txt",
+          "sha256": "e99d88d232bf57d70f0fb87f6b496d44b6653f99f8a63d250a54c61ea4bcde40",
+          "upstream_file": "LICENSE-MIT",
+          "origin": "Cargo source package"
+        }
+      ]
+    },
     {
       "name": "adler2",
       "version": "2.0.1",
@@ -502,6 +523,27 @@
           "sha256": "43e358d7b6eb109d0f51f7b3a090fd82607965767c25fadee39e922475de2061",
           "upstream_file": "aws-lc/third_party/fiat/LICENSE",
           "origin": "Cargo source package (including vendored native code)"
+        }
+      ]
+    },
+    {
+      "name": "backtrace",
+      "version": "0.3.76",
+      "license": "MIT OR Apache-2.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "repository": "https://github.com/rust-lang/backtrace-rs",
+      "files": [
+        {
+          "path": "texts/a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2.txt",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+          "upstream_file": "LICENSE-APACHE",
+          "origin": "Cargo source package"
+        },
+        {
+          "path": "texts/378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397.txt",
+          "sha256": "378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397",
+          "upstream_file": "LICENSE-MIT",
+          "origin": "Cargo source package"
         }
       ]
     },
@@ -2062,6 +2104,27 @@
       ]
     },
     {
+      "name": "dhat",
+      "version": "0.3.3",
+      "license": "MIT OR Apache-2.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "repository": "https://github.com/nnethercote/dhat-rs",
+      "files": [
+        {
+          "path": "texts/62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a.txt",
+          "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a",
+          "upstream_file": "LICENSE-APACHE",
+          "origin": "Cargo source package"
+        },
+        {
+          "path": "texts/23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3.txt",
+          "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+          "upstream_file": "LICENSE-MIT",
+          "origin": "Cargo source package"
+        }
+      ]
+    },
+    {
       "name": "digest",
       "version": "0.10.7",
       "license": "MIT OR Apache-2.0",
@@ -2474,7 +2537,7 @@
     },
     {
       "name": "flate2",
-      "version": "1.1.9",
+      "version": "1.1.11",
       "license": "MIT OR Apache-2.0",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "repository": "https://github.com/rust-lang/flate2-rs",
@@ -2950,6 +3013,27 @@
         {
           "path": "texts/c0fabcc308b450cb6fe62c9f56fae6abbeb9768eb80d992484c857d744846c2e.txt",
           "sha256": "c0fabcc308b450cb6fe62c9f56fae6abbeb9768eb80d992484c857d744846c2e",
+          "upstream_file": "LICENSE-MIT",
+          "origin": "Cargo source package"
+        }
+      ]
+    },
+    {
+      "name": "gimli",
+      "version": "0.32.3",
+      "license": "MIT OR Apache-2.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "repository": "https://github.com/gimli-rs/gimli",
+      "files": [
+        {
+          "path": "texts/a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2.txt",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+          "upstream_file": "LICENSE-APACHE",
+          "origin": "Cargo source package"
+        },
+        {
+          "path": "texts/7b63ecd5f1902af1b63729947373683c32745c16a10e8e6292e2e2dcd7e90ae0.txt",
+          "sha256": "7b63ecd5f1902af1b63729947373683c32745c16a10e8e6292e2e2dcd7e90ae0",
           "upstream_file": "LICENSE-MIT",
           "origin": "Cargo source package"
         }
@@ -3644,6 +3728,21 @@
           "path": "texts/47dc9ff29128ddfb4d6a0435383c9f89120bc374dbcc1dd00b933a0b28aa7865.txt",
           "sha256": "47dc9ff29128ddfb4d6a0435383c9f89120bc374dbcc1dd00b933a0b28aa7865",
           "upstream_file": "LICENSE-MIT",
+          "origin": "Cargo source package"
+        }
+      ]
+    },
+    {
+      "name": "is_ci",
+      "version": "1.2.0",
+      "license": "ISC",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "repository": "https://github.com/zkat/is_ci",
+      "files": [
+        {
+          "path": "texts/23232f634e079478f8969da5dfcba06c0838c8dfe3151b444f5cecb37a55bf96.txt",
+          "sha256": "23232f634e079478f8969da5dfcba06c0838c8dfe3151b444f5cecb37a55bf96",
+          "upstream_file": "LICENSE",
           "origin": "Cargo source package"
         }
       ]
@@ -4358,6 +4457,27 @@
       ]
     },
     {
+      "name": "memory-stats",
+      "version": "1.2.0",
+      "license": "MIT OR Apache-2.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "repository": "https://github.com/Arc-blroth/memory-stats",
+      "files": [
+        {
+          "path": "texts/37376b983b780413240509c87520961fe1ab927bc09a96704e4fb783171b6149.txt",
+          "sha256": "37376b983b780413240509c87520961fe1ab927bc09a96704e4fb783171b6149",
+          "upstream_file": "LICENSE-APACHE",
+          "origin": "Cargo source package"
+        },
+        {
+          "path": "texts/93b7d5c9d405e91c1526532a02e020458064e0614b0ca4ca57d175e7267faa92.txt",
+          "sha256": "93b7d5c9d405e91c1526532a02e020458064e0614b0ca4ca57d175e7267faa92",
+          "upstream_file": "LICENSE-MIT",
+          "origin": "Cargo source package"
+        }
+      ]
+    },
+    {
       "name": "micromap",
       "version": "0.3.0",
       "license": "MIT",
@@ -4503,6 +4623,21 @@
           "path": "texts/0a54e647fe54104658b5e563c04c6f9edf251710e47bce692e0bd990a4ddaa39.txt",
           "sha256": "0a54e647fe54104658b5e563c04c6f9edf251710e47bce692e0bd990a4ddaa39",
           "upstream_file": "LICENSE-ZLIB.md",
+          "origin": "Cargo source package"
+        }
+      ]
+    },
+    {
+      "name": "mintex",
+      "version": "0.1.4",
+      "license": "Apache-2.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "repository": "https://github.com/garypen/mintex",
+      "files": [
+        {
+          "path": "texts/c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4.txt",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+          "upstream_file": "LICENSE",
           "origin": "Cargo source package"
         }
       ]
@@ -5112,9 +5247,9 @@
     },
     {
       "name": "oxc",
-      "version": "0.155.0",
+      "version": "0.159.0",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/oxc?rev=6d42deb0af488a59c3d2ba06e01fc60d87b86355#6d42deb0af488a59c3d2ba06e01fc60d87b86355",
+      "source": "git+https://github.com/ohos-rs/oxc?rev=1526b2c932d211c25d85dd172018889d0aeda776#1526b2c932d211c25d85dd172018889d0aeda776",
       "repository": "https://github.com/oxc-project/oxc",
       "files": [
         {
@@ -5148,9 +5283,9 @@
     },
     {
       "name": "oxc_allocator",
-      "version": "0.155.0",
+      "version": "0.159.0",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/oxc?rev=6d42deb0af488a59c3d2ba06e01fc60d87b86355#6d42deb0af488a59c3d2ba06e01fc60d87b86355",
+      "source": "git+https://github.com/ohos-rs/oxc?rev=1526b2c932d211c25d85dd172018889d0aeda776#1526b2c932d211c25d85dd172018889d0aeda776",
       "repository": "https://github.com/oxc-project/oxc",
       "files": [
         {
@@ -5169,9 +5304,9 @@
     },
     {
       "name": "oxc_ast",
-      "version": "0.155.0",
+      "version": "0.159.0",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/oxc?rev=6d42deb0af488a59c3d2ba06e01fc60d87b86355#6d42deb0af488a59c3d2ba06e01fc60d87b86355",
+      "source": "git+https://github.com/ohos-rs/oxc?rev=1526b2c932d211c25d85dd172018889d0aeda776#1526b2c932d211c25d85dd172018889d0aeda776",
       "repository": "https://github.com/oxc-project/oxc",
       "files": [
         {
@@ -5190,9 +5325,9 @@
     },
     {
       "name": "oxc_ast_macros",
-      "version": "0.155.0",
+      "version": "0.159.0",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/oxc?rev=6d42deb0af488a59c3d2ba06e01fc60d87b86355#6d42deb0af488a59c3d2ba06e01fc60d87b86355",
+      "source": "git+https://github.com/ohos-rs/oxc?rev=1526b2c932d211c25d85dd172018889d0aeda776#1526b2c932d211c25d85dd172018889d0aeda776",
       "repository": "https://github.com/oxc-project/oxc",
       "files": [
         {
@@ -5211,9 +5346,9 @@
     },
     {
       "name": "oxc_ast_visit",
-      "version": "0.155.0",
+      "version": "0.159.0",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/oxc?rev=6d42deb0af488a59c3d2ba06e01fc60d87b86355#6d42deb0af488a59c3d2ba06e01fc60d87b86355",
+      "source": "git+https://github.com/ohos-rs/oxc?rev=1526b2c932d211c25d85dd172018889d0aeda776#1526b2c932d211c25d85dd172018889d0aeda776",
       "repository": "https://github.com/oxc-project/oxc",
       "files": [
         {
@@ -5232,9 +5367,9 @@
     },
     {
       "name": "oxc_codegen",
-      "version": "0.155.0",
+      "version": "0.159.0",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/oxc?rev=6d42deb0af488a59c3d2ba06e01fc60d87b86355#6d42deb0af488a59c3d2ba06e01fc60d87b86355",
+      "source": "git+https://github.com/ohos-rs/oxc?rev=1526b2c932d211c25d85dd172018889d0aeda776#1526b2c932d211c25d85dd172018889d0aeda776",
       "repository": "https://github.com/oxc-project/oxc",
       "files": [
         {
@@ -5253,9 +5388,9 @@
     },
     {
       "name": "oxc_compat",
-      "version": "0.155.0",
+      "version": "0.159.0",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/oxc?rev=6d42deb0af488a59c3d2ba06e01fc60d87b86355#6d42deb0af488a59c3d2ba06e01fc60d87b86355",
+      "source": "git+https://github.com/ohos-rs/oxc?rev=1526b2c932d211c25d85dd172018889d0aeda776#1526b2c932d211c25d85dd172018889d0aeda776",
       "repository": "https://github.com/oxc-project/oxc",
       "files": [
         {
@@ -5274,9 +5409,9 @@
     },
     {
       "name": "oxc_data_structures",
-      "version": "0.155.0",
+      "version": "0.159.0",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/oxc?rev=6d42deb0af488a59c3d2ba06e01fc60d87b86355#6d42deb0af488a59c3d2ba06e01fc60d87b86355",
+      "source": "git+https://github.com/ohos-rs/oxc?rev=1526b2c932d211c25d85dd172018889d0aeda776#1526b2c932d211c25d85dd172018889d0aeda776",
       "repository": "https://github.com/oxc-project/oxc",
       "files": [
         {
@@ -5295,9 +5430,9 @@
     },
     {
       "name": "oxc_diagnostics",
-      "version": "0.155.0",
+      "version": "0.159.0",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/oxc?rev=6d42deb0af488a59c3d2ba06e01fc60d87b86355#6d42deb0af488a59c3d2ba06e01fc60d87b86355",
+      "source": "git+https://github.com/ohos-rs/oxc?rev=1526b2c932d211c25d85dd172018889d0aeda776#1526b2c932d211c25d85dd172018889d0aeda776",
       "repository": "https://github.com/oxc-project/oxc",
       "files": [
         {
@@ -5316,9 +5451,9 @@
     },
     {
       "name": "oxc_ecmascript",
-      "version": "0.155.0",
+      "version": "0.159.0",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/oxc?rev=6d42deb0af488a59c3d2ba06e01fc60d87b86355#6d42deb0af488a59c3d2ba06e01fc60d87b86355",
+      "source": "git+https://github.com/ohos-rs/oxc?rev=1526b2c932d211c25d85dd172018889d0aeda776#1526b2c932d211c25d85dd172018889d0aeda776",
       "repository": "https://github.com/oxc-project/oxc",
       "files": [
         {
@@ -5337,9 +5472,9 @@
     },
     {
       "name": "oxc_estree",
-      "version": "0.155.0",
+      "version": "0.159.0",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/oxc?rev=6d42deb0af488a59c3d2ba06e01fc60d87b86355#6d42deb0af488a59c3d2ba06e01fc60d87b86355",
+      "source": "git+https://github.com/ohos-rs/oxc?rev=1526b2c932d211c25d85dd172018889d0aeda776#1526b2c932d211c25d85dd172018889d0aeda776",
       "repository": "https://github.com/oxc-project/oxc",
       "files": [
         {
@@ -5373,9 +5508,9 @@
     },
     {
       "name": "oxc_isolated_declarations",
-      "version": "0.155.0",
+      "version": "0.159.0",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/oxc?rev=6d42deb0af488a59c3d2ba06e01fc60d87b86355#6d42deb0af488a59c3d2ba06e01fc60d87b86355",
+      "source": "git+https://github.com/ohos-rs/oxc?rev=1526b2c932d211c25d85dd172018889d0aeda776#1526b2c932d211c25d85dd172018889d0aeda776",
       "repository": "https://github.com/oxc-project/oxc",
       "files": [
         {
@@ -5394,9 +5529,9 @@
     },
     {
       "name": "oxc_jsdoc",
-      "version": "0.155.0",
+      "version": "0.159.0",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/oxc?rev=6d42deb0af488a59c3d2ba06e01fc60d87b86355#6d42deb0af488a59c3d2ba06e01fc60d87b86355",
+      "source": "git+https://github.com/ohos-rs/oxc?rev=1526b2c932d211c25d85dd172018889d0aeda776#1526b2c932d211c25d85dd172018889d0aeda776",
       "repository": "https://github.com/oxc-project/oxc",
       "files": [
         {
@@ -5415,9 +5550,9 @@
     },
     {
       "name": "oxc_mangler",
-      "version": "0.155.0",
+      "version": "0.159.0",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/oxc?rev=6d42deb0af488a59c3d2ba06e01fc60d87b86355#6d42deb0af488a59c3d2ba06e01fc60d87b86355",
+      "source": "git+https://github.com/ohos-rs/oxc?rev=1526b2c932d211c25d85dd172018889d0aeda776#1526b2c932d211c25d85dd172018889d0aeda776",
       "repository": "https://github.com/oxc-project/oxc",
       "files": [
         {
@@ -5436,9 +5571,9 @@
     },
     {
       "name": "oxc_minifier",
-      "version": "0.155.0",
+      "version": "0.159.0",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/oxc?rev=6d42deb0af488a59c3d2ba06e01fc60d87b86355#6d42deb0af488a59c3d2ba06e01fc60d87b86355",
+      "source": "git+https://github.com/ohos-rs/oxc?rev=1526b2c932d211c25d85dd172018889d0aeda776#1526b2c932d211c25d85dd172018889d0aeda776",
       "repository": "https://github.com/oxc-project/oxc",
       "files": [
         {
@@ -5457,9 +5592,9 @@
     },
     {
       "name": "oxc_parser",
-      "version": "0.155.0",
+      "version": "0.159.0",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/oxc?rev=6d42deb0af488a59c3d2ba06e01fc60d87b86355#6d42deb0af488a59c3d2ba06e01fc60d87b86355",
+      "source": "git+https://github.com/ohos-rs/oxc?rev=1526b2c932d211c25d85dd172018889d0aeda776#1526b2c932d211c25d85dd172018889d0aeda776",
       "repository": "https://github.com/oxc-project/oxc",
       "files": [
         {
@@ -5478,9 +5613,9 @@
     },
     {
       "name": "oxc_regular_expression",
-      "version": "0.155.0",
+      "version": "0.159.0",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/oxc?rev=6d42deb0af488a59c3d2ba06e01fc60d87b86355#6d42deb0af488a59c3d2ba06e01fc60d87b86355",
+      "source": "git+https://github.com/ohos-rs/oxc?rev=1526b2c932d211c25d85dd172018889d0aeda776#1526b2c932d211c25d85dd172018889d0aeda776",
       "repository": "https://github.com/oxc-project/oxc",
       "files": [
         {
@@ -5514,9 +5649,9 @@
     },
     {
       "name": "oxc_semantic",
-      "version": "0.155.0",
+      "version": "0.159.0",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/oxc?rev=6d42deb0af488a59c3d2ba06e01fc60d87b86355#6d42deb0af488a59c3d2ba06e01fc60d87b86355",
+      "source": "git+https://github.com/ohos-rs/oxc?rev=1526b2c932d211c25d85dd172018889d0aeda776#1526b2c932d211c25d85dd172018889d0aeda776",
       "repository": "https://github.com/oxc-project/oxc",
       "files": [
         {
@@ -5535,7 +5670,7 @@
     },
     {
       "name": "oxc_sourcemap",
-      "version": "9.0.0",
+      "version": "10.0.0",
       "license": "BSD-3-Clause",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "repository": "https://github.com/oxc-project/oxc-sourcemap",
@@ -5550,9 +5685,9 @@
     },
     {
       "name": "oxc_span",
-      "version": "0.155.0",
+      "version": "0.159.0",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/oxc?rev=6d42deb0af488a59c3d2ba06e01fc60d87b86355#6d42deb0af488a59c3d2ba06e01fc60d87b86355",
+      "source": "git+https://github.com/ohos-rs/oxc?rev=1526b2c932d211c25d85dd172018889d0aeda776#1526b2c932d211c25d85dd172018889d0aeda776",
       "repository": "https://github.com/oxc-project/oxc",
       "files": [
         {
@@ -5571,9 +5706,9 @@
     },
     {
       "name": "oxc_str",
-      "version": "0.155.0",
+      "version": "0.159.0",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/oxc?rev=6d42deb0af488a59c3d2ba06e01fc60d87b86355#6d42deb0af488a59c3d2ba06e01fc60d87b86355",
+      "source": "git+https://github.com/ohos-rs/oxc?rev=1526b2c932d211c25d85dd172018889d0aeda776#1526b2c932d211c25d85dd172018889d0aeda776",
       "repository": "https://github.com/oxc-project/oxc",
       "files": [
         {
@@ -5592,9 +5727,9 @@
     },
     {
       "name": "oxc_syntax",
-      "version": "0.155.0",
+      "version": "0.159.0",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/oxc?rev=6d42deb0af488a59c3d2ba06e01fc60d87b86355#6d42deb0af488a59c3d2ba06e01fc60d87b86355",
+      "source": "git+https://github.com/ohos-rs/oxc?rev=1526b2c932d211c25d85dd172018889d0aeda776#1526b2c932d211c25d85dd172018889d0aeda776",
       "repository": "https://github.com/oxc-project/oxc",
       "files": [
         {
@@ -5613,9 +5748,9 @@
     },
     {
       "name": "oxc_transformer",
-      "version": "0.155.0",
+      "version": "0.159.0",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/oxc?rev=6d42deb0af488a59c3d2ba06e01fc60d87b86355#6d42deb0af488a59c3d2ba06e01fc60d87b86355",
+      "source": "git+https://github.com/ohos-rs/oxc?rev=1526b2c932d211c25d85dd172018889d0aeda776#1526b2c932d211c25d85dd172018889d0aeda776",
       "repository": "https://github.com/oxc-project/oxc",
       "files": [
         {
@@ -5634,9 +5769,9 @@
     },
     {
       "name": "oxc_transformer_plugins",
-      "version": "0.155.0",
+      "version": "0.159.0",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/oxc?rev=6d42deb0af488a59c3d2ba06e01fc60d87b86355#6d42deb0af488a59c3d2ba06e01fc60d87b86355",
+      "source": "git+https://github.com/ohos-rs/oxc?rev=1526b2c932d211c25d85dd172018889d0aeda776#1526b2c932d211c25d85dd172018889d0aeda776",
       "repository": "https://github.com/oxc-project/oxc",
       "files": [
         {
@@ -5655,9 +5790,9 @@
     },
     {
       "name": "oxc_traverse",
-      "version": "0.155.0",
+      "version": "0.159.0",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/oxc?rev=6d42deb0af488a59c3d2ba06e01fc60d87b86355#6d42deb0af488a59c3d2ba06e01fc60d87b86355",
+      "source": "git+https://github.com/ohos-rs/oxc?rev=1526b2c932d211c25d85dd172018889d0aeda776#1526b2c932d211c25d85dd172018889d0aeda776",
       "repository": "https://github.com/oxc-project/oxc",
       "files": [
         {
@@ -6907,9 +7042,9 @@
     },
     {
       "name": "rolldown",
-      "version": "1.2.14",
+      "version": "1.3.2",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/rolldown?rev=4f27b5fe103e661090848aaaa4f7d3084bc2e49c#4f27b5fe103e661090848aaaa4f7d3084bc2e49c",
+      "source": "git+https://github.com/ohos-rs/rolldown?rev=7ac5697bc917774005bdba4d6e90cd4a57bc105a#7ac5697bc917774005bdba4d6e90cd4a57bc105a",
       "repository": "https://github.com/rolldown/rolldown",
       "files": [
         {
@@ -6943,9 +7078,9 @@
     },
     {
       "name": "rolldown_common",
-      "version": "1.2.14",
+      "version": "1.3.2",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/rolldown?rev=4f27b5fe103e661090848aaaa4f7d3084bc2e49c#4f27b5fe103e661090848aaaa4f7d3084bc2e49c",
+      "source": "git+https://github.com/ohos-rs/rolldown?rev=7ac5697bc917774005bdba4d6e90cd4a57bc105a#7ac5697bc917774005bdba4d6e90cd4a57bc105a",
       "repository": "https://github.com/rolldown/rolldown",
       "files": [
         {
@@ -6964,9 +7099,9 @@
     },
     {
       "name": "rolldown_dev_common",
-      "version": "1.2.14",
+      "version": "1.3.2",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/rolldown?rev=4f27b5fe103e661090848aaaa4f7d3084bc2e49c#4f27b5fe103e661090848aaaa4f7d3084bc2e49c",
+      "source": "git+https://github.com/ohos-rs/rolldown?rev=7ac5697bc917774005bdba4d6e90cd4a57bc105a#7ac5697bc917774005bdba4d6e90cd4a57bc105a",
       "repository": "https://github.com/rolldown/rolldown",
       "files": [
         {
@@ -6985,9 +7120,9 @@
     },
     {
       "name": "rolldown_devtools",
-      "version": "1.2.14",
+      "version": "1.3.2",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/rolldown?rev=4f27b5fe103e661090848aaaa4f7d3084bc2e49c#4f27b5fe103e661090848aaaa4f7d3084bc2e49c",
+      "source": "git+https://github.com/ohos-rs/rolldown?rev=7ac5697bc917774005bdba4d6e90cd4a57bc105a#7ac5697bc917774005bdba4d6e90cd4a57bc105a",
       "repository": "https://github.com/rolldown/rolldown",
       "files": [
         {
@@ -7006,9 +7141,30 @@
     },
     {
       "name": "rolldown_devtools_action",
-      "version": "1.2.14",
+      "version": "1.3.2",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/rolldown?rev=4f27b5fe103e661090848aaaa4f7d3084bc2e49c#4f27b5fe103e661090848aaaa4f7d3084bc2e49c",
+      "source": "git+https://github.com/ohos-rs/rolldown?rev=7ac5697bc917774005bdba4d6e90cd4a57bc105a#7ac5697bc917774005bdba4d6e90cd4a57bc105a",
+      "repository": "https://github.com/rolldown/rolldown",
+      "files": [
+        {
+          "path": "texts/23ecfff35a5a2e80d92142f75228912c3b1abc4b5a8337a821ff4397e2f9f734.txt",
+          "sha256": "23ecfff35a5a2e80d92142f75228912c3b1abc4b5a8337a821ff4397e2f9f734",
+          "upstream_file": "LICENSE",
+          "origin": "Cargo source package"
+        },
+        {
+          "path": "texts/a877291d800ed43692f3f9ae09d8e01cc6f7293ad39d43896059c188ffbb8b7c.txt",
+          "sha256": "a877291d800ed43692f3f9ae09d8e01cc6f7293ad39d43896059c188ffbb8b7c",
+          "upstream_file": "THIRD-PARTY-LICENSE",
+          "origin": "Cargo source package"
+        }
+      ]
+    },
+    {
+      "name": "rolldown_devtools_metrics",
+      "version": "1.3.2",
+      "license": "MIT",
+      "source": "git+https://github.com/ohos-rs/rolldown?rev=7ac5697bc917774005bdba4d6e90cd4a57bc105a#7ac5697bc917774005bdba4d6e90cd4a57bc105a",
       "repository": "https://github.com/rolldown/rolldown",
       "files": [
         {
@@ -7027,9 +7183,9 @@
     },
     {
       "name": "rolldown_ecmascript",
-      "version": "1.2.14",
+      "version": "1.3.2",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/rolldown?rev=4f27b5fe103e661090848aaaa4f7d3084bc2e49c#4f27b5fe103e661090848aaaa4f7d3084bc2e49c",
+      "source": "git+https://github.com/ohos-rs/rolldown?rev=7ac5697bc917774005bdba4d6e90cd4a57bc105a#7ac5697bc917774005bdba4d6e90cd4a57bc105a",
       "repository": "https://github.com/rolldown/rolldown",
       "files": [
         {
@@ -7048,9 +7204,9 @@
     },
     {
       "name": "rolldown_ecmascript_utils",
-      "version": "1.2.14",
+      "version": "1.3.2",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/rolldown?rev=4f27b5fe103e661090848aaaa4f7d3084bc2e49c#4f27b5fe103e661090848aaaa4f7d3084bc2e49c",
+      "source": "git+https://github.com/ohos-rs/rolldown?rev=7ac5697bc917774005bdba4d6e90cd4a57bc105a#7ac5697bc917774005bdba4d6e90cd4a57bc105a",
       "repository": "https://github.com/rolldown/rolldown",
       "files": [
         {
@@ -7069,9 +7225,9 @@
     },
     {
       "name": "rolldown_error",
-      "version": "1.2.14",
+      "version": "1.3.2",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/rolldown?rev=4f27b5fe103e661090848aaaa4f7d3084bc2e49c#4f27b5fe103e661090848aaaa4f7d3084bc2e49c",
+      "source": "git+https://github.com/ohos-rs/rolldown?rev=7ac5697bc917774005bdba4d6e90cd4a57bc105a#7ac5697bc917774005bdba4d6e90cd4a57bc105a",
       "repository": "https://github.com/rolldown/rolldown",
       "files": [
         {
@@ -7090,9 +7246,9 @@
     },
     {
       "name": "rolldown_fs",
-      "version": "1.2.14",
+      "version": "1.3.2",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/rolldown?rev=4f27b5fe103e661090848aaaa4f7d3084bc2e49c#4f27b5fe103e661090848aaaa4f7d3084bc2e49c",
+      "source": "git+https://github.com/ohos-rs/rolldown?rev=7ac5697bc917774005bdba4d6e90cd4a57bc105a#7ac5697bc917774005bdba4d6e90cd4a57bc105a",
       "repository": "https://github.com/rolldown/rolldown",
       "files": [
         {
@@ -7111,9 +7267,9 @@
     },
     {
       "name": "rolldown_plugin",
-      "version": "1.2.14",
+      "version": "1.3.2",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/rolldown?rev=4f27b5fe103e661090848aaaa4f7d3084bc2e49c#4f27b5fe103e661090848aaaa4f7d3084bc2e49c",
+      "source": "git+https://github.com/ohos-rs/rolldown?rev=7ac5697bc917774005bdba4d6e90cd4a57bc105a#7ac5697bc917774005bdba4d6e90cd4a57bc105a",
       "repository": "https://github.com/rolldown/rolldown",
       "files": [
         {
@@ -7132,9 +7288,9 @@
     },
     {
       "name": "rolldown_plugin_asset_module",
-      "version": "1.2.14",
+      "version": "1.3.2",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/rolldown?rev=4f27b5fe103e661090848aaaa4f7d3084bc2e49c#4f27b5fe103e661090848aaaa4f7d3084bc2e49c",
+      "source": "git+https://github.com/ohos-rs/rolldown?rev=7ac5697bc917774005bdba4d6e90cd4a57bc105a#7ac5697bc917774005bdba4d6e90cd4a57bc105a",
       "repository": null,
       "files": [
         {
@@ -7153,9 +7309,9 @@
     },
     {
       "name": "rolldown_plugin_chunk_import_map",
-      "version": "1.2.14",
+      "version": "1.3.2",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/rolldown?rev=4f27b5fe103e661090848aaaa4f7d3084bc2e49c#4f27b5fe103e661090848aaaa4f7d3084bc2e49c",
+      "source": "git+https://github.com/ohos-rs/rolldown?rev=7ac5697bc917774005bdba4d6e90cd4a57bc105a#7ac5697bc917774005bdba4d6e90cd4a57bc105a",
       "repository": null,
       "files": [
         {
@@ -7174,9 +7330,9 @@
     },
     {
       "name": "rolldown_plugin_copy_module",
-      "version": "1.2.14",
+      "version": "1.3.2",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/rolldown?rev=4f27b5fe103e661090848aaaa4f7d3084bc2e49c#4f27b5fe103e661090848aaaa4f7d3084bc2e49c",
+      "source": "git+https://github.com/ohos-rs/rolldown?rev=7ac5697bc917774005bdba4d6e90cd4a57bc105a#7ac5697bc917774005bdba4d6e90cd4a57bc105a",
       "repository": null,
       "files": [
         {
@@ -7195,9 +7351,9 @@
     },
     {
       "name": "rolldown_plugin_data_url",
-      "version": "1.2.14",
+      "version": "1.3.2",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/rolldown?rev=4f27b5fe103e661090848aaaa4f7d3084bc2e49c#4f27b5fe103e661090848aaaa4f7d3084bc2e49c",
+      "source": "git+https://github.com/ohos-rs/rolldown?rev=7ac5697bc917774005bdba4d6e90cd4a57bc105a#7ac5697bc917774005bdba4d6e90cd4a57bc105a",
       "repository": null,
       "files": [
         {
@@ -7216,9 +7372,9 @@
     },
     {
       "name": "rolldown_plugin_hmr",
-      "version": "1.2.14",
+      "version": "1.3.2",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/rolldown?rev=4f27b5fe103e661090848aaaa4f7d3084bc2e49c#4f27b5fe103e661090848aaaa4f7d3084bc2e49c",
+      "source": "git+https://github.com/ohos-rs/rolldown?rev=7ac5697bc917774005bdba4d6e90cd4a57bc105a#7ac5697bc917774005bdba4d6e90cd4a57bc105a",
       "repository": "https://github.com/rolldown/rolldown",
       "files": [
         {
@@ -7237,9 +7393,9 @@
     },
     {
       "name": "rolldown_plugin_lazy_compilation",
-      "version": "1.2.14",
+      "version": "1.3.2",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/rolldown?rev=4f27b5fe103e661090848aaaa4f7d3084bc2e49c#4f27b5fe103e661090848aaaa4f7d3084bc2e49c",
+      "source": "git+https://github.com/ohos-rs/rolldown?rev=7ac5697bc917774005bdba4d6e90cd4a57bc105a#7ac5697bc917774005bdba4d6e90cd4a57bc105a",
       "repository": "https://github.com/rolldown/rolldown",
       "files": [
         {
@@ -7258,9 +7414,9 @@
     },
     {
       "name": "rolldown_plugin_oxc_runtime",
-      "version": "1.2.14",
+      "version": "1.3.2",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/rolldown?rev=4f27b5fe103e661090848aaaa4f7d3084bc2e49c#4f27b5fe103e661090848aaaa4f7d3084bc2e49c",
+      "source": "git+https://github.com/ohos-rs/rolldown?rev=7ac5697bc917774005bdba4d6e90cd4a57bc105a#7ac5697bc917774005bdba4d6e90cd4a57bc105a",
       "repository": "https://github.com/rolldown/rolldown",
       "files": [
         {
@@ -7279,9 +7435,9 @@
     },
     {
       "name": "rolldown_plugin_utils",
-      "version": "1.2.14",
+      "version": "1.3.2",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/rolldown?rev=4f27b5fe103e661090848aaaa4f7d3084bc2e49c#4f27b5fe103e661090848aaaa4f7d3084bc2e49c",
+      "source": "git+https://github.com/ohos-rs/rolldown?rev=7ac5697bc917774005bdba4d6e90cd4a57bc105a#7ac5697bc917774005bdba4d6e90cd4a57bc105a",
       "repository": "https://github.com/rolldown/rolldown",
       "files": [
         {
@@ -7300,9 +7456,9 @@
     },
     {
       "name": "rolldown_resolver",
-      "version": "1.2.14",
+      "version": "1.3.2",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/rolldown?rev=4f27b5fe103e661090848aaaa4f7d3084bc2e49c#4f27b5fe103e661090848aaaa4f7d3084bc2e49c",
+      "source": "git+https://github.com/ohos-rs/rolldown?rev=7ac5697bc917774005bdba4d6e90cd4a57bc105a#7ac5697bc917774005bdba4d6e90cd4a57bc105a",
       "repository": "https://github.com/rolldown/rolldown",
       "files": [
         {
@@ -7321,9 +7477,9 @@
     },
     {
       "name": "rolldown_sourcemap",
-      "version": "1.2.14",
+      "version": "1.3.2",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/rolldown?rev=4f27b5fe103e661090848aaaa4f7d3084bc2e49c#4f27b5fe103e661090848aaaa4f7d3084bc2e49c",
+      "source": "git+https://github.com/ohos-rs/rolldown?rev=7ac5697bc917774005bdba4d6e90cd4a57bc105a#7ac5697bc917774005bdba4d6e90cd4a57bc105a",
       "repository": "https://github.com/rolldown/rolldown",
       "files": [
         {
@@ -7342,9 +7498,9 @@
     },
     {
       "name": "rolldown_std_utils",
-      "version": "1.2.14",
+      "version": "1.3.2",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/rolldown?rev=4f27b5fe103e661090848aaaa4f7d3084bc2e49c#4f27b5fe103e661090848aaaa4f7d3084bc2e49c",
+      "source": "git+https://github.com/ohos-rs/rolldown?rev=7ac5697bc917774005bdba4d6e90cd4a57bc105a#7ac5697bc917774005bdba4d6e90cd4a57bc105a",
       "repository": "https://github.com/rolldown/rolldown",
       "files": [
         {
@@ -7363,9 +7519,9 @@
     },
     {
       "name": "rolldown_tracing",
-      "version": "1.2.14",
+      "version": "1.3.2",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/rolldown?rev=4f27b5fe103e661090848aaaa4f7d3084bc2e49c#4f27b5fe103e661090848aaaa4f7d3084bc2e49c",
+      "source": "git+https://github.com/ohos-rs/rolldown?rev=7ac5697bc917774005bdba4d6e90cd4a57bc105a#7ac5697bc917774005bdba4d6e90cd4a57bc105a",
       "repository": "https://github.com/rolldown/rolldown",
       "files": [
         {
@@ -7384,9 +7540,9 @@
     },
     {
       "name": "rolldown_utils",
-      "version": "1.2.14",
+      "version": "1.3.2",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/rolldown?rev=4f27b5fe103e661090848aaaa4f7d3084bc2e49c#4f27b5fe103e661090848aaaa4f7d3084bc2e49c",
+      "source": "git+https://github.com/ohos-rs/rolldown?rev=7ac5697bc917774005bdba4d6e90cd4a57bc105a#7ac5697bc917774005bdba4d6e90cd4a57bc105a",
       "repository": "https://github.com/rolldown/rolldown",
       "files": [
         {
@@ -7434,6 +7590,48 @@
         {
           "path": "texts/30fefc3a7d6a0041541858293bcbea2dde4caa4c0a5802f996a7f7e8c0085652.txt",
           "sha256": "30fefc3a7d6a0041541858293bcbea2dde4caa4c0a5802f996a7f7e8c0085652",
+          "upstream_file": "LICENSE-MIT",
+          "origin": "Cargo source package"
+        }
+      ]
+    },
+    {
+      "name": "rustc-demangle",
+      "version": "0.1.28",
+      "license": "MIT/Apache-2.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "repository": "https://github.com/rust-lang/rustc-demangle",
+      "files": [
+        {
+          "path": "texts/a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2.txt",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+          "upstream_file": "LICENSE-APACHE",
+          "origin": "Cargo source package"
+        },
+        {
+          "path": "texts/378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397.txt",
+          "sha256": "378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397",
+          "upstream_file": "LICENSE-MIT",
+          "origin": "Cargo source package"
+        }
+      ]
+    },
+    {
+      "name": "rustc-hash",
+      "version": "1.1.0",
+      "license": "Apache-2.0 OR MIT",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "repository": "https://github.com/rust-lang/rustc-hash",
+      "files": [
+        {
+          "path": "texts/a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2.txt",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+          "upstream_file": "LICENSE-APACHE",
+          "origin": "Cargo source package"
+        },
+        {
+          "path": "texts/23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3.txt",
+          "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
           "upstream_file": "LICENSE-MIT",
           "origin": "Cargo source package"
         }
@@ -7504,7 +7702,7 @@
     },
     {
       "name": "rustix",
-      "version": "1.1.4",
+      "version": "1.1.6",
       "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "repository": "https://github.com/bytecodealliance/rustix",
@@ -8255,6 +8453,27 @@
       ]
     },
     {
+      "name": "simd-utf16-len",
+      "version": "0.4.0",
+      "license": "MIT",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "repository": "https://github.com/SyMind/simd-utf16-len",
+      "files": [
+        {
+          "path": "texts/494f7e64f28c7486e80fbd6e83a8a27c207af57227aa09b1385b7df1add6b08c.txt",
+          "sha256": "494f7e64f28c7486e80fbd6e83a8a27c207af57227aa09b1385b7df1add6b08c",
+          "upstream_file": "LICENSE",
+          "origin": "Cargo source package"
+        },
+        {
+          "path": "texts/b71bd43a069ca0641a9ecfe585ca7b3c53b5cc1608f8b68321168698e28b5ea1.txt",
+          "sha256": "b71bd43a069ca0641a9ecfe585ca7b3c53b5cc1608f8b68321168698e28b5ea1",
+          "upstream_file": "LICENSE-MIT-RUST",
+          "origin": "Cargo source package"
+        }
+      ]
+    },
+    {
       "name": "simd_cesu8",
       "version": "1.2.0",
       "license": "Apache-2.0 OR MIT",
@@ -8322,6 +8541,27 @@
           "path": "texts/8ce0830173fdac609dfb4ea603fdc002c2f4af0dc9b1a005653f5da9cf534b18.txt",
           "sha256": "8ce0830173fdac609dfb4ea603fdc002c2f4af0dc9b1a005653f5da9cf534b18",
           "upstream_file": "LICENSE",
+          "origin": "Cargo source package"
+        }
+      ]
+    },
+    {
+      "name": "smallbitvec",
+      "version": "2.6.1",
+      "license": "MIT OR Apache-2.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "repository": "https://github.com/servo/smallbitvec",
+      "files": [
+        {
+          "path": "texts/a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2.txt",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+          "upstream_file": "LICENSE-APACHE",
+          "origin": "Cargo source package"
+        },
+        {
+          "path": "texts/daa94322de7eab889e055932396160395bd8e3af82f56ae8c419d3049111da72.txt",
+          "sha256": "daa94322de7eab889e055932396160395bd8e3af82f56ae8c419d3049111da72",
+          "upstream_file": "LICENSE-MIT",
           "origin": "Cargo source package"
         }
       ]
@@ -8484,9 +8724,9 @@
     },
     {
       "name": "string_wizard",
-      "version": "1.2.14",
+      "version": "1.3.2",
       "license": "MIT",
-      "source": "git+https://github.com/ohos-rs/rolldown?rev=4f27b5fe103e661090848aaaa4f7d3084bc2e49c#4f27b5fe103e661090848aaaa4f7d3084bc2e49c",
+      "source": "git+https://github.com/ohos-rs/rolldown?rev=7ac5697bc917774005bdba4d6e90cd4a57bc105a#7ac5697bc917774005bdba4d6e90cd4a57bc105a",
       "repository": null,
       "files": [
         {
@@ -8558,6 +8798,21 @@
         {
           "path": "texts/9540b70e808d1a8ff7210fad6fcc4d78757added54969e5af3b5361b7e2a6254.txt",
           "sha256": "9540b70e808d1a8ff7210fad6fcc4d78757added54969e5af3b5361b7e2a6254",
+          "upstream_file": "LICENSE",
+          "origin": "Cargo source package"
+        }
+      ]
+    },
+    {
+      "name": "supports-color",
+      "version": "3.0.2",
+      "license": "Apache-2.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "repository": "https://github.com/zkat/supports-color",
+      "files": [
+        {
+          "path": "texts/02872c3ff23e11da5a9b3289df11b581be36b4956bfb7cfdc3d8043f92d64794.txt",
+          "sha256": "02872c3ff23e11da5a9b3289df11b581be36b4956bfb7cfdc3d8043f92d64794",
           "upstream_file": "LICENSE",
           "origin": "Cargo source package"
         }
@@ -8828,6 +9083,27 @@
         {
           "path": "texts/23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3.txt",
           "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+          "upstream_file": "LICENSE-MIT",
+          "origin": "Cargo source package"
+        }
+      ]
+    },
+    {
+      "name": "thousands",
+      "version": "0.2.0",
+      "license": "MIT/Apache-2.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "repository": "https://github.com/tov/thousands-rs",
+      "files": [
+        {
+          "path": "texts/a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2.txt",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+          "upstream_file": "LICENSE-APACHE",
+          "origin": "Cargo source package"
+        },
+        {
+          "path": "texts/c6f6e439e7e93bcd1e9f434f31eb8fc7db4f462d95d8652a180033c3d396b4e2.txt",
+          "sha256": "c6f6e439e7e93bcd1e9f434f31eb8fc7db4f462d95d8652a180033c3d396b4e2",
           "upstream_file": "LICENSE-MIT",
           "origin": "Cargo source package"
         }
@@ -9306,11 +9582,23 @@
     },
     {
       "name": "tsrs_api",
-      "version": "0.18.0",
+      "version": "7.1.0-beta.tsrs2",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
-      "repository": null,
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=fd5328b12436fdc044724fcfe1cb8896351cd46a#fd5328b12436fdc044724fcfe1cb8896351cd46a",
+      "repository": "https://github.com/oxc-project/tsrs",
       "files": [
+        {
+          "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
+          "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
+          "upstream_file": "LICENSE",
+          "origin": "Cargo source package"
+        },
+        {
+          "path": "texts/1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118.txt",
+          "sha256": "1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118",
+          "upstream_file": "NOTICE",
+          "origin": "Cargo source package"
+        },
         {
           "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
           "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
@@ -9327,11 +9615,23 @@
     },
     {
       "name": "tsrs_api_codec",
-      "version": "0.18.0",
+      "version": "7.1.0-beta.tsrs2",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
-      "repository": null,
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=fd5328b12436fdc044724fcfe1cb8896351cd46a#fd5328b12436fdc044724fcfe1cb8896351cd46a",
+      "repository": "https://github.com/oxc-project/tsrs",
       "files": [
+        {
+          "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
+          "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
+          "upstream_file": "LICENSE",
+          "origin": "Cargo source package"
+        },
+        {
+          "path": "texts/1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118.txt",
+          "sha256": "1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118",
+          "upstream_file": "NOTICE",
+          "origin": "Cargo source package"
+        },
         {
           "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
           "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
@@ -9348,11 +9648,23 @@
     },
     {
       "name": "tsrs_api_transport",
-      "version": "0.18.0",
+      "version": "7.1.0-beta.tsrs2",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
-      "repository": null,
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=fd5328b12436fdc044724fcfe1cb8896351cd46a#fd5328b12436fdc044724fcfe1cb8896351cd46a",
+      "repository": "https://github.com/oxc-project/tsrs",
       "files": [
+        {
+          "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
+          "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
+          "upstream_file": "LICENSE",
+          "origin": "Cargo source package"
+        },
+        {
+          "path": "texts/1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118.txt",
+          "sha256": "1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118",
+          "upstream_file": "NOTICE",
+          "origin": "Cargo source package"
+        },
         {
           "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
           "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
@@ -9369,11 +9681,23 @@
     },
     {
       "name": "tsrs_ast",
-      "version": "0.18.0",
+      "version": "7.1.0-beta.tsrs2",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
-      "repository": null,
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=fd5328b12436fdc044724fcfe1cb8896351cd46a#fd5328b12436fdc044724fcfe1cb8896351cd46a",
+      "repository": "https://github.com/oxc-project/tsrs",
       "files": [
+        {
+          "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
+          "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
+          "upstream_file": "LICENSE",
+          "origin": "Cargo source package"
+        },
+        {
+          "path": "texts/1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118.txt",
+          "sha256": "1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118",
+          "upstream_file": "NOTICE",
+          "origin": "Cargo source package"
+        },
         {
           "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
           "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
@@ -9390,11 +9714,23 @@
     },
     {
       "name": "tsrs_astnav",
-      "version": "0.18.0",
+      "version": "7.1.0-beta.tsrs2",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
-      "repository": null,
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=fd5328b12436fdc044724fcfe1cb8896351cd46a#fd5328b12436fdc044724fcfe1cb8896351cd46a",
+      "repository": "https://github.com/oxc-project/tsrs",
       "files": [
+        {
+          "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
+          "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
+          "upstream_file": "LICENSE",
+          "origin": "Cargo source package"
+        },
+        {
+          "path": "texts/1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118.txt",
+          "sha256": "1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118",
+          "upstream_file": "NOTICE",
+          "origin": "Cargo source package"
+        },
         {
           "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
           "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
@@ -9411,11 +9747,23 @@
     },
     {
       "name": "tsrs_binder",
-      "version": "0.18.0",
+      "version": "7.1.0-beta.tsrs2",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
-      "repository": null,
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=fd5328b12436fdc044724fcfe1cb8896351cd46a#fd5328b12436fdc044724fcfe1cb8896351cd46a",
+      "repository": "https://github.com/oxc-project/tsrs",
       "files": [
+        {
+          "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
+          "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
+          "upstream_file": "LICENSE",
+          "origin": "Cargo source package"
+        },
+        {
+          "path": "texts/1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118.txt",
+          "sha256": "1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118",
+          "upstream_file": "NOTICE",
+          "origin": "Cargo source package"
+        },
         {
           "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
           "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
@@ -9432,11 +9780,23 @@
     },
     {
       "name": "tsrs_checker",
-      "version": "0.18.0",
+      "version": "7.1.0-beta.tsrs2",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
-      "repository": null,
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=fd5328b12436fdc044724fcfe1cb8896351cd46a#fd5328b12436fdc044724fcfe1cb8896351cd46a",
+      "repository": "https://github.com/oxc-project/tsrs",
       "files": [
+        {
+          "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
+          "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
+          "upstream_file": "LICENSE",
+          "origin": "Cargo source package"
+        },
+        {
+          "path": "texts/1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118.txt",
+          "sha256": "1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118",
+          "upstream_file": "NOTICE",
+          "origin": "Cargo source package"
+        },
         {
           "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
           "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
@@ -9453,11 +9813,23 @@
     },
     {
       "name": "tsrs_compiler",
-      "version": "0.18.0",
+      "version": "7.1.0-beta.tsrs2",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
-      "repository": null,
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=fd5328b12436fdc044724fcfe1cb8896351cd46a#fd5328b12436fdc044724fcfe1cb8896351cd46a",
+      "repository": "https://github.com/oxc-project/tsrs",
       "files": [
+        {
+          "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
+          "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
+          "upstream_file": "LICENSE",
+          "origin": "Cargo source package"
+        },
+        {
+          "path": "texts/1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118.txt",
+          "sha256": "1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118",
+          "upstream_file": "NOTICE",
+          "origin": "Cargo source package"
+        },
         {
           "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
           "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
@@ -9474,11 +9846,23 @@
     },
     {
       "name": "tsrs_contentmapper",
-      "version": "0.18.0",
+      "version": "7.1.0-beta.tsrs2",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
-      "repository": null,
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=fd5328b12436fdc044724fcfe1cb8896351cd46a#fd5328b12436fdc044724fcfe1cb8896351cd46a",
+      "repository": "https://github.com/oxc-project/tsrs",
       "files": [
+        {
+          "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
+          "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
+          "upstream_file": "LICENSE",
+          "origin": "Cargo source package"
+        },
+        {
+          "path": "texts/1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118.txt",
+          "sha256": "1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118",
+          "upstream_file": "NOTICE",
+          "origin": "Cargo source package"
+        },
         {
           "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
           "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
@@ -9495,11 +9879,23 @@
     },
     {
       "name": "tsrs_core",
-      "version": "0.18.0",
+      "version": "7.1.0-beta.tsrs2",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
-      "repository": null,
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=fd5328b12436fdc044724fcfe1cb8896351cd46a#fd5328b12436fdc044724fcfe1cb8896351cd46a",
+      "repository": "https://github.com/oxc-project/tsrs",
       "files": [
+        {
+          "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
+          "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
+          "upstream_file": "LICENSE",
+          "origin": "Cargo source package"
+        },
+        {
+          "path": "texts/1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118.txt",
+          "sha256": "1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118",
+          "upstream_file": "NOTICE",
+          "origin": "Cargo source package"
+        },
         {
           "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
           "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
@@ -9516,11 +9912,23 @@
     },
     {
       "name": "tsrs_declarations",
-      "version": "0.18.0",
+      "version": "7.1.0-beta.tsrs2",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
-      "repository": null,
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=fd5328b12436fdc044724fcfe1cb8896351cd46a#fd5328b12436fdc044724fcfe1cb8896351cd46a",
+      "repository": "https://github.com/oxc-project/tsrs",
       "files": [
+        {
+          "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
+          "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
+          "upstream_file": "LICENSE",
+          "origin": "Cargo source package"
+        },
+        {
+          "path": "texts/1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118.txt",
+          "sha256": "1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118",
+          "upstream_file": "NOTICE",
+          "origin": "Cargo source package"
+        },
         {
           "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
           "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
@@ -9537,10 +9945,85 @@
     },
     {
       "name": "tsrs_diagnostics",
-      "version": "0.18.0",
+      "version": "7.1.0-beta.tsrs2",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
-      "repository": null,
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=fd5328b12436fdc044724fcfe1cb8896351cd46a#fd5328b12436fdc044724fcfe1cb8896351cd46a",
+      "repository": "https://github.com/oxc-project/tsrs",
+      "files": [
+        {
+          "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
+          "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
+          "upstream_file": "LICENSE",
+          "origin": "Cargo source package"
+        },
+        {
+          "path": "texts/1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118.txt",
+          "sha256": "1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118",
+          "upstream_file": "NOTICE",
+          "origin": "Cargo source package"
+        },
+        {
+          "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
+          "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
+          "upstream_file": "LICENSE",
+          "origin": "Cargo source package"
+        },
+        {
+          "path": "texts/1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118.txt",
+          "sha256": "1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118",
+          "upstream_file": "NOTICE",
+          "origin": "Cargo source package"
+        }
+      ]
+    },
+    {
+      "name": "tsrs_execute",
+      "version": "7.1.0-beta.tsrs2",
+      "license": "Apache-2.0",
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=fd5328b12436fdc044724fcfe1cb8896351cd46a#fd5328b12436fdc044724fcfe1cb8896351cd46a",
+      "repository": "https://github.com/oxc-project/tsrs",
+      "files": [
+        {
+          "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
+          "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
+          "upstream_file": "LICENSE",
+          "origin": "Cargo source package"
+        },
+        {
+          "path": "texts/1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118.txt",
+          "sha256": "1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118",
+          "upstream_file": "NOTICE",
+          "origin": "Cargo source package"
+        }
+      ]
+    },
+    {
+      "name": "tsrs_fswatch",
+      "version": "7.1.0-beta.tsrs2",
+      "license": "Apache-2.0",
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=fd5328b12436fdc044724fcfe1cb8896351cd46a#fd5328b12436fdc044724fcfe1cb8896351cd46a",
+      "repository": "https://github.com/oxc-project/tsrs",
+      "files": [
+        {
+          "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
+          "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
+          "upstream_file": "LICENSE",
+          "origin": "Cargo source package"
+        },
+        {
+          "path": "texts/1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118.txt",
+          "sha256": "1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118",
+          "upstream_file": "NOTICE",
+          "origin": "Cargo source package"
+        }
+      ]
+    },
+    {
+      "name": "tsrs_incremental",
+      "version": "7.1.0-beta.tsrs2",
+      "license": "Apache-2.0",
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=fd5328b12436fdc044724fcfe1cb8896351cd46a#fd5328b12436fdc044724fcfe1cb8896351cd46a",
+      "repository": "https://github.com/oxc-project/tsrs",
       "files": [
         {
           "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
@@ -9558,11 +10041,23 @@
     },
     {
       "name": "tsrs_ipc",
-      "version": "0.18.0",
+      "version": "7.1.0-beta.tsrs2",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
-      "repository": null,
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=fd5328b12436fdc044724fcfe1cb8896351cd46a#fd5328b12436fdc044724fcfe1cb8896351cd46a",
+      "repository": "https://github.com/oxc-project/tsrs",
       "files": [
+        {
+          "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
+          "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
+          "upstream_file": "LICENSE",
+          "origin": "Cargo source package"
+        },
+        {
+          "path": "texts/1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118.txt",
+          "sha256": "1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118",
+          "upstream_file": "NOTICE",
+          "origin": "Cargo source package"
+        },
         {
           "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
           "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
@@ -9579,11 +10074,23 @@
     },
     {
       "name": "tsrs_ls",
-      "version": "0.18.0",
+      "version": "7.1.0-beta.tsrs2",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
-      "repository": null,
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=fd5328b12436fdc044724fcfe1cb8896351cd46a#fd5328b12436fdc044724fcfe1cb8896351cd46a",
+      "repository": "https://github.com/oxc-project/tsrs",
       "files": [
+        {
+          "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
+          "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
+          "upstream_file": "LICENSE",
+          "origin": "Cargo source package"
+        },
+        {
+          "path": "texts/1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118.txt",
+          "sha256": "1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118",
+          "upstream_file": "NOTICE",
+          "origin": "Cargo source package"
+        },
         {
           "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
           "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
@@ -9600,11 +10107,23 @@
     },
     {
       "name": "tsrs_lsproto",
-      "version": "0.18.0",
+      "version": "7.1.0-beta.tsrs2",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
-      "repository": null,
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=fd5328b12436fdc044724fcfe1cb8896351cd46a#fd5328b12436fdc044724fcfe1cb8896351cd46a",
+      "repository": "https://github.com/oxc-project/tsrs",
       "files": [
+        {
+          "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
+          "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
+          "upstream_file": "LICENSE",
+          "origin": "Cargo source package"
+        },
+        {
+          "path": "texts/1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118.txt",
+          "sha256": "1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118",
+          "upstream_file": "NOTICE",
+          "origin": "Cargo source package"
+        },
         {
           "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
           "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
@@ -9621,11 +10140,23 @@
     },
     {
       "name": "tsrs_module",
-      "version": "0.18.0",
+      "version": "7.1.0-beta.tsrs2",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
-      "repository": null,
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=fd5328b12436fdc044724fcfe1cb8896351cd46a#fd5328b12436fdc044724fcfe1cb8896351cd46a",
+      "repository": "https://github.com/oxc-project/tsrs",
       "files": [
+        {
+          "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
+          "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
+          "upstream_file": "LICENSE",
+          "origin": "Cargo source package"
+        },
+        {
+          "path": "texts/1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118.txt",
+          "sha256": "1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118",
+          "upstream_file": "NOTICE",
+          "origin": "Cargo source package"
+        },
         {
           "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
           "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
@@ -9642,11 +10173,23 @@
     },
     {
       "name": "tsrs_modulespecifiers",
-      "version": "0.18.0",
+      "version": "7.1.0-beta.tsrs2",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
-      "repository": null,
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=fd5328b12436fdc044724fcfe1cb8896351cd46a#fd5328b12436fdc044724fcfe1cb8896351cd46a",
+      "repository": "https://github.com/oxc-project/tsrs",
       "files": [
+        {
+          "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
+          "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
+          "upstream_file": "LICENSE",
+          "origin": "Cargo source package"
+        },
+        {
+          "path": "texts/1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118.txt",
+          "sha256": "1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118",
+          "upstream_file": "NOTICE",
+          "origin": "Cargo source package"
+        },
         {
           "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
           "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
@@ -9663,11 +10206,23 @@
     },
     {
       "name": "tsrs_parser",
-      "version": "0.18.0",
+      "version": "7.1.0-beta.tsrs2",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
-      "repository": null,
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=fd5328b12436fdc044724fcfe1cb8896351cd46a#fd5328b12436fdc044724fcfe1cb8896351cd46a",
+      "repository": "https://github.com/oxc-project/tsrs",
       "files": [
+        {
+          "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
+          "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
+          "upstream_file": "LICENSE",
+          "origin": "Cargo source package"
+        },
+        {
+          "path": "texts/1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118.txt",
+          "sha256": "1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118",
+          "upstream_file": "NOTICE",
+          "origin": "Cargo source package"
+        },
         {
           "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
           "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
@@ -9684,11 +10239,23 @@
     },
     {
       "name": "tsrs_printer",
-      "version": "0.18.0",
+      "version": "7.1.0-beta.tsrs2",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
-      "repository": null,
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=fd5328b12436fdc044724fcfe1cb8896351cd46a#fd5328b12436fdc044724fcfe1cb8896351cd46a",
+      "repository": "https://github.com/oxc-project/tsrs",
       "files": [
+        {
+          "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
+          "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
+          "upstream_file": "LICENSE",
+          "origin": "Cargo source package"
+        },
+        {
+          "path": "texts/1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118.txt",
+          "sha256": "1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118",
+          "upstream_file": "NOTICE",
+          "origin": "Cargo source package"
+        },
         {
           "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
           "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
@@ -9705,11 +10272,23 @@
     },
     {
       "name": "tsrs_project",
-      "version": "0.18.0",
+      "version": "7.1.0-beta.tsrs2",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
-      "repository": null,
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=fd5328b12436fdc044724fcfe1cb8896351cd46a#fd5328b12436fdc044724fcfe1cb8896351cd46a",
+      "repository": "https://github.com/oxc-project/tsrs",
       "files": [
+        {
+          "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
+          "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
+          "upstream_file": "LICENSE",
+          "origin": "Cargo source package"
+        },
+        {
+          "path": "texts/1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118.txt",
+          "sha256": "1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118",
+          "upstream_file": "NOTICE",
+          "origin": "Cargo source package"
+        },
         {
           "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
           "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
@@ -9726,11 +10305,23 @@
     },
     {
       "name": "tsrs_projectutil",
-      "version": "0.18.0",
+      "version": "7.1.0-beta.tsrs2",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
-      "repository": null,
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=fd5328b12436fdc044724fcfe1cb8896351cd46a#fd5328b12436fdc044724fcfe1cb8896351cd46a",
+      "repository": "https://github.com/oxc-project/tsrs",
       "files": [
+        {
+          "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
+          "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
+          "upstream_file": "LICENSE",
+          "origin": "Cargo source package"
+        },
+        {
+          "path": "texts/1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118.txt",
+          "sha256": "1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118",
+          "upstream_file": "NOTICE",
+          "origin": "Cargo source package"
+        },
         {
           "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
           "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
@@ -9747,11 +10338,23 @@
     },
     {
       "name": "tsrs_pseudochecker",
-      "version": "0.18.0",
+      "version": "7.1.0-beta.tsrs2",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
-      "repository": null,
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=fd5328b12436fdc044724fcfe1cb8896351cd46a#fd5328b12436fdc044724fcfe1cb8896351cd46a",
+      "repository": "https://github.com/oxc-project/tsrs",
       "files": [
+        {
+          "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
+          "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
+          "upstream_file": "LICENSE",
+          "origin": "Cargo source package"
+        },
+        {
+          "path": "texts/1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118.txt",
+          "sha256": "1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118",
+          "upstream_file": "NOTICE",
+          "origin": "Cargo source package"
+        },
         {
           "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
           "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
@@ -9768,11 +10371,23 @@
     },
     {
       "name": "tsrs_scanner",
-      "version": "0.18.0",
+      "version": "7.1.0-beta.tsrs2",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
-      "repository": null,
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=fd5328b12436fdc044724fcfe1cb8896351cd46a#fd5328b12436fdc044724fcfe1cb8896351cd46a",
+      "repository": "https://github.com/oxc-project/tsrs",
       "files": [
+        {
+          "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
+          "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
+          "upstream_file": "LICENSE",
+          "origin": "Cargo source package"
+        },
+        {
+          "path": "texts/1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118.txt",
+          "sha256": "1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118",
+          "upstream_file": "NOTICE",
+          "origin": "Cargo source package"
+        },
         {
           "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
           "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
@@ -9789,11 +10404,23 @@
     },
     {
       "name": "tsrs_sourcemap",
-      "version": "0.18.0",
+      "version": "7.1.0-beta.tsrs2",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
-      "repository": null,
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=fd5328b12436fdc044724fcfe1cb8896351cd46a#fd5328b12436fdc044724fcfe1cb8896351cd46a",
+      "repository": "https://github.com/oxc-project/tsrs",
       "files": [
+        {
+          "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
+          "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
+          "upstream_file": "LICENSE",
+          "origin": "Cargo source package"
+        },
+        {
+          "path": "texts/1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118.txt",
+          "sha256": "1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118",
+          "upstream_file": "NOTICE",
+          "origin": "Cargo source package"
+        },
         {
           "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
           "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
@@ -9810,11 +10437,23 @@
     },
     {
       "name": "tsrs_spanmap",
-      "version": "0.18.0",
+      "version": "7.1.0-beta.tsrs2",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
-      "repository": null,
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=fd5328b12436fdc044724fcfe1cb8896351cd46a#fd5328b12436fdc044724fcfe1cb8896351cd46a",
+      "repository": "https://github.com/oxc-project/tsrs",
       "files": [
+        {
+          "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
+          "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
+          "upstream_file": "LICENSE",
+          "origin": "Cargo source package"
+        },
+        {
+          "path": "texts/1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118.txt",
+          "sha256": "1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118",
+          "upstream_file": "NOTICE",
+          "origin": "Cargo source package"
+        },
         {
           "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
           "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
@@ -9831,11 +10470,23 @@
     },
     {
       "name": "tsrs_transformers",
-      "version": "0.18.0",
+      "version": "7.1.0-beta.tsrs2",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
-      "repository": null,
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=fd5328b12436fdc044724fcfe1cb8896351cd46a#fd5328b12436fdc044724fcfe1cb8896351cd46a",
+      "repository": "https://github.com/oxc-project/tsrs",
       "files": [
+        {
+          "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
+          "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
+          "upstream_file": "LICENSE",
+          "origin": "Cargo source package"
+        },
+        {
+          "path": "texts/1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118.txt",
+          "sha256": "1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118",
+          "upstream_file": "NOTICE",
+          "origin": "Cargo source package"
+        },
         {
           "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
           "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
@@ -9852,11 +10503,23 @@
     },
     {
       "name": "tsrs_tsoptions",
-      "version": "0.18.0",
+      "version": "7.1.0-beta.tsrs2",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
-      "repository": null,
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=fd5328b12436fdc044724fcfe1cb8896351cd46a#fd5328b12436fdc044724fcfe1cb8896351cd46a",
+      "repository": "https://github.com/oxc-project/tsrs",
       "files": [
+        {
+          "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
+          "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
+          "upstream_file": "LICENSE",
+          "origin": "Cargo source package"
+        },
+        {
+          "path": "texts/1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118.txt",
+          "sha256": "1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118",
+          "upstream_file": "NOTICE",
+          "origin": "Cargo source package"
+        },
         {
           "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
           "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
@@ -9873,11 +10536,23 @@
     },
     {
       "name": "tsrs_vfs",
-      "version": "0.18.0",
+      "version": "7.1.0-beta.tsrs2",
       "license": "Apache-2.0",
-      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=32f89d8779168460e8b45274aaaccce69b9d2f5e#32f89d8779168460e8b45274aaaccce69b9d2f5e",
-      "repository": null,
+      "source": "git+https://github.com/ohos-rs/tsrs.git?rev=fd5328b12436fdc044724fcfe1cb8896351cd46a#fd5328b12436fdc044724fcfe1cb8896351cd46a",
+      "repository": "https://github.com/oxc-project/tsrs",
       "files": [
+        {
+          "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
+          "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
+          "upstream_file": "LICENSE",
+          "origin": "Cargo source package"
+        },
+        {
+          "path": "texts/1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118.txt",
+          "sha256": "1a4f42d83bf205aaf1b474e1a8c133cc5365003a188ba5f257d8aa4741355118",
+          "upstream_file": "NOTICE",
+          "origin": "Cargo source package"
+        },
         {
           "path": "texts/a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47.txt",
           "sha256": "a7d00bfd54525bc694b6e32f64c7ebcf5e6b7ae3657be5cc12767bce74654a47",
@@ -11673,6 +12348,21 @@
       "license": "MIT",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "repository": "https://github.com/dtolnay/zmij",
+      "files": [
+        {
+          "path": "texts/23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3.txt",
+          "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+          "upstream_file": "LICENSE-MIT",
+          "origin": "Cargo source package"
+        }
+      ]
+    },
+    {
+      "name": "zmij_ecma",
+      "version": "1.0.23",
+      "license": "MIT",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "repository": "https://github.com/magic-akari/zmij_ecma",
       "files": [
         {
           "path": "texts/23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3.txt",

@@ -9,7 +9,6 @@ use oxc_codegen::{CodegenOptions, IndentChar};
 use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
 use oxc_span::SourceType;
-use rolldown_sourcemap::SourceMapBuilder;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::api_transform;
@@ -861,34 +860,31 @@ impl RolldownEtsTransformer {
             .map(|token| (token.get_dst_line(), token.get_dst_col()))
             .collect::<FxHashSet<_>>();
 
-        let mut builder = SourceMapBuilder::default();
-        if let Some(file) = reprint.get_file() {
-            builder.set_file(file);
-        }
-        for name in reprint.get_names() {
-            builder.add_name(name);
-        }
-        for source in reprint.get_sources() {
-            builder.set_source_and_content(source, "");
-        }
-        for token in reprint.get_tokens() {
-            let Some(source_id) = token.get_source_id() else {
-                continue;
-            };
-            if !mapped_intermediate_positions.contains(&(token.get_src_line(), token.get_src_col()))
-            {
-                continue;
-            }
-            builder.add_token(
-                token.get_dst_line(),
-                token.get_dst_col(),
-                token.get_src_line(),
-                token.get_src_col(),
-                Some(source_id),
-                token.get_name_id(),
-            );
-        }
-        let filtered_reprint = builder.into_sourcemap();
+        // Keep the reprint map's file, names, and sources (including unknown
+        // `None` names) so source IDs and name IDs stay stable while filtering.
+        let mut parts = reprint.into_parts();
+        parts.token_chunks = None;
+        parts.tokens = parts
+            .tokens
+            .iter()
+            .filter_map(|token| {
+                let source_id = token.get_source_id()?;
+                if !mapped_intermediate_positions
+                    .contains(&(token.get_src_line(), token.get_src_col()))
+                {
+                    return None;
+                }
+                Some(oxc_sourcemap::Token::new(
+                    token.get_dst_line(),
+                    token.get_dst_col(),
+                    token.get_src_line(),
+                    token.get_src_col(),
+                    Some(source_id),
+                    token.get_name_id(),
+                ))
+            })
+            .collect();
+        let filtered_reprint = rolldown_sourcemap::SourceMap::from(parts);
         Ok(
             rolldown_sourcemap::collapse_sourcemaps(&[
                 transform.as_source_map(),

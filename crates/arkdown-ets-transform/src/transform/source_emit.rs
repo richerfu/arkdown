@@ -310,19 +310,10 @@ impl HvigorTypescriptPrinter {
                 right.dst_line == left.dst_line && right.dst_col == left.dst_col
             });
 
-            let mut builder = SourceMapBuilder::default();
-            if let Some(file) = source_map.get_file() {
-                builder.set_file(file);
-            }
-            for name in source_map.get_names() {
-                builder.add_name(name);
-            }
-            for source in source_map.get_sources() {
-                builder.set_source_and_content(source, "");
-            }
-            // Exact-size collection avoids geometric growth and the builder's
-            // shrink-to-fit copy for the final (already sorted) token buffer.
-            let mut parts = builder.into_sourcemap().into_parts();
+            // Reuse the map's file, names, and sources so source IDs stay
+            // stable, including unknown (`None`) source names.
+            let mut parts = source_map.into_parts();
+            parts.token_chunks = None;
             parts.tokens = tokens
                 .iter()
                 .map(|token| {

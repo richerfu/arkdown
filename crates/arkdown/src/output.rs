@@ -385,7 +385,9 @@ impl WrittenOutput {
         let sources = decoded
             .get_sources()
             .enumerate()
-            .map(|(source_id, source)| (source_id as u32, source.to_string()))
+            .filter_map(|(source_id, source)| {
+                source.map(|source| (source_id as u32, source.to_string()))
+            })
             .collect::<Vec<_>>();
         if sources.is_empty() {
             return Self::fallback_hvigor_source_map_entries(source_map);

@@ -20,9 +20,9 @@ use arkdown_ets_transform::{
 };
 use rolldown_common::LogWithoutPlugin;
 use rolldown_plugin::{
-    HookLoadArgs, HookLoadOutput, HookLoadReturn, HookTransformArgs, HookTransformOutput,
-    HookTransformOutputMap, HookTransformReturn, HookUsage, Plugin, SharedLoadPluginContext,
-    SharedTransformPluginContext,
+    HookBuildStartArgs, HookLoadArgs, HookLoadOutput, HookLoadReturn, HookNoopReturn,
+    HookTransformArgs, HookTransformOutput, HookTransformOutputMap, HookTransformReturn, HookUsage,
+    Plugin, PluginContext, SharedLoadPluginContext, SharedTransformPluginContext,
 };
 use rolldown_utils::dashmap::FxDashMap;
 
@@ -199,23 +199,31 @@ impl EtsTransformPlugin {
                 HookTransformOutputMap::Sourcemap(Box::new(map.into_inner()))
             });
         if output.record_module_source_code || !output.crossplatform_collection.is_empty() {
-            ctx.meta()
-                .get_or_insert_default::<EtsTransformModuleMetadata>()
-                .record(
-                    args.id.to_string(),
-                    EtsTransformModuleMetadataEntry {
-                        module_source_code: output.module_source_code.clone(),
-                        transform_source_map,
-                        transform_code_hash,
-                        module_source_emits_javascript: output.module_source_emits_javascript,
-                        emits_javascript: output.emits_javascript,
-                        has_source_map,
-                        is_comment_only_javascript: output.is_comment_only_javascript,
-                        is_shared_module: output.is_shared_module,
-                        insight_intent: output.insight_intent,
-                        crossplatform_collection: output.crossplatform_collection,
-                    },
-                );
+            // `build_start` seeds the map before hooks run concurrently; keep a
+            // lazy fallback for direct hook invocation in tests.
+            let metadata = match ctx.meta().get::<EtsTransformModuleMetadata>() {
+                Some(metadata) => metadata,
+                None => {
+                    let metadata = Arc::new(EtsTransformModuleMetadata::default());
+                    ctx.meta().insert(Arc::clone(&metadata));
+                    metadata
+                }
+            };
+            metadata.record(
+                args.id.to_string(),
+                EtsTransformModuleMetadataEntry {
+                    module_source_code: output.module_source_code.clone(),
+                    transform_source_map,
+                    transform_code_hash,
+                    module_source_emits_javascript: output.module_source_emits_javascript,
+                    emits_javascript: output.emits_javascript,
+                    has_source_map,
+                    is_comment_only_javascript: output.is_comment_only_javascript,
+                    is_shared_module: output.is_shared_module,
+                    insight_intent: output.insight_intent,
+                    crossplatform_collection: output.crossplatform_collection,
+                },
+            );
         }
         Ok(Some(HookTransformOutput {
             code: Some(output.code),
@@ -382,7 +390,22 @@ impl Plugin for EtsTransformPlugin {
     }
 
     fn register_hook_usage(&self) -> HookUsage {
-        HookUsage::Transform | HookUsage::Load
+        HookUsage::BuildStart | HookUsage::Transform | HookUsage::Load
+    }
+
+    fn build_start(
+        &self,
+        ctx: &PluginContext,
+        _args: &HookBuildStartArgs<'_>,
+    ) -> impl std::future::Future<Output = HookNoopReturn> + Send {
+        // Rolldown's plugin context no longer offers an atomic
+        // get-or-insert-default. Seed the metadata once before concurrent
+        // transform hooks run so they all record into the same map.
+        if ctx.meta().get::<EtsTransformModuleMetadata>().is_none() {
+            ctx.meta()
+                .insert(Arc::new(EtsTransformModuleMetadata::default()));
+        }
+        ready(Ok(()))
     }
 
     fn load_meta(&self) -> Option<rolldown_plugin::PluginHookMeta> {
