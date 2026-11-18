@@ -1,4 +1,4 @@
-//! Text conversions for OXC 0.155 string types.
+//! Text conversions for OXC 0.159 string types.
 //!
 //! OXC now stores JavaScript string literals as [`JSStr`], which is WTF-8 and may
 //! contain lone surrogates. These helpers keep the conversion explicit: names

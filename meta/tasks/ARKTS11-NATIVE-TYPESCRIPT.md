@@ -11,7 +11,7 @@
 - 上次语言移植验证：1003/1003 linter、243/243 compiler programs 与固定 OH 编译器完整诊断一致。
 - 构建使用 Cargo `--locked`；三平台包附带 binding 和编译器 license/notice，标准库已嵌入。
   删除独立 `compiler-source.mjs`，版本固定由 Cargo.toml / Cargo.lock 负责。
-- Rust 工具链与 tsrs 一致，固定 1.99.0；先推送 tsrs 分支，再更新 Arkdown 的 Cargo rev 和 lockfile，远端才能取到源码。
+- Rust 工具链与 tsrs 一致，固定 1.100.0；先推送 tsrs 分支，再更新 Arkdown 的 Cargo rev 和 lockfile，远端才能取到源码。
 
 ## 本次 crate 接入验证
 

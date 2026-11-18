@@ -1,5 +1,5 @@
 [toolchain]
 # Match the pinned tsrs compiler toolchain for in-process crate integration.
-channel = "1.99.0"
+channel = "1.100.0"
 components = ["clippy", "rustfmt"]
 profile = "minimal"

@@ -31,9 +31,9 @@ license = "MIT OR Apache-2.0"
 license-file = "LICENSE"
 
 [workspace.dependencies]
-tsrs_api = { git = "https://github.com/ohos-rs/tsrs.git", rev = "32f89d8779168460e8b45274aaaccce69b9d2f5e" }
-tsrs_core = { git = "https://github.com/ohos-rs/tsrs.git", rev = "32f89d8779168460e8b45274aaaccce69b9d2f5e" }
-tsrs_vfs = { git = "https://github.com/ohos-rs/tsrs.git", rev = "32f89d8779168460e8b45274aaaccce69b9d2f5e" }
+tsrs_api = { git = "https://github.com/ohos-rs/tsrs.git", rev = "fd5328b12436fdc044724fcfe1cb8896351cd46a" }
+tsrs_core = { git = "https://github.com/ohos-rs/tsrs.git", rev = "fd5328b12436fdc044724fcfe1cb8896351cd46a" }
+tsrs_vfs = { git = "https://github.com/ohos-rs/tsrs.git", rev = "fd5328b12436fdc044724fcfe1cb8896351cd46a" }
 # Workspace crates
 arkdown = { path = "crates/arkdown" }
 arkdown-abc = { path = "crates/arkdown-abc" }
@@ -60,31 +60,31 @@ arkdown-watcher = { path = "crates/arkdown-watcher" }
 hapsigner = { version = "0.2.0", default-features = false }
 
 # Parser — ohos-rs OXC fork with ArkTS/ArkUI support.
-oxc = { git = "https://github.com/ohos-rs/oxc", rev = "6d42deb0af488a59c3d2ba06e01fc60d87b86355", features = ["full"] }
-oxc_allocator = { git = "https://github.com/ohos-rs/oxc", rev = "6d42deb0af488a59c3d2ba06e01fc60d87b86355" }
-oxc_ast = { git = "https://github.com/ohos-rs/oxc", rev = "6d42deb0af488a59c3d2ba06e01fc60d87b86355" }
-oxc_parser = { git = "https://github.com/ohos-rs/oxc", rev = "6d42deb0af488a59c3d2ba06e01fc60d87b86355" }
-oxc_semantic = { git = "https://github.com/ohos-rs/oxc", rev = "6d42deb0af488a59c3d2ba06e01fc60d87b86355", features = ["jsdoc"] }
-oxc_span = { git = "https://github.com/ohos-rs/oxc", rev = "6d42deb0af488a59c3d2ba06e01fc60d87b86355" }
-oxc_sourcemap = "9.0.0"
-oxc_str = { git = "https://github.com/ohos-rs/oxc", rev = "6d42deb0af488a59c3d2ba06e01fc60d87b86355" }
-oxc_ast_visit = { git = "https://github.com/ohos-rs/oxc", rev = "6d42deb0af488a59c3d2ba06e01fc60d87b86355" }
-oxc_syntax = { git = "https://github.com/ohos-rs/oxc", rev = "6d42deb0af488a59c3d2ba06e01fc60d87b86355" }
-oxc_transformer = { git = "https://github.com/ohos-rs/oxc", rev = "6d42deb0af488a59c3d2ba06e01fc60d87b86355" }
-oxc_isolated_declarations = { git = "https://github.com/ohos-rs/oxc", rev = "6d42deb0af488a59c3d2ba06e01fc60d87b86355" }
-oxc_codegen = { git = "https://github.com/ohos-rs/oxc", rev = "6d42deb0af488a59c3d2ba06e01fc60d87b86355" }
-oxc_diagnostics = { git = "https://github.com/ohos-rs/oxc", rev = "6d42deb0af488a59c3d2ba06e01fc60d87b86355" }
-oxc_minifier = { git = "https://github.com/ohos-rs/oxc", rev = "6d42deb0af488a59c3d2ba06e01fc60d87b86355" }
+oxc = { git = "https://github.com/ohos-rs/oxc", rev = "1526b2c932d211c25d85dd172018889d0aeda776", features = ["full"] }
+oxc_allocator = { git = "https://github.com/ohos-rs/oxc", rev = "1526b2c932d211c25d85dd172018889d0aeda776" }
+oxc_ast = { git = "https://github.com/ohos-rs/oxc", rev = "1526b2c932d211c25d85dd172018889d0aeda776" }
+oxc_parser = { git = "https://github.com/ohos-rs/oxc", rev = "1526b2c932d211c25d85dd172018889d0aeda776" }
+oxc_semantic = { git = "https://github.com/ohos-rs/oxc", rev = "1526b2c932d211c25d85dd172018889d0aeda776", features = ["jsdoc"] }
+oxc_span = { git = "https://github.com/ohos-rs/oxc", rev = "1526b2c932d211c25d85dd172018889d0aeda776" }
+oxc_sourcemap = "10.0.0"
+oxc_str = { git = "https://github.com/ohos-rs/oxc", rev = "1526b2c932d211c25d85dd172018889d0aeda776" }
+oxc_ast_visit = { git = "https://github.com/ohos-rs/oxc", rev = "1526b2c932d211c25d85dd172018889d0aeda776" }
+oxc_syntax = { git = "https://github.com/ohos-rs/oxc", rev = "1526b2c932d211c25d85dd172018889d0aeda776" }
+oxc_transformer = { git = "https://github.com/ohos-rs/oxc", rev = "1526b2c932d211c25d85dd172018889d0aeda776" }
+oxc_isolated_declarations = { git = "https://github.com/ohos-rs/oxc", rev = "1526b2c932d211c25d85dd172018889d0aeda776" }
+oxc_codegen = { git = "https://github.com/ohos-rs/oxc", rev = "1526b2c932d211c25d85dd172018889d0aeda776" }
+oxc_diagnostics = { git = "https://github.com/ohos-rs/oxc", rev = "1526b2c932d211c25d85dd172018889d0aeda776" }
+oxc_minifier = { git = "https://github.com/ohos-rs/oxc", rev = "1526b2c932d211c25d85dd172018889d0aeda776" }
 oxc_resolver = "11.24.3"
 
 # Rolldown
-rolldown = { git = "https://github.com/ohos-rs/rolldown", rev = "4f27b5fe103e661090848aaaa4f7d3084bc2e49c", default-features = false, features = ["experimental"] }
-rolldown_common = { git = "https://github.com/ohos-rs/rolldown", rev = "4f27b5fe103e661090848aaaa4f7d3084bc2e49c" }
-rolldown_plugin = { git = "https://github.com/ohos-rs/rolldown", rev = "4f27b5fe103e661090848aaaa4f7d3084bc2e49c" }
-rolldown_sourcemap = { git = "https://github.com/ohos-rs/rolldown", rev = "4f27b5fe103e661090848aaaa4f7d3084bc2e49c" }
-rolldown_utils = { git = "https://github.com/ohos-rs/rolldown", rev = "4f27b5fe103e661090848aaaa4f7d3084bc2e49c" }
-rolldown_error = { git = "https://github.com/ohos-rs/rolldown", rev = "4f27b5fe103e661090848aaaa4f7d3084bc2e49c" }
-string_wizard = { git = "https://github.com/ohos-rs/rolldown", rev = "4f27b5fe103e661090848aaaa4f7d3084bc2e49c", features = ["sourcemap"] }
+rolldown = { git = "https://github.com/ohos-rs/rolldown", rev = "7ac5697bc917774005bdba4d6e90cd4a57bc105a", default-features = false, features = ["experimental"] }
+rolldown_common = { git = "https://github.com/ohos-rs/rolldown", rev = "7ac5697bc917774005bdba4d6e90cd4a57bc105a" }
+rolldown_plugin = { git = "https://github.com/ohos-rs/rolldown", rev = "7ac5697bc917774005bdba4d6e90cd4a57bc105a" }
+rolldown_sourcemap = { git = "https://github.com/ohos-rs/rolldown", rev = "7ac5697bc917774005bdba4d6e90cd4a57bc105a" }
+rolldown_utils = { git = "https://github.com/ohos-rs/rolldown", rev = "7ac5697bc917774005bdba4d6e90cd4a57bc105a" }
+rolldown_error = { git = "https://github.com/ohos-rs/rolldown", rev = "7ac5697bc917774005bdba4d6e90cd4a57bc105a" }
+string_wizard = { git = "https://github.com/ohos-rs/rolldown", rev = "7ac5697bc917774005bdba4d6e90cd4a57bc105a", features = ["sourcemap"] }
 
 # NAPI-RS (Node.js native addon bridge — used by packages/arkdown)
 napi = { version = "3.9.1", features = [

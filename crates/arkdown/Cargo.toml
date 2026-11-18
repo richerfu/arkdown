@@ -33,7 +33,7 @@ fs-err = { workspace = true }
 arcstr = { workspace = true }
 oxc_index = { workspace = true }
 rustc-hash = { workspace = true }
-# rolldown 1.0.3 — core bundling engine replaces the custom link/tree-shake/chunk-split/codegen stages.
+# rolldown 1.3.2 — core bundling engine replaces the custom link/tree-shake/chunk-split/codegen stages.
 # default-features = false skips NAPI bindings and Vite-specific plugins.
 # Workspace-level dependency metadata keeps rolldown versions centralized.
 rolldown           = { workspace = true }

@@ -56,7 +56,8 @@ release gates are recorded in
 ### Performance
 
 Measured on 2026-10-22 with an Apple M2 Pro (12 CPU cores, 16 GiB RAM), macOS 15.6.1,
-Node.js 22.23.2, Rust 1.99.0, and DevEco Studio 26.0.0.821 / HarmonyOS API 26. Builds use a
+Node.js 22.23.2, Rust 1.99.0, and DevEco Studio 26.0.0.821 / HarmonyOS API 26. Current
+builds use the Rust 1.100.0 toolchain pinned in `rust-toolchain.toml`. Builds use a
 release-mode native binding and produce a debug HAP with native debug symbols retained.
 
 | Implementation | After public clean | Unchanged-source rebuild | Peak tree RSS, cold / hot | Peak tree physical footprint, cold / hot |

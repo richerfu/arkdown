@@ -92,15 +92,18 @@ impl WrittenOutput {
     where
         I: IntoIterator<Item = (&'a str, &'a str, bool)>,
     {
-        let source_maps = source_maps
-            .into_iter()
-            .map(|(chunk_name, raw_map, emits_javascript)| ChunkSourceMap {
-                chunk_name,
-                generated_line_count: 0,
-                raw_map,
-                emits_javascript,
-            })
-            .collect::<Vec<_>>();
+        let mut collected = Vec::new();
+        for (chunk_name, raw_map, emits_javascript) in source_maps {
+            if Self::source_map_has_content(raw_map)? {
+                collected.push(ChunkSourceMap {
+                    chunk_name,
+                    generated_line_count: 0,
+                    raw_map,
+                    emits_javascript,
+                });
+            }
+        }
+        let source_maps = collected;
         if source_maps.is_empty() {
             return Ok(None);
         }
@@ -214,6 +217,7 @@ impl WrittenOutput {
 
         let mut files = Vec::new();
         let mut source_maps = Vec::new();
+        let mut skipped_empty_source_map = false;
 
         for chunk in chunk_graph.chunks.iter() {
             let filename = ChunkOutputFileName::new(&chunk.name).js_file_name();
@@ -225,27 +229,39 @@ impl WrittenOutput {
             files.push((chunk.name.clone(), path));
 
             if let Some(ref map) = chunk.source_map {
-                source_maps.push(ChunkSourceMap {
-                    chunk_name: chunk.name.as_str(),
-                    generated_line_count: chunk.code.lines().count(),
-                    raw_map: map.as_str(),
-                    emits_javascript: false,
-                });
+                if Self::source_map_has_content(map)? {
+                    source_maps.push(ChunkSourceMap {
+                        chunk_name: chunk.name.as_str(),
+                        generated_line_count: chunk.code.lines().count(),
+                        raw_map: map.as_str(),
+                        emits_javascript: false,
+                    });
+                } else {
+                    // A plugin that returns code without a map breaks Rolldown's
+                    // sourcemap chain (Rollup reports `SOURCEMAP_BROKEN`). The
+                    // resulting chunk map is valid but empty; skip it instead of
+                    // failing the build or writing a fake map.
+                    skipped_empty_source_map = true;
+                }
             }
         }
 
-        let source_maps_path = if !source_maps.is_empty() {
-            let path = Self::source_maps_path(output_dir);
-            if let Some(opts) = source_map_opts {
-                Self::write_hvigor_source_maps(&path, &source_maps, opts)?;
+        // Concatenated maps use chunk offsets, so an empty chunk map cannot be
+        // dropped without shifting every following section. Omit the file
+        // rather than emitting misaligned sections.
+        let source_maps_path =
+            if source_maps.is_empty() || (skipped_empty_source_map && source_map_opts.is_none()) {
+                None
             } else {
-                let content = Self::source_maps_map_content(&source_maps)?;
-                fs_err::write(&path, content).map_err(ArkdownError::Io)?;
-            }
-            Some(path)
-        } else {
-            None
-        };
+                let path = Self::source_maps_path(output_dir);
+                if let Some(opts) = source_map_opts {
+                    Self::write_hvigor_source_maps(&path, &source_maps, opts)?;
+                } else {
+                    let content = Self::source_maps_map_content(&source_maps)?;
+                    fs_err::write(&path, content).map_err(ArkdownError::Io)?;
+                }
+                Some(path)
+            };
 
         Ok(WrittenOutput {
             chunk_files: files,
@@ -253,7 +269,7 @@ impl WrittenOutput {
         })
     }
 
-    fn validate_real_source_map(map: &str) -> Result<serde_json::Value, ArkdownError> {
+    fn parse_source_map_object(map: &str) -> Result<serde_json::Value, ArkdownError> {
         let value: serde_json::Value = serde_json::from_str(map).map_err(|e| {
             ArkdownError::Bundler(format!(
                 "source map is not valid JSON; keep sourceMaps.map unwritten until real map wiring is available: {e}"
@@ -269,7 +285,10 @@ impl WrittenOutput {
                 "refusing to emit fake empty sourceMaps.map".to_string(),
             ));
         }
+        Ok(value)
+    }
 
+    fn value_has_source_map_content(value: &serde_json::Value) -> bool {
         let has_sources = value
             .get("sources")
             .and_then(|sources| sources.as_array())
@@ -278,13 +297,25 @@ impl WrittenOutput {
             .get("mappings")
             .and_then(|mappings| mappings.as_str())
             .is_some_and(|mappings| !mappings.is_empty());
-        if !has_sources && !has_mappings {
+        has_sources || has_mappings
+    }
+
+    /// Returns `false` for maps that are structurally valid but carry no
+    /// sources or mappings (e.g. a broken plugin sourcemap chain).
+    fn source_map_has_content(map: &str) -> Result<bool, ArkdownError> {
+        Ok(Self::value_has_source_map_content(
+            &Self::parse_source_map_object(map)?,
+        ))
+    }
+
+    fn validate_real_source_map(map: &str) -> Result<serde_json::Value, ArkdownError> {
+        let value = Self::parse_source_map_object(map)?;
+        if !Self::value_has_source_map_content(&value) {
             return Err(ArkdownError::Bundler(
                 "refusing to emit sourceMaps.map without compile input sources or mappings"
                     .to_string(),
             ));
         }
-
         Ok(value)
     }
 
@@ -385,7 +416,9 @@ impl WrittenOutput {
         let sources = decoded
             .get_sources()
             .enumerate()
-            .map(|(source_id, source)| (source_id as u32, source.to_string()))
+            .filter_map(|(source_id, source)| {
+                source.map(|source| (source_id as u32, source.to_string()))
+            })
             .collect::<Vec<_>>();
         if sources.is_empty() {
             return Self::fallback_hvigor_source_map_entries(source_map);
@@ -1600,6 +1633,27 @@ mod tests {
         let err = WrittenOutput::write_output(&chunk_graph, &output_dir, None)
             .expect_err("empty source map rejected");
         assert!(err.to_string().contains("fake empty sourceMaps.map"));
+
+        let _ = fs_err::remove_dir_all(output_dir);
+    }
+
+    #[test]
+    fn skips_empty_source_map_from_broken_plugin_chain() {
+        let output_dir = temp_output_dir("skipped-empty-source-map");
+        let chunk_graph = graph(vec![ArkChunk {
+            name: "Index".to_string(),
+            code: "console.log('ok');".to_string(),
+            source_map: Some(
+                r#"{"version":3,"sources":[],"sourcesContent":[],"names":[],"mappings":""}"#
+                    .to_string(),
+            ),
+            ..ArkChunk::default()
+        }]);
+
+        let written = WrittenOutput::write_output(&chunk_graph, &output_dir, None)
+            .expect("empty plugin-chain map must not fail the build");
+        assert_eq!(written.source_maps_path, None);
+        assert_eq!(written.chunk_files.len(), 1);
 
         let _ = fs_err::remove_dir_all(output_dir);
     }
