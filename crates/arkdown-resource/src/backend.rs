@@ -1,3 +1,4 @@
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -27,6 +28,87 @@ impl SdkRestoolBackend {
     pub fn new(restool_path: PathBuf) -> Self {
         Self { restool_path }
     }
+
+    fn configure_library_search_path(&self, command: &mut Command) {
+        let search_dirs = restool_library_search_dirs(&self.restool_path);
+        if search_dirs.is_empty() {
+            return;
+        }
+        let variable = restool_library_env_var();
+        let existing = std::env::var_os(variable);
+        if let Some(joined) = prepend_library_search_paths(&search_dirs, existing.as_deref()) {
+            command.env(variable, joined);
+        }
+    }
+}
+
+fn restool_library_env_var() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "DYLD_LIBRARY_PATH"
+    } else if cfg!(windows) {
+        "PATH"
+    } else {
+        "LD_LIBRARY_PATH"
+    }
+}
+
+fn restool_library_search_dirs(restool_path: &Path) -> Vec<PathBuf> {
+    let Some(toolchains_dir) = restool_path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+    else {
+        return Vec::new();
+    };
+
+    let mut candidates = Vec::with_capacity(3);
+    if let Some(component_dir) = toolchains_dir
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+    {
+        // `libimage_transcoder_shared` links `liblz4_shared` from `openharmony/previewer/common/bin`.
+        candidates.push(component_dir.join("previewer").join("common").join("bin"));
+        if let Some(sdk_root) = component_dir
+            .parent()
+            .filter(|dir| !dir.as_os_str().is_empty())
+        {
+            candidates.push(sdk_root.join("hms").join("toolchains").join("lib"));
+        }
+    }
+    candidates.push(toolchains_dir.join("lib"));
+
+    let mut dirs = Vec::new();
+    for dir in candidates {
+        if dir.is_dir() && !dirs.iter().any(|existing| existing == &dir) {
+            dirs.push(dir);
+        }
+    }
+    dirs
+}
+
+fn prepend_library_search_paths(prepend: &[PathBuf], existing: Option<&OsStr>) -> Option<OsString> {
+    if prepend.is_empty() {
+        return None;
+    }
+
+    let mut merged = Vec::new();
+    for dir in prepend {
+        if !dir.as_os_str().is_empty() && !merged.iter().any(|seen| seen == dir) {
+            merged.push(dir.clone());
+        }
+    }
+    if merged.is_empty() {
+        return None;
+    }
+
+    if let Some(existing) = existing {
+        for dir in std::env::split_paths(existing) {
+            if !dir.as_os_str().is_empty() && !merged.iter().any(|seen| seen == &dir) {
+                merged.push(dir);
+            }
+        }
+    }
+
+    std::env::join_paths(merged).ok()
 }
 
 impl ResourceBackend for SdkRestoolBackend {
@@ -47,6 +129,7 @@ impl ResourceBackend for SdkRestoolBackend {
         let res_config = output_dir.join("resConfig.json");
 
         let mut command = Command::new(&self.restool_path);
+        self.configure_library_search_path(&mut command);
         if res_config.exists() {
             RestoolConfigFile::new(&res_config).prepare_output_paths()?;
             IdDefinedSeedFile::new(&ids_defined).ensure()?;
@@ -396,5 +479,142 @@ mod runtime_type_tests {
         for (key, runtime_type) in expected {
             assert_eq!(classifier.runtime_type_from_key(key), runtime_type, "{key}");
         }
+    }
+}
+
+#[cfg(test)]
+mod restool_library_path_tests {
+    use std::ffi::OsStr;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    use super::{
+        prepend_library_search_paths, restool_library_env_var, restool_library_search_dirs,
+        SdkRestoolBackend,
+    };
+
+    #[test]
+    fn discovers_existing_sdk_library_dirs_in_priority_order() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sdk_default = temp.path().join("default");
+        let toolchains = sdk_default.join("openharmony").join("toolchains");
+        let previewer_bin = sdk_default
+            .join("openharmony")
+            .join("previewer")
+            .join("common")
+            .join("bin");
+        let hms_lib = sdk_default.join("hms").join("toolchains").join("lib");
+        let toolchains_lib = toolchains.join("lib");
+
+        fs_err::create_dir_all(&toolchains).expect("create toolchains");
+        fs_err::create_dir_all(&previewer_bin).expect("create previewer bin");
+        fs_err::create_dir_all(&hms_lib).expect("create hms lib");
+        fs_err::create_dir_all(&toolchains_lib).expect("create toolchains lib");
+
+        let restool_path = toolchains.join("restool");
+        assert_eq!(
+            restool_library_search_dirs(&restool_path),
+            vec![previewer_bin, hms_lib, toolchains_lib]
+        );
+    }
+
+    #[test]
+    fn omits_missing_sdk_library_dirs_and_handles_bare_executable_name() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sdk_default = temp.path().join("default");
+        let toolchains = sdk_default.join("openharmony").join("toolchains");
+        let previewer_bin = sdk_default
+            .join("openharmony")
+            .join("previewer")
+            .join("common")
+            .join("bin");
+
+        fs_err::create_dir_all(&toolchains).expect("create toolchains");
+        fs_err::create_dir_all(&previewer_bin).expect("create previewer bin");
+
+        let restool_path = toolchains.join("restool");
+        assert_eq!(
+            restool_library_search_dirs(&restool_path),
+            vec![previewer_bin]
+        );
+        assert!(restool_library_search_dirs(Path::new("restool")).is_empty());
+    }
+
+    #[test]
+    fn prepends_sdk_library_dirs_while_preserving_and_deduplicating_existing_paths() {
+        let dir_a = PathBuf::from("/sdk/openharmony/previewer/common/bin");
+        let dir_b = PathBuf::from("/sdk/hms/toolchains/lib");
+        let dir_c = PathBuf::from("/usr/local/lib");
+
+        assert_eq!(
+            prepend_library_search_paths(&[], Some(OsStr::new("/usr/local/lib"))),
+            None
+        );
+
+        let joined_fresh =
+            prepend_library_search_paths(&[dir_a.clone(), dir_b.clone()], None).expect("joined");
+        assert_eq!(
+            std::env::split_paths(&joined_fresh).collect::<Vec<_>>(),
+            vec![dir_a.clone(), dir_b.clone()]
+        );
+
+        let existing =
+            std::env::join_paths([dir_b.clone(), dir_c.clone(), dir_a.clone()]).expect("existing");
+        let joined_merged = prepend_library_search_paths(
+            &[dir_a.clone(), dir_b.clone(), dir_a.clone()],
+            Some(existing.as_os_str()),
+        )
+        .expect("merged");
+        assert_eq!(
+            std::env::split_paths(&joined_merged).collect::<Vec<_>>(),
+            vec![dir_a.clone(), dir_b, dir_c]
+        );
+
+        let joined_empty_existing =
+            prepend_library_search_paths(std::slice::from_ref(&dir_a), Some(OsStr::new("")))
+                .expect("empty existing");
+        assert_eq!(
+            std::env::split_paths(&joined_empty_existing).collect::<Vec<_>>(),
+            vec![dir_a]
+        );
+    }
+
+    #[test]
+    fn configure_library_search_path_sets_command_env_only_when_dirs_exist() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let sdk_default = temp.path().join("default");
+        let toolchains = sdk_default.join("openharmony").join("toolchains");
+        let previewer_bin = sdk_default
+            .join("openharmony")
+            .join("previewer")
+            .join("common")
+            .join("bin");
+        let hms_lib = sdk_default.join("hms").join("toolchains").join("lib");
+
+        fs_err::create_dir_all(&toolchains).expect("create toolchains");
+        fs_err::create_dir_all(&previewer_bin).expect("create previewer bin");
+        fs_err::create_dir_all(&hms_lib).expect("create hms lib");
+
+        let restool_path = toolchains.join("restool");
+        let backend = SdkRestoolBackend::new(restool_path.clone());
+        let mut command = Command::new(&restool_path);
+        backend.configure_library_search_path(&mut command);
+
+        let env_var = OsStr::new(restool_library_env_var());
+        let env_value = command
+            .get_envs()
+            .find_map(|(key, value)| (key == env_var).then_some(value))
+            .flatten()
+            .expect("library search path env var should be configured");
+        let configured_paths: Vec<PathBuf> = std::env::split_paths(env_value).collect();
+        assert_eq!(configured_paths[0], previewer_bin);
+        assert_eq!(configured_paths[1], hms_lib);
+
+        let empty_temp = tempfile::tempdir().expect("empty tempdir");
+        let isolated_restool = empty_temp.path().join("restool");
+        let isolated_backend = SdkRestoolBackend::new(isolated_restool.clone());
+        let mut isolated_command = Command::new(&isolated_restool);
+        isolated_backend.configure_library_search_path(&mut isolated_command);
+        assert!(isolated_command.get_envs().all(|(key, _)| key != env_var));
     }
 }
